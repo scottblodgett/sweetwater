@@ -15,8 +15,8 @@ What gets built is the part that does not exist yet: **one orchestrator running 
 |                |                                                                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Repo           | `scott-jasper/sweetwater`, local `C:\temp\sweetwater`. New repo; MCP-Farm untouched.                                                                         |
-| Structure      | The canonical layout from your diagram, mapped 1:1. `requirements.txt`, `src/{agent,tools,models,prompts,utils,api}`, `tests/`, `data/`, `logs/`, `main.py`. |
-| Language       | Python 3.12. Next.js for the window only.                                                                                                                    |
+| Structure      | The canonical layout from your diagram, mapped 1:1. `requirements.txt`, `pyproject.toml`, `src/{agent,tools,models,prompts,utils,api}`, `tests/`, `data/`, `logs/`, `main.py`. |
+| Language       | Python **3.11.9**. 3.12 is not installed on this machine and 3.14 breaks native wheels. Next.js for the window only.                                          |
 | Agents         | Orchestrator + **five**: `water_feed`, `herd_health`, `infrastructure`, `compliance`, `chaos`.                                                               |
 | Framework      | **LangGraph Python**, hand-wired supervisor + `create_react_agent` workers.                                                                                  |
 | Tools          | The **19 existing tools** from the deployed MCP Function URL, per-agent allowlist enforced in code.                                                          |
@@ -24,13 +24,13 @@ What gets built is the part that does not exist yet: **one orchestrator running 
 | Models         | **Local (`gemma4:e4b` via Ollama) by default, Opus on escalation.** Build Opus-only, then move jobs down with a rail.                                        |
 | Logging        | structlog, JSON Lines, three streams: `tick` / `agent` / `audit`. Wired at M0, not bolted on.                                                                |
 | Agent state    | Existing Supabase project, one **new** schema `sw_ops`. Nothing else touches it.                                                                             |
-| How you run it | **Local venv first, Docker last.** `python main.py` against the live APIs and Supabase. No containers needed until M9.                                       |
+| How you run it | **Local venv first, Docker last.** `python main.py` against the live APIs and Supabase. No containers needed until M10.                                       |
 
 ---
 
 ### Run local first, dockerize last
 
-Nothing in M0 through M8 needs a container. The upstreams are already deployed, so there is no local API stack to stand up, and `sw_ops` lives in Supabase, so there is no local database to run either.
+Nothing in M0 through M9 needs a container. The upstreams are already deployed, so there is no local API stack to stand up, and `sw_ops` lives in Supabase, so there is no local database to run either. M9 is the window, and it deploys to Vercel.
 
 ```bash
 python -m venv .venv && .venv/Scripts/activate && pip install -r requirements.txt -r requirements-dev.txt
@@ -38,76 +38,91 @@ cp .env.example .env      # fill in MCP_URL, the four API urls, DATABASE_URL, AN
 python main.py            # the tick loop starts talking to the live ranch
 ```
 
-`docker-compose.yml` sits in the tree from M0 as a placeholder, and gets filled in at **M9** once the thing works. Dockerizing a moving target is how you end up debugging a container when the bug is in your prompt.
+`docker-compose.yml` sits in the tree from M0 as a placeholder, and gets filled in at **M10** once the thing works. Dockerizing a moving target is how you end up debugging a container when the bug is in your prompt.
 
 **One exception:** the `sw_ops` store tests need a real Postgres and must never point at Supabase, same rule as `farm_systems_test`. They use your existing local Postgres install with a `sw_ops_test` schema. Still no Docker.
 
 ## Structure, mapped to your diagram
 
 ```
-sweetwater/
-├── README.md
-├── CLAUDE.md                     lean: orientation, the one rule, commands
-├── requirements.txt              runtime pins
-├── requirements-dev.txt          pytest, ruff, mypy
-├── .env / .env.example           MCP_URL, *_API urls, DATABASE_URL, ANTHROPIC_API_KEY, OLLAMA_*, CHAOS_*, LOG_*
-├── .gitignore
-├── docker-compose.yml            placeholder until M9; you do not need it to build this
-├── .claude/rules/                path-globbed rules for anything too long for a CLAUDE.md
+sweetwater/                                lands at
+├── README.md                       M0
+├── CLAUDE.md                       M0    lean: orientation, the one rule, commands
+├── pyproject.toml                  M0    ruff, mypy, and pytest config in one file. line-length 140, E501 ignored
+├── requirements.txt                M0    runtime pins
+├── requirements-dev.txt            M0    pytest, ruff, mypy
+├── .env / .env.example             M0    MCP_URL, *_API urls, DATABASE_URL, ANTHROPIC_API_KEY, OLLAMA_*, CHAOS_*, LOG_*
+├── .gitignore                      M0
+├── docker-compose.yml             (M10)  placeholder; you do not need it to build this
+├── alembic.ini                     M1    points at alembic/; the URL comes from env, never from this file
+├── alembic/
+│   ├── env.py                      M1    resolves the target through the same resolver main.py uses
+│   └── versions/0001_*.py          M1    creates the sw_ops schema and incidents
+├── .claude/rules/                  M0    path-globbed rules for anything too long for a CLAUDE.md
 ├── src/
 │   ├── agent/
-│   │   ├── CLAUDE.md             the graph, the tick contract, the escalation tiers
-│   │   ├── agent.py              the LangGraph supervisor + the five worker factories
-│   │   ├── executor.py           THE CONTINUOUS LOOP: tick, cadence, backoff, shutdown
-│   │   ├── state.py              RanchState (LangGraph), Finding, Incident dataclasses
-│   │   └── memory.py             sw_ops persistence: incidents, chaos events, checkpointer
+│   │   ├── CLAUDE.md               M0    the graph, the tick contract, the escalation tiers
+│   │   ├── agent.py                M1    the routing table; the LangGraph supervisor + the five worker factories (M3)
+│   │   ├── executor.py             M1    THE CONTINUOUS LOOP: the tick body; cadence, backoff, shutdown (M4)
+│   │   ├── state.py                M1    RanchState (LangGraph), Finding, Incident dataclasses
+│   │   └── memory.py               M1    sw_ops persistence: incidents; chaos events (M5); checkpointer (M6)
 │   ├── tools/
-│   │   ├── CLAUDE.md             MCP is frozen upstream; allowlist + severity-ownership rules
-│   │   ├── mcp_client.py         connect to the deployed Function URL; read ranch://sensors/map
-│   │   ├── allowlists.py         the five tool slices, enforced in code
-│   │   ├── sensors.py            the free-pass sweep (direct httpx, bounded concurrency)
-│   │   ├── evidence.py           assemble the packet in CODE (see Model routing)
-│   │   ├── triage.py             per-type thresholds; severity is CODE's, not the model's
-│   │   └── chaos.py              the fifth agent's hands: inject, heal, expire
+│   │   ├── CLAUDE.md               M0    MCP is frozen upstream; allowlist + severity-ownership rules
+│   │   ├── mcp_client.py           M0    connect to the deployed Function URL; read ranch://sensors/map
+│   │   ├── allowlists.py          (M3)   the five tool slices, enforced in code
+│   │   ├── sensors.py              M1    the free-pass sweep (direct httpx, bounded concurrency)
+│   │   ├── evidence.py            (M2)   assemble the packet in CODE (see Model routing)
+│   │   ├── triage.py               M1    per-type thresholds; severity is CODE's, not the model's
+│   │   └── chaos.py               (M5)   the fifth agent's hands: inject, heal, expire
 │   ├── models/
-│   │   ├── CLAUDE.md             the Ollama gotchas; when thinking may be turned off
-│   │   ├── llm_client.py         provider registry + per-call reasoning_effort + usage receipts
-│   │   ├── routing.py            job -> tier -> model, and the escalation predicate
-│   │   └── embeddings.py         SOP retrieval seam (stub in V1, see note)
+│   │   ├── CLAUDE.md               M0    the Ollama gotchas; when thinking may be turned off
+│   │   ├── llm_client.py          (M2)   provider registry + per-call reasoning_effort + usage receipts
+│   │   ├── routing.py             (M7)   job -> tier -> model, and the escalation predicate
+│   │   └── embeddings.py           --    SOP retrieval seam; stays a seam in V1, see the note below
 │   ├── prompts/
-│   │   ├── system_prompts.py     shared rules: severity is not yours, cite your SOP, no invented premises
-│   │   └── agent_prompts.py      the five briefs (a sub-agent inherits nothing)
+│   │   ├── system_prompts.py      (M2)   shared rules: severity is not yours, cite your SOP, no invented premises
+│   │   └── agent_prompts.py       (M3)   the five briefs (a sub-agent inherits nothing)
 │   ├── utils/
-│   │   ├── helpers.py
-│   │   ├── logger.py             structlog: three streams, JSON to file, pretty to console
-│   │   └── config.py             every upstream from env, no hardcoded endpoints
+│   │   ├── helpers.py              M0
+│   │   ├── logger.py               M0    structlog: three streams, JSON to file, pretty to console
+│   │   └── config.py               M0    every upstream from env, no hardcoded endpoints
 │   └── api/
-│       ├── CLAUDE.md             envelope + error conventions
-│       ├── routes.py             FastAPI: /ops/incidents, /ops/report, /ops/stream, /ops/gate
-│       └── schemas.py            Pydantic: Finding, Incident, ShiftReport, GateDecision, ChaosEvent
+│       ├── CLAUDE.md               M0    envelope + error conventions
+│       ├── routes.py              (M8)   FastAPI: /ops/incidents, /ops/report, /ops/stream, /ops/gate
+│       └── schemas.py             (M8)   Pydantic: Finding, Incident, ShiftReport, GateDecision, ChaosEvent
 ├── tests/
-│   ├── CLAUDE.md                 never Supabase; sw_ops_test schema; what each rail proves
-│   ├── test_agent.py             allowlists counted, routing, no-brief flail, gate resume
-│   ├── test_tools.py             triage truth table, sweep concurrency, chaos determinism
-│   └── test_api.py               envelope shape, gate endpoints
+│   ├── CLAUDE.md                   M0    never Supabase; sw_ops_test schema; what each rail proves
+│   ├── conftest.py                 M1    the sw_ops_test fixtures, and the skip when no local Postgres answers
+│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), no-brief flail (M3), gate resume (M6)
+│   ├── test_tools.py               M1    triage truth table, sweep concurrency; chaos determinism (M5)
+│   └── test_api.py                (M8)   envelope shape, gate endpoints
 ├── data/
-│   ├── examples.json             chaos scenario catalog + golden fixtures
-│   └── knowledge_base/           the SOPs, one file per sensing world
+│   ├── examples.json              (M5)   chaos scenario catalog + golden fixtures
+│   └── knowledge_base/            (M2)   the SOPs, one file per sensing world
 ├── docs/
-│   ├── sweetwater-ranch.md       the scenario canon, copied from MCP-Farm
-│   ├── architecture.md           the diagram, the free/expensive split, the tiers
-│   ├── model-routing.md          the tier table + the measurement log (what moved down, when, proof)
-│   ├── logging.md                the schema for the three log streams
-│   ├── cookbook.md               the lessons, as prose, ordered by the pain
-│   ├── JOURNEY.md                what actually happened, and where it diverged
-│   └── decisions/                numbered ADRs, short
+│   ├── Plan.md                     M1    this file. Tracked in git at the M1 boundary; the tree above is the authority
+│   ├── STATE.md                    M0    the session-start briefing, refreshed at every boundary
+│   ├── sweetwater-ranch.md         M0    the scenario canon, copied from MCP-Farm
+│   ├── architecture.md             M0    the diagram, the free/expensive split, the tiers
+│   ├── model-routing.md            M0    the tier table + the measurement log (what moved down, when, proof)
+│   ├── logging.md                  M0    the schema for the three log streams
+│   ├── cookbook.md                 M0    the lessons, as prose, ordered by the pain
+│   ├── JOURNEY.md                  M0    what actually happened, and where it diverged
+│   └── decisions/                  M0    numbered ADRs, short
 ├── logs/
-│   ├── .gitkeep                  *.jsonl gitignored
-│   ├── tick.jsonl                one line per tick        (the heartbeat)
-│   ├── agent.jsonl               one line per model call  (the instrument)
-│   └── audit.jsonl               one line per side effect (the receipt)
-└── main.py                       `python main.py` runs the loop; `--api`, `--handshake`, `--once`
+│   ├── .gitkeep                    M0    *.jsonl gitignored
+│   ├── tick.jsonl                  M0    one line per tick        (the heartbeat)
+│   ├── agent.jsonl                 M0    one line per model call  (the instrument), first line at M2
+│   └── audit.jsonl                 M0    one line per side effect (the receipt), first line at M6
+└── main.py                         M0    `python main.py` runs the loop; `--api`, `--handshake`, `--once`
 ```
+
+**The marker column is "lands at," and it is load-bearing.** A bare `M1` means the file is
+live as of that milestone. A parenthesized `(M3)` means it sits in the tree as a
+docstring-only placeholder naming the milestone that fills it, so an **unbuilt leaf reads as
+unbuilt rather than as a hole**, which is exactly the ambiguity an empty `prompts/` produced
+once. `--` means it stays a seam in V1. A trailing `(M4)` inside a description marks the part
+of a live file that is still to come. `__init__.py` files are omitted as noise.
 
 ### Nested CLAUDE.md, and why
 
@@ -285,7 +300,7 @@ Do **not** build the cascade at M2. Build Tier 2 only, log `model`, `tokens`, `l
 
 **Format:** JSON Lines, one object per line, UTC ISO 8601 timestamps (`2026-09-10T14:30:00.000Z`), and `run_id` plus `tick` on **every** line in all three files so the three streams join on a grep. Console in dev gets `ConsoleRenderer`; files always get JSON regardless of environment.
 
-### `logs/tick.jsonl` — the heartbeat, one line per tick
+### `logs/tick.jsonl` - the heartbeat, one line per tick
 
 ```jsonc
 {
@@ -311,7 +326,7 @@ Do **not** build the cascade at M2. Build Tier 2 only, log `model`, `tokens`, `l
 
 This is the II.0 gauge promoted from a teaching instrument to a permanent one. One line per tick means the cost curve is a single `jq` away, which is the only way you will notice it stop being flat. **Written at tick end, always, including when the tick failed** (with `error` and `failed_stage`) - a tick that produces no line is indistinguishable from a dead loop.
 
-### `logs/agent.jsonl` — the instrument, one line per model call
+### `logs/agent.jsonl` - the instrument, one line per model call
 
 ```jsonc
 {
@@ -336,7 +351,7 @@ This is the II.0 gauge promoted from a teaching instrument to a permanent one. O
 
 **`finish_reason` is the single most valuable field in this whole scheme** and it is not negotiable. `"length"` means the model never got to answer, `"stop"` means it answered badly. One is a config bug and one is a model-selection decision, they present identically in the output text, and telling them apart once cost a real investigation. **Written immediately on return, before validation runs**, so a response that fails a check still leaves a receipt of what was actually returned.
 
-### `logs/audit.jsonl` — the receipt, one line per side effect
+### `logs/audit.jsonl` - the receipt, one line per side effect
 
 ```jsonc
 { "ts":"…","run_id":"…","tick":42,"audit_id":"…","phase":"proposed",
@@ -359,7 +374,7 @@ This is the II.0 gauge promoted from a teaching instrument to a permanent one. O
 
 ## Milestones
 
-Each ends runnable and verifiable. **M0 through M8 need no containers and no new AWS**, just a venv, the already-live endpoints, and an Anthropic key. I stop and report at every boundary.
+Each ends runnable and verifiable. **M0 through M9 need no containers and no new AWS**, just a venv, the already-live endpoints, an Anthropic key, and Vercel for the window. I stop and report at every boundary.
 
 **M0 Skeleton, logging, and a live handshake.** The full tree above including the nested `CLAUDE.md` files and the `docs/` skeleton, plus `requirements.txt`, `config.py`, `logger.py` with all three streams wired, and `mcp_client.py` connected to the deployed Function URL over Streamable HTTP. _Verify:_ `python main.py --handshake` prints exactly **19** tool names, `read_resource("ranch://sensors/map")` returns ~160 sensors across 32 locations, and the handshake itself writes a well-formed line to `tick.jsonl`. Logging lands first on purpose: every rung in Phase II was only legible because the instrument was built before the thing it measured.
 
@@ -399,7 +414,7 @@ Named so nothing gets quietly resurrected:
 ## Verification, end to end
 
 1. `pytest`, `ruff check`, `mypy --strict` all green.
-2. `python main.py` in a venv, then watch the log for 30 minutes. Ticks land, chaos fires and heals, incidents open and resolve. Only at M9 does this become `docker compose up`, and it must behave identically.
+2. `python main.py` in a venv, then watch the log for 30 minutes. Ticks land, chaos fires and heals, incidents open and resolve. Only at M10 does this become `docker compose up`, and it must behave identically.
 3. Read a shift report by eye. Right sensing world, real sensor, real reading, and would a hand on shift know what to do.
 4. Human gate by hand: let a tick want a care write, watch it block, kill the process, restart, reject, then approve.
 5. Replay determinism: same `CHAOS_SEED`, two runs, identical event sequence.
@@ -411,5 +426,5 @@ Named so nothing gets quietly resurrected:
 
 ## Open items
 
-- **Where this runs in production.** ECS is off the table. You build and run it in a venv, dockerize at M9, and decide the host after that. Lambda container image on a short EventBridge schedule is the cheap answer for a tick loop; a small always-on box is the honest answer for "constantly running." Worth deciding once M4 exists and you can see how long a tick actually takes.
+- **Where this runs in production.** ECS is off the table. You build and run it in a venv, dockerize at M10, and decide the host after that. Lambda container image on a short EventBridge schedule is the cheap answer for a tick loop; a small always-on box is the honest answer for "constantly running." Worth deciding once M4 exists and you can see how long a tick actually takes.
 - **Multi-tenancy.** "Stand up the next ranch in a morning" implies per-client isolation of `sw_ops`. Not in V1.

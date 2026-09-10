@@ -101,7 +101,104 @@ each boundary re-runs every command the docs claim works.
 
 ## M1 - The free pass
 
-_Not started._
+**2026-09-10. Done.**
+
+`catalog -> sweep -> triage -> reconcile -> route`. Five stages, zero model calls, 160
+sensors narrowed to roughly twenty findings before anything expensive can happen. Plus the
+real `sw_ops` store, Alembic, and the two rails that keep this repo out of the ranch's
+schemas.
+
+**M1 gate, all green:**
+
+| Check | Result |
+| --- | --- |
+| `pytest` | 132 passed |
+| `ruff check .` | clean |
+| `mypy src main.py` (strict) | clean, 28 files |
+| migration against Supabase | `sw_ops` created at `0001`, `alembic_version` **inside** `sw_ops`, not `public` |
+| `--once` against `sw_ops_test` and prod | 160 read, 0 failed, exit 0, exactly one `tick.jsonl` line per run |
+| `--once` twice in a row | run 2 reports `ongoing`, which is the whole reason the store is in this phase and not M4 |
+
+### The `-500` fault, and why the fix is a window rather than a case
+
+`docs/STATE.md` records one temperature sensor reading `-500` with `status: "online"`. The
+obvious fix is to special-case `-500`. That is a fix for exactly one sentinel, and the next
+one the upstream picks walks straight through it. So `triage.py` carries a **per-type
+physical-plausibility window** instead: a value outside what the instrument could physically
+report is a sensor fault, not a reading, whatever the number is. Same cost, catches the case
+that has not happened yet.
+
+### An M0 defect that only M1 could find
+
+**Foreign stdlib records skipped the structlog processor chain.** M0's logging looked
+correct because M0 only ever logged through structlog. M1 was the first phase to pull in
+libraries that log on their own, and `alembic` and `httpx` lines came out with no level, no
+timestamp, and no `run_id`. The three streams join on `run_id` and `tick`, so a line without
+them is not in the stream, it is beside it. Pinned the chain so foreign records go through
+the same processors.
+
+Worth the note because M0's gate was genuinely green: the defect needed a second library in
+the process before it could exist.
+
+### Reaching into the frozen upstream, and retracting it
+
+Writing the triage thresholds, the fastest way to get 13 types right looked like reading
+the deployed Sensor API's own generator in `C:\temp\MCP-Farm`. Did it, then retracted it.
+
+The clone is there and reading it feels like research, but a constant lifted out of another
+service's internals is a value **nothing in this repo can verify**, and it fails silently
+when the other side retunes it: the code keeps running and starts being wrong. The
+thresholds are derived from the ranch mission in `docs/sweetwater-ranch.md` and the observed
+distributions in `docs/STATE.md`, both of which live here and can be re-measured over the
+wire. Full entry as cookbook #5, and the rule is now sharpened in root `CLAUDE.md` and
+`docs/STATE.md`: **the contract is the tools and the REST surface, not that repo's source.**
+
+### The defect this phase caught in itself: the tree stopped matching the plan
+
+Found at the boundary, when Scott asked whether `docs/Plan.md` still described the repo. It
+did not, in four ways, none of which any test could see:
+
+| Plan says | M1 shipped |
+| --- | --- |
+| `src/agent/executor.py` holds the loop | `src/agent/tick.py` |
+| `src/agent/agent.py` holds the supervisor **and** routing | routing in its own `src/agent/routing.py` |
+| three test modules | seven |
+| eleven named leaves exist | absent, including the whole of `src/prompts/` |
+
+The `routing.py` one was the live grenade. `docs/Plan.md` also names
+`src/models/routing.py`, a completely different question (which model **tier** runs a job,
+not which **agent** owns a finding), which lands at M7. Two modules called `routing.py`
+doing unrelated work is a mis-import that type-checks. Folding the table into `agent.py`
+costs one rename now and would have cost an afternoon at M7.
+
+The absent leaves were the subtler half. An empty `src/prompts/` directory is
+indistinguishable from a forgotten one, and it read to Scott as a hole in the build rather
+than as M2 not having happened yet. Fixed both ways: eleven docstring-only placeholders,
+each naming the milestone that fills it and carrying the decision already made about it, and
+a **"lands at" marker column** on every line of the plan's tree, so unbuilt reads as unbuilt.
+No prompt text was drafted, because a brief written against an imagined evidence packet
+reads fine and grounds nothing.
+
+Renames done with `git mv` so the history survives, and the seven-into-two test merge
+verified by diffing the sorted set of collected test function names before and after: **89
+before, 89 after, identical set.** A merge that silently drops a rail is the one outcome
+that would have made the whole exercise negative.
+
+### And the process defect underneath it
+
+**M1's first commit did step 1 of the phase-close ritual and skipped step 2 entirely.** No
+`STATE.md`, no `JOURNEY.md`, no `cookbook.md`. So for one commit the session-start briefing
+told the next session that HEAD was `ab4d2ff`, that M1 was "not started," and that a
+cookbook entry it had promised was still coming.
+
+That is the same shape as M0's fourth defect one layer up: **a doc defect and a code defect
+have the same cause, and only the code one gets caught by a test.** M0 concluded from that
+"re-run every command the docs claim works." M1 extends it, because the drift here was not
+in a command, it was in a *diagram*, and no command would have caught it either. The
+structural fix is the marker column plus the placeholder files: they put the plan's claim
+about the tree where a reader trips over it, since a test never will.
+
+---
 
 ## M2 - One agent, Opus only
 
