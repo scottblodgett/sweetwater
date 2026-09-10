@@ -17,11 +17,13 @@ the caller, because attempts, budget, and deadline are the caller's to spend.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+from src.tools.chaos import ChaosEvent, active_overlay, apply_overlay
 from src.tools.mcp_client import McpUnavailableError, RanchMap, SensorRef, parse_ranch_map, ranch_session, read_ranch_map
 from src.utils.config import get_settings
 from src.utils.helpers import gather_bounded, upstream_client
@@ -63,8 +65,12 @@ class SweepError:
 
 @dataclass(frozen=True)
 class SweepResult:
+    #: `overlay_events` is how many chaos events were laid over these readings. Carried on
+    #: the result rather than hidden inside the sweep so a tick line can say the ranch was
+    #: being lied to, which is the difference between a demo and a mystery.
     readings: tuple[SensorReading, ...] = ()
     errors: tuple[SweepError, ...] = ()
+    overlay_events: int = 0
 
     @property
     def attempted(self) -> int:
@@ -172,16 +178,24 @@ async def read_sensor(client: httpx.AsyncClient, ref: SensorRef) -> SensorReadin
 # --------------------------------------------------------------------------- #
 # the sweep
 # --------------------------------------------------------------------------- #
-async def sweep(refs: tuple[SensorRef, ...] | list[SensorRef], *, limit: int | None = None) -> SweepResult:
-    """Read every sensor in `refs`, bounded by `SWEEP_CONCURRENCY`.
+async def sweep(refs: tuple[SensorRef, ...] | list[SensorRef], *, limit: int | None = None, overlay: Sequence[ChaosEvent] | None = None) -> SweepResult:
+    """Read every sensor in `refs`, bounded by `SWEEP_CONCURRENCY`, then apply chaos.
 
     Bounded, always. 160 unbounded requests against API Gateway is a wall of Lambda
     cold starts and reads to the other side as a load test rather than a monitoring
     sweep. The ceiling is a rail in `tests/`, not a suggestion.
 
-    Chaos does not appear here yet. At M5 the overlay in `sw_ops.chaos_events` is
-    applied to these honest readings before triage sees them, because the deployed
-    Sensor API stays truthful and this repo owns the lie in exactly one place.
+    **The chaos overlay is applied here, and this is the only place it is applied.** The
+    deployed Sensor API is stateless and synthesizes every reading in code, so a fault
+    cannot be written into it, and its own injector refuses to arm on Lambda on purpose so
+    deployed prod can never be faulted. That guard is correct and stays: the deployed API
+    stays truthful and this repo owns the lie, in one function, under test. Triage never
+    learns the difference, which is the point - a faulted ranch and a genuinely broken one
+    have to be indistinguishable from the monitor's side or the exercise proves nothing.
+
+    `overlay=None` loads the active events from `sw_ops`, which costs a boolean and no
+    connection when `CHAOS_ENABLED` is off. An explicit sequence (including an empty one)
+    is used as given, so a rail can hand in one event without a database.
     """
     settings = get_settings()
     ceiling = limit or settings.sweep_concurrency
@@ -206,4 +220,7 @@ async def sweep(refs: tuple[SensorRef, ...] | list[SensorRef], *, limit: int | N
 
     if errors:
         log.warning("sweep_partial", attempted=len(refs), failed=len(errors), categories=sorted({e.category for e in errors}))
-    return SweepResult(readings=tuple(readings), errors=tuple(errors))
+
+    events = await active_overlay() if overlay is None else overlay
+    faked = apply_overlay(readings, events)
+    return SweepResult(readings=faked, errors=tuple(errors), overlay_events=len(events))

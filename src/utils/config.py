@@ -44,10 +44,25 @@ class Settings(BaseSettings):
     tick_interval_seconds: int = 300
 
     # --- Chaos ----------------------------------------------------------------
-    chaos_enabled: bool = True
+    # Off by default, and that default is load-bearing rather than timid. An overlay
+    # firing underneath a cost measurement turns the measurement into noise, and a
+    # fixture that arms itself is a fixture nobody trusts. Chaos is switched on for a
+    # demo, deliberately, by a person who wants the ranch to break.
+    chaos_enabled: bool = False
     chaos_seed: int = 1
     chaos_allow_writes: bool = False
     chaos_animal_cohort: str = ""
+    # Ceiling on simultaneously active events. Without it, hour three of a demo is a
+    # ranch where everything is broken, which reads as a bug in the monitor rather than
+    # as a ranch in trouble. Healing is what makes the feed feel alive; a ceiling is what
+    # keeps there being something left to heal.
+    chaos_max_active: int = 6
+    # TTL in ticks rather than seconds, because a scenario's lifetime is meaningful in
+    # units of "how many times will the sweep see this" and a tick interval can change.
+    chaos_default_ttl_ticks: int = 3
+    # Deterministic cadence, not a fire probability. A probability is one more thing that
+    # drifts away from the seed the moment someone tunes it.
+    chaos_ticks_between_events: int = 1
 
     # --- Logging --------------------------------------------------------------
     log_level: str = "INFO"

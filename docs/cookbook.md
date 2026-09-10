@@ -370,6 +370,155 @@ if a join can legitimately return empty, log the count so zero is visible.
 
 ---
 
+## 16. A mock answers whatever host you point it at
+
+**Pain.** Chaos wrote animal events with `PATCH /animals/:id` and
+`POST /animals/:id/observations`. Both were sent to `CARE_API`. Twelve rails passed,
+including one asserting the exact request body. `/animals` is on the **Farm API**, and the
+`PATCH` had never worked.
+
+**Why.** `respx` intercepts by pattern, so a route registered on the base URL the code
+happens to use always matches. **A wrong base URL and a right base URL are the same test.**
+The suite could not have caught this, and `src/tools/CLAUDE.md` had warned about this exact
+base-URL confusion since M2.
+
+**Fix.** Two clients, and a rail that mounts `PATCH` on `https://farm.test` and `POST` on
+`https://care.test`, with each route registered on one host only. Collapsing them back now
+fails on an unmatched request rather than passing.
+
+**Lesson.** When a mock is configured from the same constant as the code under test, the
+constant is untested by construction. **Mount each service's routes on a different host in
+the rail, so the topology is asserted and not assumed.** Any HTTP mock has this property;
+it is not a `respx` quirk. Related: #4, #8, #15, all cases of a check that cannot fail.
+
+**Found:** M5, by a live probe after the suite was already green.
+
+---
+
+## 17. Learning a frozen upstream's contract from its 422s
+
+**Pain.** The animal observation body needed four fields and the code sent three, one of
+them misspelled (`notes` for `note`) and one invented (`observedBy`, accepted and silently
+dropped). The upstream repo is frozen and reading its source is forbidden, and the deployed
+service ships no schema document.
+
+**Fix.** **Send a deliberately invalid body to a nonexistent id and read the error.** A 422
+from a validating API names the field and enumerates the enum, and a nonexistent id means
+nothing real can be mutated even if a body turns out to be valid. Five probes produced the
+whole contract: two required fields that were missing, one field name, and three enums.
+
+**Lesson.** A validation error is free documentation, and it is documentation of the
+**deployed** contract rather than of some repo's `main` branch. Then pin what you learned:
+all three enums are now validated in `parse_catalog` at load, so a typo is a load-time error
+instead of a 422 mid-demo.
+
+**The caveat, learned the hard way.** A ghost id protects against mutating something real;
+it does **not** protect against creating something. The fifth probe body was valid and
+returned **201**, creating an orphan observation against an animal that does not exist. The
+upstream is append-only, so it cannot be deleted (see `docs/JOURNEY.md`, M5). **Probe with
+bodies you are confident are invalid, and stop the moment one succeeds.**
+
+**Found:** M5, learning the write path without reading the frozen upstream.
+
+---
+
+## 18. Two worktrees, one test database
+
+**Pain.** `sw_ops_test` lost a table mid-session and its alembic stamp went **backwards**
+from `0002` to `0001`. Nothing in the worktree had run a downgrade. Twenty minutes went into
+hunting a bug that did not exist.
+
+**Why.** Two parallel sessions, two git worktrees, **one** local Postgres and one
+`sw_ops_test` schema. `conftest.py` drops that schema `CASCADE` and re-migrates it with
+`alembic upgrade head` from **its own worktree's** `alembic/` directory. The other branch had
+no `0002`, so its test run rebuilt the schema without the table this branch depends on.
+
+**Fix.** Nothing, structurally: each suite repairs the schema on its next run, so both stay
+green in isolation. What is needed is the knowledge that concurrent `pytest` runs across
+worktrees are a cross-session flake with **no local cause**.
+
+**Lesson.** A session-scoped fixture that drops a shared schema is safe exactly as long as
+one process at a time uses it, and a worktree does not isolate a database. If two agents are
+going to build against one Postgres, the schema name is the thing that needs to be per
+worktree, not the checkout. First suspect for any impossible-looking DB state: the other
+session.
+
+**Found:** M5's phase close, while trying to tidy up leftover rows.
+
+---
+
+## 19. An idempotent insert makes a demo replay a no-op
+
+**Pain.** `chaos inject --tick 2 --seed 1` offered four events and inserted three. No error,
+one log line, and the storm front was quietly missing a sensor.
+
+**Why.** Event ids are derived from seed, tick, and index, so they are **stable by
+construction** across replays, which is the property that makes a seeded demo reproducible.
+The insert is `ON CONFLICT DO NOTHING` with no conflict target, so it skips on any unique
+violation. A row from an earlier run of the same seed already held that id, and it was
+`expired` rather than active, so the partial index on active events did not apply and the
+primary key did.
+
+**Fix.** Nothing in the code. The dedup is logged with a count and a hint naming both
+causes, which is how it was diagnosed in one line.
+
+**Lesson.** **Idempotence and replayability pull against each other.** A stable id means
+running the same seed twice is a no-op, not a re-run, so re-driving a demo from the top means
+truncating the table first. Both behaviours are correct; the failure mode is expecting the
+other one. Log the skip count, because a silent skip and a successful insert look identical
+from the caller.
+
+**Found:** M5, exercising the CLI at the phase boundary.
+
+---
+
+## 20. `random.choices` is not a contract, `randrange` is
+
+**Pain.** None yet, and that is the point of the entry.
+
+**Why.** Seeded chaos is only worth building if a seed replays a demo months later, on a
+different machine and a newer interpreter. `random.choices`, `random.sample`, and
+`random.shuffle` are convenience helpers whose internal draw pattern CPython is free to
+change; only the core generator is a documented, stable stream. A fixture that depends on a
+helper's internals is a fixture with an expiry date nobody wrote down.
+
+**Fix.** `plan()` rolls an explicit cumulative weight and calls `randrange` directly, and a
+golden 14-row plan lives in `data/examples.json` with a rail asserting equality.
+
+**Lesson.** When determinism is the deliverable, **depend on the narrowest primitive that is
+actually specified.** The two lines a helper saves are not worth an unverifiable dependency.
+And keep the seeded function pure: `plan()` takes a catalog and returns a list, so the golden
+rail needs no database and no network, while the clock and the writes live in the impure
+caller.
+
+**Found:** M5, by design rather than by damage.
+
+---
+
+## 21. A console stream is not a log file, and `jq` says so badly
+
+**Pain.** A documented query over the chaos log events died with
+`startswith() requires string inputs` and then `parse error: Invalid numeric literal`. Both
+messages blame the data.
+
+**Why.** Three separate wrong assumptions in one line. The stream is the **console**, not a
+file, so there was no file to read. The event name is `msg`, because a processor renames
+structlog's positional `event` field before any renderer runs. And a console stream is
+**not pure JSON**: the CLI prints a human-readable summary to the same place, and a traceback
+is not JSON at all, so the first unparseable line kills the whole query.
+
+**Fix.** `jq -Rrc 'fromjson? | select((.msg//"")|startswith("chaos_")) | …'`. `-R` reads raw
+lines, `fromjson?` drops the ones that are not JSON instead of aborting, and `//""` survives a
+line that has no `msg` at all.
+
+**Lesson.** Any `jq` filter over a process's own output rather than over a curated file needs
+`-R` with `fromjson?`, or it is a query that works until someone prints a sentence. And when a
+log pipeline renames a field, **every documented query is a copy of that decision** and has to
+be re-run when the decision changes. Same family as #10.
+
+**Found:** M5's phase close, by the step that runs every command the docs claim works.
+
+---
+
 _More entries arrive with M3 onward. Candidates already known from the design: the `num_ctx`
-shim trap, seeded chaos as a fixture rather than a flake, and why a gate must outlive its
-process._
+shim trap, and why a gate must outlive its process._

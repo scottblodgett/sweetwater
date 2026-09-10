@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import BigInteger, Column, DateTime, Float, Index, Integer, MetaData, Table, Text, select, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from src.agent.state import Finding, Incident, IncidentStatus, Severity
@@ -128,6 +130,37 @@ incidents = Table(
     Index("uq_incidents_open_key", "incident_key", unique=True, postgresql_where=text("status <> 'resolved'")),
     Index("ix_incidents_status_last_seen", "status", "last_seen_at"),
     Index("ix_incidents_sensor", "sensor_id"),
+)
+
+#: The chaos overlay. Mirrors migration 0002, and it is the only place in this system
+#: where a lie about the ranch is stored: the deployed Sensor API is stateless, so a fault
+#: cannot be written into it, and its own injector refuses to arm on Lambda on purpose.
+#: `src/tools/chaos.py` owns the meaning of every column here; this module owns the rows.
+chaos_events = Table(
+    "chaos_events",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("event_id", Text, nullable=False),
+    Column("group_id", Text, nullable=False, server_default=""),
+    Column("scenario", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("target_id", Text, nullable=False),
+    Column("target_type", Text, nullable=False, server_default=""),
+    Column("location", Text, nullable=False, server_default=""),
+    Column("fault", Text, nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("seed", Integer, nullable=False, server_default="0"),
+    Column("seq", Integer, nullable=False, server_default="0"),
+    Column("status", Text, nullable=False),
+    Column("injected_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("expired_at", DateTime(timezone=True), nullable=True),
+    Column("tick_injected", Integer, nullable=False, server_default="0"),
+    Column("run_id", Text, nullable=False, server_default=""),
+    Index("uq_chaos_events_event_id", "event_id", unique=True),
+    Index("uq_chaos_active_target_fault", "target_id", "fault", unique=True, postgresql_where=text("status = 'active'")),
+    Index("ix_chaos_events_status_expires", "status", "expires_at"),
+    Index("ix_chaos_events_group", "group_id"),
 )
 
 
@@ -367,3 +400,67 @@ async def counts_by_status(session: AsyncSession) -> dict[IncidentStatus, int]:
     """Used by the live verification and, at M8, by the read API's summary endpoint."""
     rows = (await session.execute(select(incidents.c.status, text("count(*)")).group_by(incidents.c.status))).all()
     return {str(status): int(n) for status, n in rows}  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# the chaos overlay
+# --------------------------------------------------------------------------- #
+# These four take and return plain mappings rather than a typed model, on purpose:
+# `src/tools/chaos.py` imports this module, so this module cannot import its `ChaosEvent`
+# without a cycle. The table definition above is the row shape, and chaos.py owns both
+# directions of the conversion. Every column is written explicitly by the caller, because
+# a server default that only some inserts rely on is a default nobody knows is there.
+async def insert_chaos_events(session: AsyncSession, rows: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    """Insert, skipping any row the database already has. Returns only what actually landed.
+
+    `ON CONFLICT DO NOTHING` with **no conflict target**, so it covers both unique indexes:
+    a replayed `event_id` (the same seed injected twice, which must not double the demo)
+    and a second active fault of the same mode on the same target. Naming only `event_id`
+    here would turn the second case into an `IntegrityError` that aborts the transaction
+    and takes the rest of the batch with it.
+    """
+    if not rows:
+        return ()
+    stmt = pg_insert(chaos_events).values(list(rows)).on_conflict_do_nothing().returning(chaos_events)
+    landed = (await session.execute(stmt)).mappings().all()
+    await session.commit()
+    if len(landed) != len(rows):
+        log.info("chaos_insert_deduplicated", offered=len(rows), inserted=len(landed), hint="a replayed seed or an already-active fault on the same target; both are skips, not errors")
+    return tuple(dict(r) for r in landed)
+
+
+async def active_chaos_events(session: AsyncSession, *, now: datetime, kind: str | None = None) -> tuple[dict[str, Any], ...]:
+    """Events that are still lying to us at `now`.
+
+    The `expires_at` filter is here as well as in `expire_chaos_events`, deliberately
+    belt-and-braces: a sensor has to heal on time even on a tick where nothing called the
+    expiry sweep, because the healing is what produces `resolved` incidents and a fault
+    that outlives its TTL by an hour is the demo going quiet.
+    """
+    q = select(chaos_events).where(chaos_events.c.status == "active", chaos_events.c.expires_at > now)
+    if kind is not None:
+        q = q.where(chaos_events.c.kind == kind)
+    rows = (await session.execute(q.order_by(chaos_events.c.seq, chaos_events.c.id))).mappings().all()
+    return tuple(dict(r) for r in rows)
+
+
+async def expire_chaos_events(session: AsyncSession, *, now: datetime, force_all: bool = False) -> tuple[dict[str, Any], ...]:
+    """Flip due events to `expired` and return them. `force_all` heals the ranch on demand.
+
+    Expiry is not bookkeeping, it is the product: the next sweep reads the honest value,
+    triage finds nothing, and `reconcile` moves the incident to `resolved`. Without it
+    everything is broken an hour in and the feed only ever grows.
+    """
+    q = chaos_events.update().where(chaos_events.c.status == "active")
+    if not force_all:
+        q = q.where(chaos_events.c.expires_at <= now)
+    rows = (await session.execute(q.values(status="expired", expired_at=now).returning(chaos_events))).mappings().all()
+    await session.commit()
+    if rows:
+        log.info("chaos_expired", count=len(rows), forced=force_all, targets=sorted({str(r["target_id"]) for r in rows}))
+    return tuple(dict(r) for r in rows)
+
+
+async def chaos_counts_by_status(session: AsyncSession) -> dict[str, int]:
+    rows = (await session.execute(select(chaos_events.c.status, text("count(*)")).group_by(chaos_events.c.status))).all()
+    return {str(status): int(n) for status, n in rows}

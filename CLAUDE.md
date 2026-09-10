@@ -110,6 +110,8 @@ python main.py --api         # read API only           (stub until M8, exits 3)
 pytest
 ruff check .                 # the whole lint gate; `ruff format` is not used, see below
 mypy src main.py
+
+python -m src.tools.chaos status   # M5. Also plan / inject / expire / restore, recipe in docs/STATE.md
 ```
 
 An unbuilt mode exits **3** with a `not_implemented` line naming the milestone that
@@ -117,8 +119,20 @@ brings it, rather than failing as if it were broken.
 
 **`--once` costs money from M2.** Its last two stages assemble an evidence packet and hand
 it to Opus, once per newly-opened incident: 24k to 58k tokens depending on how much of the
-ledger is already `ongoing`. In code, `run_tick(spend=False)` stops at the end of the free
-pass, and `conftest.no_model_calls` makes a forgotten flag fail loudly rather than bill.
+ledger is already `ongoing`, and **161k on the M3 tree with five agents and a shift report.**
+In code, `run_tick(spend=False)` stops at the end of the free pass, and
+`conftest.no_model_calls` makes a forgotten flag fail loudly rather than bill.
+
+**`SW_OPS_TARGET=test` points the ledger at local `sw_ops_test` instead of Supabase**, which
+is how a tick gets exercised without writing 23 incidents into the ledger a demo reads from.
+Prod is the default on purpose: a default that quietly writes somewhere harmless is a default
+that ships.
+
+**`CHAOS_ENABLED` defaults to `0` and belongs at `0`** unless a demo is being driven. Off, the
+overlay costs one boolean and opens no connection. On, every sensor reading is suspect by
+design, which is correct for a demo and ruinous for a measurement. `CHAOS_ALLOW_WRITES` is a
+separate switch, also off, and it is the only thing between a scenario and a real `PATCH` on
+the deployed Farm API. Knobs and the demo recipe: `docs/STATE.md`.
 
 Windows venv: `.venv/Scripts/python.exe`. No Docker until M10 - the upstreams are
 already deployed and `sw_ops` is in Supabase, so there is nothing local to stand up.

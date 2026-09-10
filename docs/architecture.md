@@ -81,9 +81,17 @@ counted by a test. `create_react_agent` receives a **filtered** list.
 
 **There are eight write tools on the deployed surface, not four.** The four marked above are the
 ones inside a responder's slice. The other four - `assign_to_pasture`, `remove_from_pasture`,
-`assign_to_shelter`, `remove_from_shelter` - move animals, belong to `chaos`, and sit in
-`UNASSIGNED_TOOLS` until M5. They are in `WRITE_TOOLS` from M3 regardless, so `assert_callable`
-already refuses them.
+`assign_to_shelter`, `remove_from_shelter` - move animals and sit in `UNASSIGNED_TOOLS`. They
+are in `WRITE_TOOLS` from M3 regardless, so `assert_callable` already refuses them.
+
+**M5 landed and left all four unassigned, which is a correction to what this file predicted.**
+Chaos was expected to claim them; it does not, and should not. Chaos writes animal events
+**direct over REST** (`PATCH /animals/:animalId` on the Farm API, `POST /animals/:animalId/observations`
+on the Care API), because it is a test harness rather than a responder: it needs no judgment,
+no tool loop, and no model. Its slice is asserted at **zero tools** by M3's own count rail.
+Routing it through the MCP write tools would put it behind the M6 gate for no benefit and would
+make the one component whose job is to break things the hardest one to run. `CHAOS_ALLOW_WRITES`
+is its gate, and `CHAOS_ANIMAL_COHORT` is its blast radius.
 
 **How the gate is faked before it exists.** Writes reach the real ranch and `interrupt()` is M6,
 so between M3 and M6 there are two independent boundaries, and they are not redundant:

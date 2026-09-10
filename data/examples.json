@@ -1,6 +1,212 @@
 {
-  "_note": "The chaos scenario catalog and the golden fixtures. Populated at M5 with src/tools/chaos.py; empty until then on purpose, so an unbuilt catalog reads as unbuilt rather than as a chaos agent configured to do nothing. See docs/Plan.md.",
-  "_arrives_in": "M5",
-  "scenarios": [],
-  "fixtures": []
+  "_note": "The chaos scenario catalog. `src/tools/chaos.py` reads this file and nothing else authors a fault. A scenario names the sensor TYPES it breaks, never specific sensor ids: targets are drawn from the live catalog by a seeded PRNG, so the same seed replays the same demo without this file hardcoding a topology it cannot verify. `expect` is documentation of the intended outcome, not an assertion the injector enforces; triage owns severity, always, and a scenario that stopped producing its expected category is a threshold conversation rather than a catalog edit.",
+  "_modes": {
+    "pin": "Freeze the reading at `value`. The blunt instrument, and the right one when the point is a specific band.",
+    "drift": "Ramp from `from` to `to` across the event's TTL, computed from injected_at and expires_at. Walks nominal -> warning -> critical over several ticks, which is the only mode that shows severity moving. `from` is stated rather than taken from the honest reading so the ramp is reproducible.",
+    "sentinel": "Answer `value` with the status left alone. The live ranch already has a temperature probe reporting -500 while claiming to be online; this reproduces that failure on demand and triage must call it a broken probe, never a cold snap.",
+    "offline": "status offline, no reading. A dark sensor, which is a maintenance job and not a ranch problem.",
+    "degraded": "status degraded, value untouched. Readings still arrive and are no longer trustworthy, which is the harder of the two failures for a human to notice.",
+    "gate_open": "The one boolean type. A gate reads open, which is always a question for a human and never an automatic emergency."
+  },
+  "_arrived_in": "M5",
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "dry_tank",
+      "title": "A stock tank draws down to empty",
+      "kind": "sensor_overlay",
+      "weight": 4,
+      "ttl_ticks": 3,
+      "faults": [{ "sensor_type": "water-level", "count": 1, "mode": "pin", "value": 0.8 }],
+      "expect": { "categories": ["water_low"], "severity": "critical", "owners": ["water_feed"] }
+    },
+    {
+      "id": "feed_bin_empty",
+      "title": "A feed bin runs into its reserve and out the other side",
+      "kind": "sensor_overlay",
+      "weight": 3,
+      "ttl_ticks": 4,
+      "faults": [{ "sensor_type": "feed-bin-weight", "count": 1, "mode": "pin", "value": 180.0 }],
+      "expect": { "categories": ["feed_low"], "severity": "critical", "owners": ["water_feed"] }
+    },
+    {
+      "id": "heat_wave",
+      "title": "An afternoon in the heat-stress band",
+      "kind": "sensor_overlay",
+      "weight": 3,
+      "ttl_ticks": 3,
+      "faults": [{ "sensor_type": "temperature", "count": 1, "mode": "pin", "value": 103.4 }],
+      "expect": { "categories": ["heat_stress"], "severity": "critical", "owners": ["water_feed"] }
+    },
+    {
+      "id": "probe_fault",
+      "title": "A temperature probe fails to the sentinel value",
+      "kind": "sensor_overlay",
+      "weight": 3,
+      "ttl_ticks": 2,
+      "faults": [{ "sensor_type": "temperature", "count": 1, "mode": "sentinel", "value": -500.0 }],
+      "expect": { "categories": ["sensor_fault"], "severity": "warning", "owners": ["infrastructure"] }
+    },
+    {
+      "id": "dead_radio",
+      "title": "A tank sensor goes dark, and a blind tank reads exactly like a full one",
+      "kind": "sensor_overlay",
+      "weight": 3,
+      "ttl_ticks": 2,
+      "faults": [{ "sensor_type": "water-level", "count": 1, "mode": "offline" }],
+      "expect": { "categories": ["sensor_offline"], "severity": "warning", "owners": ["infrastructure"] }
+    },
+    {
+      "id": "flaky_probe",
+      "title": "A soil probe reports degraded and keeps answering anyway",
+      "kind": "sensor_overlay",
+      "weight": 2,
+      "ttl_ticks": 2,
+      "faults": [{ "sensor_type": "soil-moisture", "count": 1, "mode": "degraded" }],
+      "expect": { "categories": ["sensor_degraded"], "severity": "warning", "owners": ["infrastructure"] }
+    },
+    {
+      "id": "fence_down",
+      "title": "An energizer stops holding a line",
+      "kind": "sensor_overlay",
+      "weight": 3,
+      "ttl_ticks": 3,
+      "faults": [{ "sensor_type": "fence-voltage", "count": 1, "mode": "pin", "value": 0.9 }],
+      "expect": { "categories": ["fence_down"], "severity": "critical", "owners": ["infrastructure"] }
+    },
+    {
+      "id": "battery_dying",
+      "title": "A remote site runs its battery down over an hour",
+      "kind": "sensor_overlay",
+      "weight": 3,
+      "ttl_ticks": 4,
+      "faults": [{ "sensor_type": "battery-charge", "count": 1, "mode": "drift", "from": 45.0, "to": 8.0 }],
+      "expect": { "categories": ["power_low"], "severity": "critical", "owners": ["infrastructure"], "note": "The one scenario where severity is watched moving rather than appearing: nominal, then warning at 30, then critical at 15." }
+    },
+    {
+      "id": "gate_left_open",
+      "title": "A gate is left open after a move",
+      "kind": "sensor_overlay",
+      "weight": 2,
+      "ttl_ticks": 2,
+      "faults": [{ "sensor_type": "gate", "count": 1, "mode": "gate_open" }],
+      "expect": { "categories": ["gate_open"], "severity": "warning", "owners": ["infrastructure"] }
+    },
+    {
+      "id": "range_drying",
+      "title": "Ground dries past what the grazing plan assumes",
+      "kind": "sensor_overlay",
+      "weight": 2,
+      "ttl_ticks": 4,
+      "faults": [{ "sensor_type": "soil-moisture", "count": 1, "mode": "pin", "value": 3.5 }],
+      "expect": { "categories": ["range_dry"], "severity": "critical", "owners": ["compliance"] }
+    },
+    {
+      "id": "stream_run_dry",
+      "title": "The gauged reach thins out",
+      "kind": "sensor_overlay",
+      "weight": 2,
+      "ttl_ticks": 4,
+      "faults": [{ "sensor_type": "stream-flow", "count": 1, "mode": "drift", "from": 2.4, "to": 0.3 }],
+      "expect": { "categories": ["stream_flow_low"], "severity": "critical", "owners": ["compliance"] }
+    },
+    {
+      "id": "storm_front",
+      "title": "A storm front: wind, a hard freeze behind it, fence down, and a site losing power",
+      "kind": "sensor_overlay",
+      "weight": 3,
+      "ttl_ticks": 4,
+      "correlated": true,
+      "faults": [
+        { "sensor_type": "wind-speed", "count": 1, "mode": "pin", "value": 71.0 },
+        { "sensor_type": "temperature", "count": 1, "mode": "pin", "value": 4.0 },
+        { "sensor_type": "fence-voltage", "count": 1, "mode": "pin", "value": 1.4 },
+        { "sensor_type": "battery-charge", "count": 1, "mode": "drift", "from": 40.0, "to": 10.0 }
+      ],
+      "expect": {
+        "categories": ["high_wind", "freeze_risk", "fence_down", "power_low"],
+        "severity": "critical",
+        "owners": ["infrastructure", "water_feed"],
+        "note": "The showpiece, and the reason a supervisor exists rather than four independent scripts: one weather event, two sensing worlds, and it should fuse into one work order rather than four unrelated ones. That check needs M3's supervisor and is deferred to the M3 boundary."
+      }
+    },
+    {
+      "id": "well_failure",
+      "title": "A well loses pressure and the tank it feeds follows it down",
+      "kind": "sensor_overlay",
+      "weight": 3,
+      "ttl_ticks": 4,
+      "correlated": true,
+      "co_located": true,
+      "faults": [
+        { "sensor_type": "wellhead-pressure", "count": 1, "mode": "pin", "value": 118.0 },
+        { "sensor_type": "water-level", "count": 1, "mode": "drift", "from": 18.0, "to": 1.5 }
+      ],
+      "expect": {
+        "categories": ["wellhead_underpressure", "water_low"],
+        "severity": "critical",
+        "owners": ["infrastructure", "water_feed"],
+        "note": "Causally linked rather than merely simultaneous. `co_located` asks for both faults at one location and is best-effort: the anchor's location is preferred and a miss is recorded in the payload rather than faked."
+      }
+    },
+    {
+      "id": "coyote_kill",
+      "title": "A coyote kill in the cohort, written for real",
+      "kind": "animal_event",
+      "weight": 1,
+      "ttl_ticks": 6,
+      "faults": [
+        {
+          "mode": "animal_status",
+          "count": 1,
+          "status": "deceased",
+          "observation_type": "injury",
+          "severity": "high",
+          "observation": "Found down at first light, throat and hindquarter torn, tracks and scat consistent with coyote. Carcass is inside the fence line and the rest of the group is bunched and unsettled.",
+          "note": "The forced asymmetry. There is no overlay for this: a kill is a status change plus an observation a human would actually read, and herd_health has to discover it through its own Care API tools with no overlay at all. All four fields are validated at load against the enums the deployed services actually enforce, read off their own 422s on 2026-09-10: status is PATCHed on the FARM API (active|inactive|sold|deceased) and the observation is POSTed to CARE (type behavior|appetite|mobility|appearance|injury|general, severity low|medium|high, and the text field is `note`, not `notes`). Guarded by CHAOS_ALLOW_WRITES and confined to CHAOS_ANIMAL_COHORT. Expiry closes the row, not the animal: a real write is not undone by a TTL, which is why `restore` is a separate deliberate command."
+        }
+      ],
+      "expect": { "categories": [], "owners": ["herd_health"], "note": "Discovery through herd_health's real tools needs M3's supervisor and is deferred to the M3 boundary." }
+    }
+  ],
+  "fixtures": {
+    "_note": "The golden replay fixture. A synthetic catalog plus the exact plan seed 1 produces from it, so the determinism rail is offline, has no clock in it, and survives a refactor of the planner rather than merely agreeing with itself twice in one process. The ids are deliberately fake: this fixture must not depend on the live ranch's topology, which is free to change without breaking a determinism test.",
+    "cohort": ["cow-0901", "cow-0902", "cow-0903", "cow-0904", "cow-0905"],
+    "ticks": 13,
+    "catalog": [
+      { "sensor_id": "fx-batt-01", "sensor_type": "battery-charge", "location": "South Draw" },
+      { "sensor_id": "fx-batt-02", "sensor_type": "battery-charge", "location": "East Bench" },
+      { "sensor_id": "fx-feed-01", "sensor_type": "feed-bin-weight", "location": "Home Place" },
+      { "sensor_id": "fx-fence-01", "sensor_type": "fence-voltage", "location": "North Pasture" },
+      { "sensor_id": "fx-fence-02", "sensor_type": "fence-voltage", "location": "East Bench" },
+      { "sensor_id": "fx-gate-01", "sensor_type": "gate", "location": "Home Place" },
+      { "sensor_id": "fx-soil-01", "sensor_type": "soil-moisture", "location": "East Bench" },
+      { "sensor_id": "fx-soil-02", "sensor_type": "soil-moisture", "location": "North Pasture" },
+      { "sensor_id": "fx-stream-01", "sensor_type": "stream-flow", "location": "East Bench" },
+      { "sensor_id": "fx-temp-01", "sensor_type": "temperature", "location": "North Pasture" },
+      { "sensor_id": "fx-temp-02", "sensor_type": "temperature", "location": "South Draw" },
+      { "sensor_id": "fx-water-01", "sensor_type": "water-level", "location": "North Pasture" },
+      { "sensor_id": "fx-water-02", "sensor_type": "water-level", "location": "South Draw" },
+      { "sensor_id": "fx-water-03", "sensor_type": "water-level", "location": "Home Place" },
+      { "sensor_id": "fx-well-01", "sensor_type": "wellhead-pressure", "location": "South Draw" },
+      { "sensor_id": "fx-well-02", "sensor_type": "wellhead-pressure", "location": "Home Place" },
+      { "sensor_id": "fx-wind-01", "sensor_type": "wind-speed", "location": "North Pasture" }
+    ],
+    "plan_seed_1": [
+      {"seq": 0, "tick": 1, "scenario": "dead_radio", "group_id": "chaos-1-t1-dead_radio", "kind": "sensor_overlay", "target_id": "fx-water-01", "target_type": "water-level", "location": "North Pasture", "fault": "offline", "ttl_ticks": 2, "payload": {}},
+      {"seq": 1, "tick": 2, "scenario": "dry_tank", "group_id": "chaos-1-t2-dry_tank", "kind": "sensor_overlay", "target_id": "fx-water-02", "target_type": "water-level", "location": "South Draw", "fault": "pin", "ttl_ticks": 3, "payload": {"value": 0.8}},
+      {"seq": 2, "tick": 3, "scenario": "range_drying", "group_id": "chaos-1-t3-range_drying", "kind": "sensor_overlay", "target_id": "fx-soil-02", "target_type": "soil-moisture", "location": "North Pasture", "fault": "pin", "ttl_ticks": 4, "payload": {"value": 3.5}},
+      {"seq": 3, "tick": 4, "scenario": "probe_fault", "group_id": "chaos-1-t4-probe_fault", "kind": "sensor_overlay", "target_id": "fx-temp-01", "target_type": "temperature", "location": "North Pasture", "fault": "sentinel", "ttl_ticks": 2, "payload": {"value": -500.0}},
+      {"seq": 4, "tick": 5, "scenario": "coyote_kill", "group_id": "chaos-1-t5-coyote_kill", "kind": "animal_event", "target_id": "cow-0901", "target_type": "animal", "location": "", "fault": "animal_status", "ttl_ticks": 6, "payload": {"status": "deceased", "observation_type": "injury", "severity": "high", "observation": "Found down at first light, throat and hindquarter torn, tracks and scat consistent with coyote. Carcass is inside the fence line and the rest of the group is bunched and unsettled."}},
+      {"seq": 5, "tick": 6, "scenario": "stream_run_dry", "group_id": "chaos-1-t6-stream_run_dry", "kind": "sensor_overlay", "target_id": "fx-stream-01", "target_type": "stream-flow", "location": "East Bench", "fault": "drift", "ttl_ticks": 4, "payload": {"from": 2.4, "to": 0.3}},
+      {"seq": 6, "tick": 7, "scenario": "fence_down", "group_id": "chaos-1-t7-fence_down", "kind": "sensor_overlay", "target_id": "fx-fence-01", "target_type": "fence-voltage", "location": "North Pasture", "fault": "pin", "ttl_ticks": 3, "payload": {"value": 0.9}},
+      {"seq": 7, "tick": 8, "scenario": "probe_fault", "group_id": "chaos-1-t8-probe_fault", "kind": "sensor_overlay", "target_id": "fx-temp-02", "target_type": "temperature", "location": "South Draw", "fault": "sentinel", "ttl_ticks": 2, "payload": {"value": -500.0}},
+      {"seq": 8, "tick": 9, "scenario": "probe_fault", "group_id": "chaos-1-t9-probe_fault", "kind": "sensor_overlay", "target_id": "fx-temp-01", "target_type": "temperature", "location": "North Pasture", "fault": "sentinel", "ttl_ticks": 2, "payload": {"value": -500.0}},
+      {"seq": 9, "tick": 10, "scenario": "heat_wave", "group_id": "chaos-1-t10-heat_wave", "kind": "sensor_overlay", "target_id": "fx-temp-01", "target_type": "temperature", "location": "North Pasture", "fault": "pin", "ttl_ticks": 3, "payload": {"value": 103.4}},
+      {"seq": 10, "tick": 11, "scenario": "stream_run_dry", "group_id": "chaos-1-t11-stream_run_dry", "kind": "sensor_overlay", "target_id": "fx-stream-01", "target_type": "stream-flow", "location": "East Bench", "fault": "drift", "ttl_ticks": 4, "payload": {"from": 2.4, "to": 0.3}},
+      {"seq": 11, "tick": 12, "scenario": "battery_dying", "group_id": "chaos-1-t12-battery_dying", "kind": "sensor_overlay", "target_id": "fx-batt-01", "target_type": "battery-charge", "location": "South Draw", "fault": "drift", "ttl_ticks": 4, "payload": {"from": 45.0, "to": 8.0}},
+      {"seq": 12, "tick": 13, "scenario": "well_failure", "group_id": "chaos-1-t13-well_failure", "kind": "sensor_overlay", "target_id": "fx-well-02", "target_type": "wellhead-pressure", "location": "Home Place", "fault": "pin", "ttl_ticks": 4, "payload": {"value": 118.0}},
+      {"seq": 13, "tick": 13, "scenario": "well_failure", "group_id": "chaos-1-t13-well_failure", "kind": "sensor_overlay", "target_id": "fx-water-03", "target_type": "water-level", "location": "Home Place", "fault": "drift", "ttl_ticks": 4, "payload": {"from": 18.0, "to": 1.5}}
+    ]
+  }
 }

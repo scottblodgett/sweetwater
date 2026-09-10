@@ -38,9 +38,16 @@ container). Files are **always** JSON regardless of environment.
   "ledger":{"opened":9,"ongoing":8,"resolved":4} }
 ```
 
-The M2 shape. `chaos_fired` joins at M5 and `cost_usd` at M7 with the pricing table; a
-field is added to this line when the stage that produces it exists, not before, so a
-`null` here always means the stage ran and had nothing to say.
+The M2 shape. `cost_usd` joins at M7 with the pricing table; a field is added to this line
+when the stage that produces it exists, not before, so a `null` here always means the stage
+ran and had nothing to say.
+
+**`chaos_fired` was planned for M5 and is not here yet, on purpose.** M5 built the overlay
+and applies it inside `sensors.sweep()`, which returns the count as `SweepResult.overlay_events`,
+but it did not wire chaos injection into `run_tick`. That wiring lands with M3's executor
+work, and the field arrives with it. Stated here rather than left as an absence, because
+this file's own rule is that a missing field means the stage had nothing to say, and in this
+one case it means the stage is not called yet.
 
 **Written at tick end, always, including when the tick failed** (with `error` and
 `failed_stage`). A tick that produces no line is indistinguishable from a dead loop, and
@@ -99,6 +106,64 @@ suspect.
 
 This is the file that makes "we watch your ranch" a defensible claim rather than a
 pitch.
+
+**A blocked side effect writes both lines too.** When `CHAOS_ALLOW_WRITES=0` stops an animal
+mutation, chaos still emits `proposed` and then `decided` with `decision:"blocked"`,
+`decided_by:"chaos_guard"`, `result:"writes_disabled"`. The receipt that nothing was mutated
+is worth exactly as much as the receipt that something was, and it keeps the
+`uniq -c | awk '$1!=2'` query below meaningful: a guard that logged only the refusal would
+show up in that query as a dangling proposal.
+
+**`tool` is the MCP tool name when one was used, and the HTTP route when one was not.**
+Chaos writes go direct over REST rather than through MCP, so its lines read
+`"tool":"PATCH /animals/:animalId"`. Naming a tool it never called would be a tidier field
+and a false receipt.
+
+## `chaos_*` on the console stream - the overlay says so out loud
+
+**There are three JSONL files and there is no fourth.** `chaos_*` lines go to the console
+stream, like every other application event, and only the animal write path reaches
+`audit.jsonl`. An overlay is a development and demo instrument rather than a side effect on
+the ranch, and a fourth rotating file for it would be a stream nobody greps.
+
+The events, and what each one is for:
+
+| Event | Says |
+| --- | --- |
+| `chaos_injected` | one event armed, with `scenario`, `mode`, `target_id`, `group_id`, `expires_at` |
+| `chaos_expired` | a TTL ran out and a sensor is honest again. This is what produces `resolved` incidents |
+| `chaos_overlay_applied` | **carries `honest_value` beside `faked_value`.** The single most useful line in the stream |
+| `chaos_overlay_unavailable` | the store could not be read, so the sweep stayed truthful. A degraded overlay must never be a failed tick |
+| `chaos_at_ceiling` | `CHAOS_MAX_ACTIVE` reached, nothing new armed |
+| `chaos_group_deferred` | a correlated group would have crossed the ceiling, so **none** of it fired. Half a storm front is a worse fixture than no storm front |
+| `chaos_insert_deduplicated` | `offered` vs `inserted`. A replayed seed or an already-active fault on the same target, both skips rather than errors. See `docs/cookbook.md` #19 |
+| `chaos_write_blocked` | a guard refused an animal mutation, with the reason |
+| `chaos_write_partial` | the `PATCH` landed and the observation did not. **Not retried**, because the status is already changed and a retry would double-write the observation |
+| `chaos_animal_written` | a real mutation went through, which only happens with `CHAOS_ALLOW_WRITES=1` |
+| `chaos_unknown_fault_mode`, `chaos_fault_unusable`, `chaos_no_target_for_type`, `chaos_no_cohort_target` | four `warn_once` lines for a catalog that asks for something the ranch cannot supply. A scenario that silently does nothing is the failure mode here, same disease as an unrecognized sensor type reading as nominal |
+| `chaos_cli_catalog` | the CLI resolved the live topology, with `source` and `sensors` |
+
+`chaos_overlay_applied` is the line that makes a faulted demo legible instead of
+mysterious. Without `honest_value` beside `faked_value`, a reader of the log cannot tell a
+ranch that is being lied to from a ranch that is actually broken, which is the same
+indistinguishability triage is **supposed** to have and the operator is not.
+
+Because the stream is the console, a query means redirecting a run rather than reading a
+file, and three things about that are easy to get wrong. **`LOG_CONSOLE_PRETTY=0` is
+required**, or the renderer emits aligned text and `jq` gets nothing it can parse. **The
+event name is `msg`, not `event`**, in every mode: a processor renames structlog's
+positional field once, before any renderer, so there is exactly one spelling. And **the
+stream is not pure JSON** - a CLI prints its own human-readable summary to the same place,
+and a traceback is not JSON either, so a `jq` filter over it has to tolerate lines that do
+not parse:
+
+```bash
+LOG_CONSOLE_PRETTY=0 SW_OPS_TARGET=test CHAOS_ENABLED=1 python -m src.tools.chaos inject --tick 2 2>&1 | jq -Rrc 'fromjson? | select((.msg//"")|startswith("chaos_")) | [.msg,.scenario//"-",.target_id//"-"]|@tsv'
+```
+
+`-R` with `fromjson?` is what makes that tolerance work: without it, the first non-JSON line
+kills the query with a parse error and the exit code blames the data. This exact command was
+documented in its naive form first, and it failed on all three counts at once.
 
 ## Rotation differs by stream, and the difference is the point
 

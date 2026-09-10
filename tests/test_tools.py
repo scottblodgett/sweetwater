@@ -18,14 +18,29 @@ a respx route against a fake host.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+import json
+from collections.abc import AsyncIterator
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 import respx
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
 from src.agent.agent import AGENTS
+from src.agent.memory import (
+    SCHEMA_TEST,
+    active_chaos_events,
+    build_engine,
+    chaos_counts_by_status,
+    expire_chaos_events,
+    insert_chaos_events,
+    reconcile,
+    session_factory,
+)
 from src.agent.state import Incident
 from src.agent.workers import citable_rules
 from src.tools.allowlists import (
@@ -40,6 +55,37 @@ from src.tools.allowlists import (
     is_allowed,
     tools_for,
 )
+from src.tools.chaos import (
+    ANIMAL_STATUS_NORMAL,
+    ANIMAL_STATUSES,
+    KIND_ANIMAL,
+    KIND_SENSOR,
+    MODE_ANIMAL_STATUS,
+    MODE_DEGRADED,
+    MODE_DRIFT,
+    MODE_GATE_OPEN,
+    MODE_OFFLINE,
+    MODE_PIN,
+    MODE_SENTINEL,
+    STATUS_ACTIVE,
+    ChaosCatalogError,
+    ChaosEvent,
+    FaultSpec,
+    PlannedFault,
+    Scenario,
+    active_overlay,
+    apply_overlay,
+    blocked_reason,
+    expire,
+    fire_animal_events,
+    inject_for_tick,
+    load_catalog,
+    load_fixtures,
+    parse_catalog,
+    plan,
+    restore_cohort,
+)
+from src.tools.chaos import reset_warn_once as _reset_chaos
 from src.tools.evidence import (
     KNOWLEDGE_BASE,
     SOP_FOR_CATEGORY,
@@ -730,3 +776,742 @@ async def test_call_tool_refuses_a_write_before_it_reaches_the_wire() -> None:
 
     with pytest.raises(WriteGateError):
         await call_tool(ExplodingSession(), "create_observation", {"animalId": "cow-0777"})  # type: ignore[arg-type]
+
+# =========================================================================== #
+# 5. chaos: the guard, the catalog, the seed, and the overlay
+#
+# The order below is the order these were written in, and it is not cosmetic. The write path
+# is the only code in this repo that mutates a real deployed API, so its guard is proven
+# first and everything else follows.
+#
+# Two verifications this suite deliberately does NOT contain, because both need M3's
+# supervisor and faking either would be worse than deferring it:
+#   * a storm front producing ONE fused work order rather than four unrelated ones
+#   * `herd_health` discovering the coyote kill through its own tools, with no overlay
+# Both are recorded as deferred in `docs/JOURNEY.md` and are owed at the M3 boundary.
+# =========================================================================== #
+#: Two hosts, not one. `/animals` is on the FARM API and only the observation is on CARE. M5
+#: shipped this as a single base URL and it would have 404'd on the first real coyote kill.
+FARM = "https://farm.test"
+CARE = "https://care.test"
+
+COHORT = ("cow-0901", "cow-0902", "cow-0903", "cow-0904", "cow-0905")
+
+
+def chaos_settings(**over: object) -> Settings:
+    """Settings for the chaos rails. Writes off and cohort empty unless a test says otherwise."""
+    base: dict[str, object] = {"farm_api": FARM, "care_api": CARE, "sensor_api": BASE, "sweep_concurrency": 4, "upstream_timeout_ms": 500, "chaos_enabled": True, "chaos_seed": 1, "chaos_allow_writes": False, "chaos_animal_cohort": "", "_env_file": None}
+    base.update(over)
+    return Settings(**base)  # type: ignore[arg-type]
+
+
+def animal_event(*, animal_id: str = "cow-0901", status: str = "deceased", event_id: str = "chaos-1-4") -> ChaosEvent:
+    stamp = datetime(2026, 9, 10, 14, 30, tzinfo=UTC)
+    return ChaosEvent(
+        event_id=event_id, group_id="chaos-1-t5-coyote_kill", scenario="coyote_kill", kind=KIND_ANIMAL, target_id=animal_id, target_type="animal", location="", fault=MODE_ANIMAL_STATUS,
+        payload={"status": status, "observation_type": "injury", "severity": "high", "observation": "Found down at first light, predation signs."}, seed=1, seq=4, status=STATUS_ACTIVE, injected_at=stamp, expires_at=stamp + timedelta(minutes=15),
+    )
+
+
+def sensor_event(*, mode: str, target_id: str = "test-sensor", sensor_type: str = "water-level", payload: dict[str, object] | None = None, seq: int = 0, ttl_minutes: int = 15, injected_at: datetime | None = None) -> ChaosEvent:
+    stamp = injected_at or datetime(2026, 9, 10, 14, 30, tzinfo=UTC)
+    return ChaosEvent(
+        event_id=f"chaos-1-{seq}", group_id="chaos-1-t1-test", scenario="test_scenario", kind=KIND_SENSOR, target_id=target_id, target_type=sensor_type, location="Alkali Flat", fault=mode,
+        payload=dict(payload or {}), seed=1, seq=seq, status=STATUS_ACTIVE, injected_at=stamp, expires_at=stamp + timedelta(minutes=ttl_minutes),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clean_chaos_warn_once() -> None:
+    _reset_chaos()
+
+
+# --------------------------------------------------------------------------- #
+# 3a. the write guard. Proven before the write path is trusted, and first here.
+# --------------------------------------------------------------------------- #
+async def test_with_writes_disabled_no_animal_is_ever_mutated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rail the whole animal path is built behind. `CHAOS_ALLOW_WRITES=0` must not merely
+    refuse the request at the last moment: **no HTTP client is constructed at all.**
+
+    Both halves matter. A guard that opens a connection and then declines to use it is one
+    refactor away from sending the PATCH anyway, and this is the only code in the repo that
+    can change a real animal in a real deployed database.
+    """
+    def _explode(*_a: object, **_k: object) -> None:
+        raise AssertionError("the write path opened an HTTP client with CHAOS_ALLOW_WRITES=0")
+
+    monkeypatch.setattr("src.tools.chaos.upstream_client", _explode)
+    settings = chaos_settings(chaos_allow_writes=False, chaos_animal_cohort=",".join(COHORT))
+
+    outcomes = await fire_animal_events([animal_event(), animal_event(animal_id="cow-0902", event_id="chaos-1-9")], settings=settings)
+
+    assert len(outcomes) == 2
+    assert not any(o.performed for o in outcomes)
+    assert {o.reason for o in outcomes} == {"writes_disabled"}
+
+
+async def test_the_cohort_confines_the_write_even_when_writes_are_on() -> None:
+    """Two independent conditions, not one with a second opinion. With writes ON, an animal
+    outside `CHAOS_ANIMAL_COHORT` is still refused, so a bug in scenario targeting cannot
+    scale past the handful of animals named in `.env`."""
+    settings = chaos_settings(chaos_allow_writes=True, chaos_animal_cohort=",".join(COHORT))
+    assert blocked_reason("cow-0901", settings=settings) is None
+    assert blocked_reason("cow-4242", settings=settings) == "outside_cohort"
+
+    with respx.mock(assert_all_called=False) as mock:
+        outcomes = await fire_animal_events([animal_event(animal_id="cow-4242")], settings=settings)
+    assert [(o.performed, o.reason) for o in outcomes] == [(False, "outside_cohort")]
+    assert not mock.calls
+
+
+async def test_writes_on_with_an_empty_cohort_refuses_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dangerous misconfiguration: somebody sets `CHAOS_ALLOW_WRITES=1` and forgets the
+    cohort. An empty allowlist has to mean nothing, never everything."""
+    def _explode(*_a: object, **_k: object) -> None:
+        raise AssertionError("an empty cohort was read as permission")
+
+    monkeypatch.setattr("src.tools.chaos.upstream_client", _explode)
+    settings = chaos_settings(chaos_allow_writes=True, chaos_animal_cohort="")
+    assert blocked_reason("cow-0901", settings=settings) == "cohort_empty"
+    outcomes = await fire_animal_events([animal_event()], settings=settings)
+    assert [(o.performed, o.reason) for o in outcomes] == [(False, "cohort_empty")]
+
+
+async def test_a_blocked_write_still_leaves_a_paired_audit_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The receipt that nothing happened is the evidence the guard held. A `proposed` with no
+    `decided` beside it is the one audit shape `tests/CLAUDE.md` refuses, and "blocked" is a
+    decision, not an absence."""
+    monkeypatch.setattr("src.tools.chaos.upstream_client", lambda *_a, **_k: None)
+    settings = chaos_settings(chaos_allow_writes=False, chaos_animal_cohort=",".join(COHORT))
+    with capture_logs() as logs:
+        await fire_animal_events([animal_event()], settings=settings)
+
+    proposed = [line for line in logs if line.get("phase") == "proposed"]
+    decided = [line for line in logs if line.get("phase") == "decided"]
+    assert len(proposed) == 1 and len(decided) == 1
+    assert proposed[0]["audit_id"] == decided[0]["audit_id"]
+    assert decided[0]["decision"] == "blocked" and decided[0]["result"] == "writes_disabled"
+
+
+async def test_a_permitted_write_patches_on_farm_then_observes_on_care() -> None:
+    """The only test in this file that lets a write through, and it goes to fake hosts.
+
+    The asymmetry being exercised: this path writes for real because `herd_health` has to
+    discover a coyote kill through its own tools. An overlay it cannot see is not a discovery,
+    so there is no cheaper way to prove that behaviour.
+
+    **The two routes are on two different hosts on purpose.** M5 shipped both against
+    `CARE_API` and this rail is what makes the split structural: the PATCH is mocked only on
+    FARM and the POST only on CARE, so collapsing them back into one client fails here rather
+    than 404ing in front of an audience. Every field asserted below was read off the deployed
+    services' own 422 responses on 2026-09-10.
+    """
+    settings = chaos_settings(chaos_allow_writes=True, chaos_animal_cohort=",".join(COHORT))
+    with respx.mock(assert_all_called=True) as mock:
+        patched = mock.patch(f"{FARM}/animals/cow-0901").respond(200, json={"data": {"id": "cow-0901", "status": "deceased"}})
+        observed = mock.post(f"{CARE}/animals/cow-0901/observations").respond(201, json={"data": {"id": "obs-1"}})
+        outcomes = await fire_animal_events([animal_event()], settings=settings)
+
+    assert [(o.performed, o.reason) for o in outcomes] == [(True, "written")]
+    assert json.loads(patched.calls[0].request.content) == {"status": "deceased"}
+    body = json.loads(observed.calls[0].request.content)
+    assert body == {"type": "injury", "severity": "high", "note": "Found down at first light, predation signs.", "observedAt": "2026-09-10T14:30:00.000Z"}
+    assert "notes" not in body and "observedBy" not in body, "`notes` 422s and `observedBy` is silently dropped; a body that looks like it recorded an author and did not is worse than one that never claimed to"
+
+
+async def test_the_observation_is_stamped_when_the_ranch_broke_not_when_the_write_ran() -> None:
+    """`observedAt` is required upstream, and the note a human reads has to carry the time the
+    event happened. Milliseconds and a `Z`, matching the upstream services exactly, because
+    lexicographic ordering is relied upon."""
+    settings = chaos_settings(chaos_allow_writes=True, chaos_animal_cohort=",".join(COHORT))
+    event = replace(animal_event(), injected_at=datetime(2026, 9, 10, 5, 6, 7, 89000, tzinfo=UTC))
+    with respx.mock(assert_all_called=True) as mock:
+        mock.patch(f"{FARM}/animals/cow-0901").respond(200, json={"data": {}})
+        observed = mock.post(f"{CARE}/animals/cow-0901/observations").respond(201, json={"data": {}})
+        await fire_animal_events([event], settings=settings)
+    assert json.loads(observed.calls[0].request.content)["observedAt"] == "2026-09-10T05:06:07.089Z"
+
+
+async def test_a_status_that_landed_and_a_note_that_did_not_is_a_partial_not_a_retry() -> None:
+    """The animal really is changed upstream. Reporting this as a failure invites a caller to
+    retry the pair and write the status twice."""
+    settings = chaos_settings(chaos_allow_writes=True, chaos_animal_cohort=",".join(COHORT))
+    with respx.mock(assert_all_called=True) as mock:
+        mock.patch(f"{FARM}/animals/cow-0901").respond(200, json={"data": {}})
+        mock.post(f"{CARE}/animals/cow-0901/observations").respond(500, json={"error": {"message": "boom"}})
+        outcomes = await fire_animal_events([animal_event()], settings=settings)
+
+    assert outcomes[0].performed is True
+    assert outcomes[0].reason == "observation_failed_500"
+
+
+async def test_a_rejected_status_never_reaches_the_observation() -> None:
+    """A 422 on the PATCH means the animal is unchanged, so posting the note anyway would put a
+    coyote kill in a live cow's history with nothing behind it. The pair is ordered for this
+    reason: the status is the fact, the note is the story about the fact."""
+    settings = chaos_settings(chaos_allow_writes=True, chaos_animal_cohort=",".join(COHORT))
+    with respx.mock(assert_all_called=False) as mock:
+        mock.patch(f"{FARM}/animals/cow-0901").respond(422, json={"error": {"code": "VALIDATION_ERROR"}})
+        observed = mock.post(f"{CARE}/animals/cow-0901/observations").respond(201, json={"data": {}})
+        outcomes = await fire_animal_events([animal_event()], settings=settings)
+
+    assert (outcomes[0].performed, outcomes[0].reason) == (False, "patch_failed_422")
+    assert not observed.called
+
+
+async def test_restoring_the_cohort_goes_through_the_same_guard_as_breaking_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sensor overlay expires and the sensor is honest again. A real PATCH is not undone by
+    a row changing status, so restore is a deliberate command - and it is not a back door."""
+    def _explode(*_a: object, **_k: object) -> None:
+        raise AssertionError("restore reached the network with writes disabled")
+
+    monkeypatch.setattr("src.tools.chaos.upstream_client", _explode)
+    settings = chaos_settings(chaos_allow_writes=False, chaos_animal_cohort=",".join(COHORT))
+    outcomes = await restore_cohort(settings=settings)
+    assert len(outcomes) == len(COHORT)
+    assert {o.reason for o in outcomes} == {"writes_disabled"}
+
+
+async def test_restore_refuses_a_status_the_farm_api_would_reject() -> None:
+    """M5 shipped `--status healthy` as the default and `healthy` is not in the enum, so the
+    reset command would have 422'd five times and left the cohort dead. It raises before the
+    network now, and the normal state is `active`."""
+    settings = chaos_settings(chaos_allow_writes=True, chaos_animal_cohort=",".join(COHORT))
+    with pytest.raises(ValueError, match="not one of"):
+        await restore_cohort(status="healthy", settings=settings)
+    assert ANIMAL_STATUS_NORMAL == "active" and ANIMAL_STATUS_NORMAL in ANIMAL_STATUSES
+
+
+async def test_a_sensor_overlay_event_never_reaches_the_write_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The two paths do not leak into each other. A `sensor_overlay` row is a lie stored
+    locally and must never turn into an upstream mutation."""
+    def _explode(*_a: object, **_k: object) -> None:
+        raise AssertionError("a sensor overlay event reached the Care API")
+
+    monkeypatch.setattr("src.tools.chaos.upstream_client", _explode)
+    settings = chaos_settings(chaos_allow_writes=True, chaos_animal_cohort=",".join(COHORT))
+    assert await fire_animal_events([sensor_event(mode=MODE_OFFLINE)], settings=settings) == ()
+
+
+# --------------------------------------------------------------------------- #
+# 3b. the catalog validates loudly
+# --------------------------------------------------------------------------- #
+def test_the_shipped_catalog_parses_and_every_scenario_is_usable() -> None:
+    """`data/examples.json` is data, and nothing else in the gate reads it. If it stops
+    parsing, this is the only place that notices before a demo does."""
+    scenarios = load_catalog()
+    assert len(scenarios) >= 12
+    assert {s.kind for s in scenarios} <= {KIND_SENSOR, KIND_ANIMAL}
+    assert any(s.correlated for s in scenarios), "no correlated scenario, so the fused-work-order story has nothing to fire"
+    assert any(s.kind == KIND_ANIMAL for s in scenarios), "no animal scenario, so herd_health has nothing to discover"
+    for s in scenarios:
+        assert s.ttl_ticks > 0 and s.weight > 0 and s.faults
+
+
+def test_the_catalog_comes_back_sorted_by_id_so_file_order_cannot_change_a_seed() -> None:
+    """Weights decide what fires. File order must not, or reordering the catalog for
+    readability silently rewrites every replay."""
+    ids = [s.id for s in load_catalog()]
+    assert ids == sorted(ids)
+
+
+def _one_scenario(**over: object) -> dict[str, object]:
+    base: dict[str, object] = {"id": "s1", "title": "t", "kind": KIND_SENSOR, "weight": 1, "ttl_ticks": 2, "faults": [{"mode": MODE_PIN, "sensor_type": "water-level", "value": 0.5}]}
+    base.update(over)
+    return {"scenarios": [base]}
+
+
+def _animal_scenario(**over: object) -> dict[str, object]:
+    """An animal scenario whose four upstream-validated fields can be broken one at a time.
+
+    These are checked at LOAD against the enums the deployed services enforce, because the
+    alternative is a 422 during a demo: the write is the only path here that can be rejected by
+    a service rather than by this repo, and nobody is reading the log while an audience waits.
+    """
+    fault: dict[str, object] = {"mode": MODE_ANIMAL_STATUS, "status": "deceased", "observation_type": "injury", "severity": "high", "observation": "Found down at first light."}
+    fault.update(over)
+    return {"scenarios": [{"id": "kill", "title": "t", "kind": KIND_ANIMAL, "weight": 1, "ttl_ticks": 2, "faults": [fault]}]}
+
+
+@pytest.mark.parametrize(
+    ("broken", "fragment"),
+    [
+        ({"scenarios": []}, "configured to do nothing"),
+        (_one_scenario(faults=[{"mode": "explode_the_barn", "sensor_type": "water-level"}]), "not valid for kind"),
+        (_one_scenario(kind="telepathy"), "which is not one of"),
+        (_one_scenario(weight=0), "should be deleted, not weighted to zero"),
+        (_one_scenario(ttl_ticks=0), "goes quiet an hour in"),
+        (_one_scenario(faults=[{"mode": MODE_PIN, "sensor_type": "water-level"}]), "without a numeric `value`"),
+        (_one_scenario(faults=[{"mode": MODE_DRIFT, "sensor_type": "battery-charge", "from": 40}]), "`from` and `to`"),
+        (_one_scenario(faults=[{"mode": MODE_OFFLINE}]), "no `sensor_type`"),
+        (_one_scenario(faults=[{"mode": MODE_PIN, "sensor_type": "water-level", "value": 1, "count": 0}]), "count 0"),
+        ({"scenarios": [{"id": "s1", "ttl_ticks": 1, "faults": [{"mode": MODE_OFFLINE, "sensor_type": "gate"}]}, {"id": "s1", "ttl_ticks": 1, "faults": [{"mode": MODE_OFFLINE, "sensor_type": "gate"}]}]}, "duplicate scenario id"),
+        (_one_scenario(kind=KIND_ANIMAL, faults=[{"mode": MODE_PIN, "sensor_type": "water-level", "value": 1}]), "not valid for kind"),
+        (_animal_scenario(status="dead"), "the Farm API accepts only"),
+        (_animal_scenario(observation_type="mauling"), "the Care API accepts only"),
+        (_animal_scenario(severity="catastrophic"), "the Care API accepts only"),
+        (_animal_scenario(observation="   "), "what a human reads"),
+    ],
+)
+def test_a_broken_catalog_raises_at_load_rather_than_no_opping_at_inject_time(broken: object, fragment: str) -> None:
+    """The natural failure of a data-driven injector is a scenario that parses, fires, and
+    does nothing. On stage that is indistinguishable from a calm ranch, so validation is loud
+    and it happens at load."""
+    with pytest.raises(ChaosCatalogError) as err:
+        parse_catalog(broken)
+    assert fragment in str(err.value)
+
+
+# --------------------------------------------------------------------------- #
+# 3c. determinism is the product
+# --------------------------------------------------------------------------- #
+def fixture_catalog() -> tuple[SensorRef, ...]:
+    entries = load_fixtures()["catalog"]
+    return tuple(SensorRef(sensor_id=str(e["sensor_id"]), sensor_type=str(e["sensor_type"]), location=str(e.get("location") or ""), status="online") for e in entries)
+
+
+def as_rows(planned: tuple[PlannedFault, ...]) -> list[dict[str, object]]:
+    return [{"seq": p.seq, "tick": p.tick, "scenario": p.scenario, "group_id": p.group_id, "kind": p.kind, "target_id": p.target_id, "target_type": p.target_type, "location": p.location, "fault": p.fault, "ttl_ticks": p.ttl_ticks, "payload": p.payload} for p in planned]
+
+
+def test_seed_one_replays_the_golden_plan_exactly() -> None:
+    """The rail that makes "same seed, same demo, twice" a fact rather than an intention.
+
+    Checked in as data in `data/examples.json` rather than computed here, so this fails if the
+    draw order, the weights, the catalog sort, or the group-id scheme changes. Every one of
+    those is a real change to what a recorded demo does, and it should require a deliberate
+    regeneration of the fixture rather than passing quietly.
+    """
+    fixtures = load_fixtures()
+    got = as_rows(plan(seed=1, catalog=fixture_catalog(), ticks=int(fixtures["ticks"]), cohort=tuple(fixtures["cohort"])))
+    assert got == fixtures["plan_seed_1"]
+
+
+def test_the_plan_ignores_the_order_the_catalog_arrived_in() -> None:
+    """`ranch://sensors/map` and `GET /sensors` do not promise the same order, and a demo must
+    not change shape based on which source answered."""
+    catalog = fixture_catalog()
+    assert as_rows(plan(seed=1, catalog=catalog, ticks=13, cohort=COHORT)) == as_rows(plan(seed=1, catalog=tuple(reversed(catalog)), ticks=13, cohort=COHORT))
+
+
+def test_a_longer_plan_extends_a_shorter_one_rather_than_rewriting_it() -> None:
+    """Every draw happens in tick order, so `event_id` is stable across runs of different
+    lengths. That is what lets a re-injected demo be idempotent instead of doubled."""
+    catalog = fixture_catalog()
+    short = as_rows(plan(seed=1, catalog=catalog, ticks=4, cohort=COHORT))
+    longer = as_rows(plan(seed=1, catalog=catalog, ticks=13, cohort=COHORT))
+    assert longer[: len(short)] == short
+
+
+def test_a_different_seed_is_a_different_demo() -> None:
+    catalog = fixture_catalog()
+    assert as_rows(plan(seed=1, catalog=catalog, ticks=13, cohort=COHORT)) != as_rows(plan(seed=2, catalog=catalog, ticks=13, cohort=COHORT))
+
+
+def test_an_animal_event_stays_in_the_plan_whether_or_not_writes_are_permitted() -> None:
+    """`plan()` reads no settings at all. A plan that changes shape when a flag flips is a plan
+    whose seed no longer identifies a demo; the guard belongs at the write, where it can leave
+    a receipt."""
+    planned = plan(seed=1, catalog=fixture_catalog(), ticks=13, cohort=COHORT)
+    assert any(p.kind == KIND_ANIMAL for p in planned)
+    assert all(p.target_id in COHORT for p in planned if p.kind == KIND_ANIMAL)
+
+
+def test_an_empty_cohort_plans_no_animal_event_and_says_so() -> None:
+    with capture_logs() as logs:
+        planned = plan(seed=1, catalog=fixture_catalog(), ticks=13, cohort=())
+    assert not [p for p in planned if p.kind == KIND_ANIMAL]
+    assert any(line["event"] == "chaos_no_cohort_target" for line in logs)
+
+
+def test_a_scenario_asking_for_a_type_the_ranch_does_not_have_warns_and_skips_it() -> None:
+    """The catalog names sensor TYPES, never ids, so it survives a ranch that adds a pasture.
+    The cost is that a type can be absent, and that has to be loud rather than a silent
+    scenario that fires and does nothing."""
+    scenarios = (Scenario(id="ghost", title="ghost", kind=KIND_SENSOR, weight=1, ttl_ticks=2, faults=(FaultSpec(mode=MODE_OFFLINE, sensor_type="unicorn-detector"),)),)
+    with capture_logs() as logs:
+        assert plan(seed=1, catalog=fixture_catalog(), ticks=3, scenarios=scenarios) == ()
+    assert any(line["event"] == "chaos_no_target_for_type" for line in logs)
+
+
+def test_a_co_located_scenario_that_cannot_pair_records_the_miss_rather_than_faking_it() -> None:
+    """`well_failure` claims a causal story: a wellhead and the tank it fills, at one place.
+    Given a catalog where that pairing is impossible the fault is still useful, but it is no
+    longer the story it advertises, so the row says so."""
+    scenarios = (Scenario(id="well_failure", title="well", kind=KIND_SENSOR, weight=1, ttl_ticks=2, correlated=True, co_located=True, faults=(FaultSpec(mode=MODE_PIN, sensor_type="pressure", params={"value": 118.0}), FaultSpec(mode=MODE_PIN, sensor_type="water-level", params={"value": 0.7}))),)
+    catalog = (SensorRef(sensor_id="a-press", sensor_type="pressure", location="Home Place", status="online"), SensorRef(sensor_id="b-water", sensor_type="water-level", location="North Pasture", status="online"))
+    planned = plan(seed=1, catalog=catalog, ticks=1, scenarios=scenarios)
+    assert len(planned) == 2
+    assert "co_located" not in planned[0].payload  # the anchor cannot miss its own location
+    assert planned[1].payload["co_located"] is False
+
+
+def test_a_co_located_scenario_that_can_pair_does_not_flag_a_miss() -> None:
+    scenarios = (Scenario(id="well_failure", title="well", kind=KIND_SENSOR, weight=1, ttl_ticks=2, correlated=True, co_located=True, faults=(FaultSpec(mode=MODE_PIN, sensor_type="pressure", params={"value": 118.0}), FaultSpec(mode=MODE_PIN, sensor_type="water-level", params={"value": 0.7}))),)
+    catalog = (SensorRef(sensor_id="a-press", sensor_type="pressure", location="Home Place", status="online"), SensorRef(sensor_id="b-water", sensor_type="water-level", location="Home Place", status="online"))
+    planned = plan(seed=1, catalog=catalog, ticks=1, scenarios=scenarios)
+    assert {p.location for p in planned} == {"Home Place"}
+    assert not any("co_located" in p.payload for p in planned)
+    assert len({p.group_id for p in planned}) == 1, "a correlated scenario is one group, or the fusion story has nothing to key on"
+
+
+def test_ticks_between_events_thins_the_plan_without_reshuffling_it() -> None:
+    """The demo knob: one event every N ticks, so a long run does not saturate. It changes
+    WHEN a scenario fires and must not change the sequence of scenarios drawn."""
+    catalog = fixture_catalog()
+    every_tick = plan(seed=1, catalog=catalog, ticks=6, cohort=COHORT, ticks_between_events=1)
+    every_third = plan(seed=1, catalog=catalog, ticks=6, cohort=COHORT, ticks_between_events=3)
+    assert {p.tick for p in every_third} == {3, 6}
+    assert [p.scenario for p in every_third][:1] == [every_tick[0].scenario]
+
+
+# --------------------------------------------------------------------------- #
+# 3d. every fault mode lands in a category triage already owns
+#
+# Chaos invents no category and no severity. Each mode below produces a reading that
+# `triage.py` already has a rule for, which is what keeps a faulted ranch and a genuinely
+# broken one indistinguishable from the monitor's side. If chaos needed its own triage
+# branch, the exercise would be testing the fixture instead of the monitor.
+# --------------------------------------------------------------------------- #
+def overlay_one(reading_in: SensorReading, event: ChaosEvent, *, now: datetime | None = None) -> SensorReading:
+    return apply_overlay([reading_in], [event], now=now)[0]
+
+
+def test_offline_makes_the_dark_sensor_triage_already_knows() -> None:
+    faked = overlay_one(reading("water-level", 16.4), sensor_event(mode=MODE_OFFLINE))
+    assert faked.status == "offline" and faked.value is None
+    assert [f.category for f in triage_reading(faked)] == [CATEGORY_OFFLINE]
+
+
+def test_degraded_leaves_the_value_alone_because_that_is_the_harder_failure_to_notice() -> None:
+    """A degraded sensor still answers. The number is merely no longer trustworthy, and a
+    human scanning a dashboard reads it as fine."""
+    faked = overlay_one(reading("water-level", 16.4), sensor_event(mode=MODE_DEGRADED))
+    assert faked.status == "degraded" and faked.value == 16.4
+    assert CATEGORY_DEGRADED in [f.category for f in triage_reading(faked)]
+
+
+def test_a_sentinel_reads_as_a_broken_probe_and_never_as_weather() -> None:
+    """-500 F is the fault the live ranch already has: a temperature sensor answering an
+    impossible number with `status: "online"`. Chaos reproduces the real one."""
+    faked = overlay_one(reading("temperature", 61.0), sensor_event(mode=MODE_SENTINEL, sensor_type="temperature", payload={"value": -500.0}))
+    assert faked.value == -500.0 and faked.status == "online"
+    assert [f.category for f in triage_reading(faked)] == [CATEGORY_FAULT]
+
+
+def test_a_pin_lands_inside_a_real_threshold_band() -> None:
+    faked = overlay_one(reading("water-level", 16.4), sensor_event(mode=MODE_PIN, payload={"value": 0.8}))
+    findings = triage_reading(faked)
+    assert [(f.category, f.severity) for f in findings] == [("water_low", "critical")]
+
+
+def test_gate_open_stays_boolean_through_the_overlay() -> None:
+    """The one type whose rule is not a threshold comparison. A gate faked to the number 1 is
+    a broken feed, not an open gate, and triage would say so."""
+    faked = overlay_one(reading("gate", False), sensor_event(mode=MODE_GATE_OPEN, sensor_type="gate"))
+    assert faked.value is True and isinstance(faked.value, bool)
+    assert [f.category for f in triage_reading(faked)] == ["gate_open"]
+
+
+def test_a_drift_ramps_from_nominal_through_warning_into_critical() -> None:
+    """The showcase mode, and the reason it exists. A step change is one incident that opens
+    once; a ramp is an incident that gets WORSE while a human watches, which is the only way
+    `ongoing` and a severity escalation ever get exercised.
+    """
+    injected = datetime(2026, 9, 10, 14, 0, tzinfo=UTC)
+    event = sensor_event(mode=MODE_DRIFT, sensor_type="battery-charge", payload={"from": 45.0, "to": 8.0}, ttl_minutes=60, injected_at=injected)
+    honest = reading("battery-charge", 88.0)
+
+    at_start = overlay_one(honest, event, now=injected)
+    at_half = overlay_one(honest, event, now=injected + timedelta(minutes=30))
+    at_end = overlay_one(honest, event, now=injected + timedelta(minutes=60))
+    past_end = overlay_one(honest, event, now=injected + timedelta(minutes=600))
+
+    assert (at_start.value, at_end.value) == (45.0, 8.0)
+    assert at_half.value == pytest.approx(26.5)
+    assert past_end.value == 8.0, "progress is clamped, so a stale event does not ramp past its endpoint"
+
+    assert triage_reading(at_start) == []
+    assert [(f.category, f.severity) for f in triage_reading(at_half)] == [("power_low", "warning")]
+    assert [(f.category, f.severity) for f in triage_reading(at_end)] == [("power_low", "critical")]
+
+
+def test_an_unknown_fault_mode_warns_once_and_changes_nothing() -> None:
+    """Same discipline as an unrecognized sensor type in triage. There is no default branch in
+    `apply_fault`, so a typo'd mode cannot quietly become "do nothing" without saying so."""
+    honest = reading("water-level", 16.4)
+    with capture_logs() as logs:
+        first = overlay_one(honest, sensor_event(mode="telekinesis"))
+        second = overlay_one(honest, sensor_event(mode="telekinesis", seq=1))
+    assert first == honest and second == honest
+    assert len([line for line in logs if line["event"] == "chaos_unknown_fault_mode"]) == 1
+
+
+def test_a_pin_with_no_numeric_value_warns_and_leaves_the_reading_honest() -> None:
+    """Belt and braces. `parse_catalog` already refuses this, but a row can also come from the
+    database, and a fault that cannot apply must not silently corrupt the reading."""
+    honest = reading("water-level", 16.4)
+    with capture_logs() as logs:
+        assert overlay_one(honest, sensor_event(mode=MODE_PIN, payload={})) == honest
+    assert any(line["event"] == "chaos_fault_unusable" for line in logs)
+
+
+def test_the_overlay_logs_the_honest_value_beside_the_faked_one() -> None:
+    """The log is the only place the truth still exists after the substitution. A faked reading
+    that leaves no trace is a demo nobody can audit afterward."""
+    with capture_logs() as logs:
+        overlay_one(reading("water-level", 16.4), sensor_event(mode=MODE_PIN, payload={"value": 0.8}))
+    applied = [line for line in logs if line["event"] == "chaos_overlay_applied"]
+    assert len(applied) == 1
+    assert applied[0]["honest_value"] == 16.4 and applied[0]["faked_value"] == 0.8
+
+
+def test_the_overlay_touches_only_its_own_target() -> None:
+    readings = [reading("water-level", 16.4, sensor_id="fx-water-01"), reading("water-level", 16.4, sensor_id="fx-water-02")]
+    faked = apply_overlay(readings, [sensor_event(mode=MODE_PIN, target_id="fx-water-02", payload={"value": 0.8})])
+    assert [r.value for r in faked] == [16.4, 0.8]
+
+
+def test_an_animal_event_is_never_laid_over_a_reading() -> None:
+    """The two paths are separate by construction. An `animal_event` in the active set is a
+    receipt for an upstream write, not something to apply to a sensor."""
+    readings = [reading("water-level", 16.4, sensor_id="cow-0901")]
+    assert apply_overlay(readings, [animal_event()]) == tuple(readings)
+
+
+def test_a_fault_on_a_sensor_this_sweep_did_not_read_changes_nothing() -> None:
+    """Orphans are allowed on purpose: cross-service ids are plain strings and chaos adds no
+    existence check. An overlay row for a sensor that has since gone away is inert."""
+    readings = [reading("water-level", 16.4, sensor_id="fx-water-01")]
+    assert apply_overlay(readings, [sensor_event(mode=MODE_OFFLINE, target_id="fx-ghost-99")]) == tuple(readings)
+
+
+def test_two_faults_on_one_sensor_compose_in_seq_order() -> None:
+    """Deterministic composition. The database allows one active fault per (target, mode), so
+    two different modes on one sensor is legal and has to resolve the same way every run."""
+    honest = reading("water-level", 16.4)
+    events = [sensor_event(mode=MODE_PIN, payload={"value": 0.8}, seq=1), sensor_event(mode=MODE_DEGRADED, seq=0)]
+    faked = apply_overlay(honest and [honest], events)[0]
+    assert (faked.status, faked.value) == ("degraded", 0.8)
+
+
+async def test_the_sweep_applies_the_overlay_and_reports_how_many_lies_it_told() -> None:
+    """The overlay is applied inside `sweep()` and nowhere else, so nothing downstream needs to
+    know chaos exists. `overlay_events` rides on the result rather than hiding in the sweep,
+    because a tick line that cannot say the ranch was being lied to is a mystery, not a demo."""
+    with respx.mock(base_url=BASE) as mock:
+        mock.get(f"/sensors/{REF.sensor_id}").respond(200, json=payload(16.4))
+        result = await sweep([REF], overlay=[sensor_event(mode=MODE_PIN, target_id=REF.sensor_id, payload={"value": 0.8})])
+
+    assert result.overlay_events == 1
+    assert [r.value for r in result.readings] == [0.8]
+    assert [(f.category, f.severity) for f in triage_sweep(result.readings)] == [("water_low", "critical")]
+
+
+async def test_an_empty_overlay_is_an_honest_sweep_and_says_zero() -> None:
+    with respx.mock(base_url=BASE) as mock:
+        mock.get(f"/sensors/{REF.sensor_id}").respond(200, json=payload(16.4))
+        result = await sweep([REF], overlay=[])
+    assert result.overlay_events == 0 and [r.value for r in result.readings] == [16.4]
+    assert triage_sweep(result.readings) == []
+
+
+async def test_chaos_switched_off_costs_a_boolean_and_never_a_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rail that protects the OTHER session's numbers. `CHAOS_ENABLED=0` has to be free:
+    an overlay firing underneath a cost measurement turns the measurement into noise, and a
+    per-tick database round trip for an empty answer is a tax on every calm tick forever."""
+    def _explode(*_a: object, **_k: object) -> None:
+        raise AssertionError("a switched-off overlay resolved a store")
+
+    monkeypatch.setattr("src.tools.chaos.get_settings", lambda: chaos_settings(chaos_enabled=False))
+    monkeypatch.setattr("src.tools.chaos.resolve_store", _explode)
+    assert await active_overlay() == ()
+
+
+async def test_an_overlay_that_cannot_be_read_leaves_the_sweep_honest_rather_than_failing_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chaos is a fixture. A fixture that can fail the tick it decorates is worse than no
+    fixture, so this is the one place in the repo that swallows a broad exception on purpose -
+    and it says so in the log rather than returning a quiet empty tuple."""
+    def _explode(*_a: object, **_k: object) -> None:
+        raise RuntimeError("sw_ops is unreachable")
+
+    monkeypatch.setattr("src.tools.chaos.get_settings", lambda: chaos_settings(chaos_enabled=True))
+    monkeypatch.setattr("src.tools.chaos.resolve_store", _explode)
+    with capture_logs() as logs:
+        assert await active_overlay() == ()
+    assert any(line["event"] == "chaos_overlay_unavailable" for line in logs)
+
+
+# --------------------------------------------------------------------------- #
+# 3e. the ledger, against a real `sw_ops_test`
+#
+# These rails skip when no local Postgres is up, per `tests/CLAUDE.md`, so `pytest` passes on
+# a plane. They are the only place the partial unique index, `ON CONFLICT DO NOTHING`, and
+# JSONB round-tripping are proven, and none of those can be proven against a fake.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+async def chaos_store(migrated_store: str) -> AsyncIterator[AsyncSession]:
+    """An empty `chaos_events` AND an empty `incidents`, on one session.
+
+    A fresh engine per test for the same reason `store` does it: pytest-asyncio gives each
+    test its own loop and an AsyncEngine is bound to the loop it first connected on. Defined
+    here rather than in `conftest.py` deliberately - the M3 session is closing a phase in the
+    shared fixtures right now, and a table only these rails use does not need to be there.
+    """
+    engine = build_engine(migrated_store, schema=SCHEMA_TEST)
+    async with engine.begin() as conn:
+        await conn.execute(text("truncate table chaos_events restart identity"))
+        await conn.execute(text("truncate table incidents restart identity"))
+    try:
+        async with session_factory(engine)() as session:
+            yield session
+    finally:
+        await engine.dispose()
+
+
+NOW = datetime(2026, 9, 10, 14, 30, tzinfo=UTC)
+
+
+async def test_injecting_one_tick_writes_the_rows_and_they_come_back_active(chaos_store: AsyncSession) -> None:
+    planned = plan(seed=1, catalog=fixture_catalog(), ticks=2, cohort=COHORT)
+    events = await inject_for_tick(chaos_store, tick=2, planned=planned, now=NOW, run_id="run-x", max_active=6, tick_seconds=300)
+
+    assert [e.tick_injected for e in events] == [2]
+    assert events[0].status == STATUS_ACTIVE and events[0].run_id == "run-x"
+    assert events[0].expires_at == NOW + timedelta(seconds=300 * planned[1].ttl_ticks)
+    assert events[0].payload, "the fault parameters have to survive the JSONB round trip, or `apply_fault` has nothing to read"
+
+    live = await active_chaos_events(chaos_store, now=NOW, kind=KIND_SENSOR)
+    assert tuple(ChaosEvent.from_row(r) for r in live) == events
+
+
+async def test_replaying_the_same_seed_is_idempotent_rather_than_doubling_the_demo(chaos_store: AsyncSession) -> None:
+    """`event_id` is derived from `(seed, seq)` rather than from a uuid, so the database itself
+    refuses the second copy. Determinism made structural: re-running a demo cannot stack two
+    identical faults on one tank."""
+    planned = plan(seed=1, catalog=fixture_catalog(), ticks=2, cohort=COHORT)
+    first = await inject_for_tick(chaos_store, tick=2, planned=planned, now=NOW, max_active=6, tick_seconds=300)
+    with capture_logs() as logs:
+        second = await inject_for_tick(chaos_store, tick=2, planned=planned, now=NOW + timedelta(seconds=1), max_active=6, tick_seconds=300)
+
+    assert first and second == ()
+    assert any(line["event"] == "chaos_insert_deduplicated" for line in logs)
+    counts = await chaos_counts_by_status(chaos_store)
+    assert counts == {STATUS_ACTIVE: len(first)}
+
+
+async def test_a_second_fault_of_the_same_mode_on_the_same_target_is_refused_while_the_first_is_active(chaos_store: AsyncSession) -> None:
+    """The partial unique index, and the reason it is partial. One ACTIVE fault per
+    (target, mode); the history still survives, because the same tank faulted this morning and
+    again tonight is two rows - which is exactly what a resolved incident followed by a new one
+    looks like."""
+    one = sensor_event(mode=MODE_PIN, target_id="fx-water-02", payload={"value": 0.8}, seq=0)
+    two = sensor_event(mode=MODE_PIN, target_id="fx-water-02", payload={"value": 0.4}, seq=1)
+    assert len(await insert_chaos_events(chaos_store, [one.to_row()])) == 1
+    assert await insert_chaos_events(chaos_store, [two.to_row()]) == ()
+
+    await expire_chaos_events(chaos_store, now=NOW, force_all=True)
+    assert len(await insert_chaos_events(chaos_store, [two.to_row()])) == 1, "once the first has healed, the same tank may break again"
+
+
+async def test_the_ceiling_admits_a_correlated_scenario_whole_or_not_at_all(chaos_store: AsyncSession) -> None:
+    """A storm front trimmed to two of its four faults is no longer the scenario it claims to
+    be, and the fused-work-order behaviour it exists to demonstrate would silently stop being
+    tested. So the ceiling defers the whole group rather than truncating the list."""
+    scenarios = (Scenario(id="storm", title="storm", kind=KIND_SENSOR, weight=1, ttl_ticks=3, correlated=True, faults=(FaultSpec(mode=MODE_PIN, sensor_type="water-level", count=3, params={"value": 0.8}),)),)
+    planned = plan(seed=1, catalog=fixture_catalog(), ticks=1, scenarios=scenarios)
+    assert len(planned) == 3
+
+    with capture_logs() as logs:
+        events = await inject_for_tick(chaos_store, tick=1, planned=planned, now=NOW, max_active=2, tick_seconds=300)
+    assert events == ()
+    assert any(line["event"] == "chaos_group_deferred" for line in logs)
+
+    events = await inject_for_tick(chaos_store, tick=1, planned=planned, now=NOW, max_active=3, tick_seconds=300)
+    assert len(events) == 3
+
+
+async def test_a_full_ranch_injects_nothing_until_healing_catches_up(chaos_store: AsyncSession) -> None:
+    """The ceiling is what keeps something left to break. Without it every sensor is faulted
+    twenty minutes in and the ranch stops being able to surprise anyone."""
+    await insert_chaos_events(chaos_store, [sensor_event(mode=MODE_OFFLINE, target_id=f"fx-{i}", seq=i).to_row() for i in range(4)])
+    planned = plan(seed=1, catalog=fixture_catalog(), ticks=2, cohort=COHORT)
+    with capture_logs() as logs:
+        assert await inject_for_tick(chaos_store, tick=2, planned=planned, now=NOW, max_active=4, tick_seconds=300) == ()
+    assert any(line["event"] == "chaos_at_ceiling" for line in logs)
+
+
+async def test_an_expired_event_stops_being_applied_even_before_anything_sweeps_expiry(chaos_store: AsyncSession) -> None:
+    """Belt and braces: `active_chaos_events` filters on `expires_at` as well as on `status`, so
+    a sensor heals on time whether or not an expiry pass has run yet. A fault that outlives its
+    TTL because nobody swept is a ranch that never gets better."""
+    await insert_chaos_events(chaos_store, [sensor_event(mode=MODE_PIN, target_id="fx-water-02", payload={"value": 0.8}, ttl_minutes=15).to_row()])
+    assert len(await active_chaos_events(chaos_store, now=NOW + timedelta(minutes=10))) == 1
+    assert await active_chaos_events(chaos_store, now=NOW + timedelta(minutes=20)) == ()
+
+
+async def test_expiry_flips_the_row_and_stamps_when_it_healed(chaos_store: AsyncSession) -> None:
+    await insert_chaos_events(chaos_store, [sensor_event(mode=MODE_PIN, target_id="fx-water-02", payload={"value": 0.8}, ttl_minutes=15).to_row()])
+    healed = await expire(chaos_store, now=NOW + timedelta(minutes=20))
+    assert [e.status for e in healed] == ["expired"]
+    assert healed[0].expired_at == NOW + timedelta(minutes=20)
+    assert await chaos_counts_by_status(chaos_store) == {"expired": 1}
+
+
+async def test_force_expire_heals_the_whole_ranch_on_demand(chaos_store: AsyncSession) -> None:
+    """The demo reset. `--all` exists because the thing you need between two run-throughs is a
+    calm ranch, not a fifteen-minute wait."""
+    await insert_chaos_events(chaos_store, [sensor_event(mode=MODE_OFFLINE, target_id=f"fx-{i}", seq=i, ttl_minutes=600).to_row() for i in range(3)])
+    assert await expire(chaos_store, now=NOW) == ()
+    assert len(await expire(chaos_store, now=NOW, force_all=True)) == 3
+
+
+# --------------------------------------------------------------------------- #
+# 3f. one scenario, end to end
+# --------------------------------------------------------------------------- #
+async def test_one_scenario_from_injection_through_a_resolved_incident(chaos_store: AsyncSession) -> None:
+    """Inject, sweep, triage catches it, the TTL expires, reconcile resolves it.
+
+    This is the rail M5 exists to produce. Every other chaos test proves one piece in
+    isolation; this one proves the pieces compose, and specifically that **triage never learns
+    chaos exists**. The sweep is faked at the HTTP boundary and answers honestly both times;
+    the only difference between the two halves is whether an overlay row is active.
+
+    The resolve half is the half that matters. An injector without healing gives you a ledger
+    that only grows, and `resolved` is the bucket that makes the feed feel like a ranch rather
+    than a list of complaints.
+    """
+    tank = SensorRef(sensor_id="fx-water-02", sensor_type="water-level", location="South Draw", status="online")
+    honest = {"data": {"id": tank.sensor_id, "type": tank.sensor_type, "locationName": tank.location, "status": "online", "latestReading": {"value": 16.4, "recordedAt": FROZEN_TS}}}
+
+    planned = [p for p in plan(seed=1, catalog=fixture_catalog(), ticks=2, cohort=COHORT) if p.tick == 2]
+    assert [(p.scenario, p.target_id, p.fault) for p in planned] == [("dry_tank", "fx-water-02", MODE_PIN)], "the golden plan moved; regenerate the fixture on purpose or fix the draw"
+
+    # --- tick 2: chaos fires, and the monitor sees a dry tank on a live ranch that is fine ---
+    injected = await inject_for_tick(chaos_store, tick=2, planned=planned, now=NOW, run_id="e2e", max_active=6, tick_seconds=300)
+    overlay = await active_chaos_events(chaos_store, now=NOW, kind=KIND_SENSOR)
+    assert len(injected) == 1 and len(overlay) == 1
+
+    with respx.mock(base_url=BASE) as mock:
+        mock.get(f"/sensors/{tank.sensor_id}").respond(200, json=honest)
+        faulted = await sweep([tank], overlay=[ChaosEvent.from_row(r) for r in overlay])
+
+    findings = triage_sweep(faulted.readings)
+    assert [(f.category, f.severity, f.value) for f in findings] == [("water_low", "critical", 0.8)]
+    opened = await reconcile(chaos_store, findings, tick=2, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=NOW)
+    assert opened.counts == {"opened": 1, "ongoing": 0, "resolved": 0}
+
+    # --- tick 5: the TTL is up, the overlay is gone, and the same honest sweep reads nominal --
+    later = NOW + timedelta(seconds=300 * (planned[0].ttl_ticks + 1))
+    healed = await expire(chaos_store, now=later)
+    assert [e.event_id for e in healed] == [injected[0].event_id]
+
+    with respx.mock(base_url=BASE) as mock:
+        mock.get(f"/sensors/{tank.sensor_id}").respond(200, json=honest)
+        clean = await sweep([tank], overlay=[ChaosEvent.from_row(r) for r in await active_chaos_events(chaos_store, now=later, kind=KIND_SENSOR)])
+
+    assert clean.overlay_events == 0 and [r.value for r in clean.readings] == [16.4]
+    assert triage_sweep(clean.readings) == []
+    resolved = await reconcile(chaos_store, [], tick=5, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=later)
+    assert resolved.counts == {"opened": 0, "ongoing": 0, "resolved": 1}
+    assert resolved.resolved[0].sensor_id == tank.sensor_id

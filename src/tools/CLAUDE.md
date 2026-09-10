@@ -95,6 +95,23 @@ with no overlay at all. Two guards, both load-bearing: `CHAOS_ALLOW_WRITES` (off
 default) and `CHAOS_ANIMAL_COHORT`, which confines every mutation to a named handful of
 animals so the rest of the herd stays pristine for other demos.
 
+**That write spans two APIs, and it is the trap at the top of this file again.** The
+`PATCH` is on **`FARM_API`** and only the observation is on **`CARE_API`**. M5 shipped both
+against `CARE_API` and every rail passed, because a respx mock answers whatever host it is
+pointed at. Read off the deployed services on 2026-09-10:
+
+| Call | Base | Body |
+| --- | --- | --- |
+| `PATCH /animals/:animalId` | `FARM_API` | `status`, one of `active` \| `inactive` \| `sold` \| `deceased` |
+| `POST /animals/:animalId/observations` | `CARE_API` | `type` (`behavior` \| `appetite` \| `mobility` \| `appearance` \| `injury` \| `general`), `severity` (`low` \| `medium` \| `high`), `note`, `observedAt` - **all four required** |
+
+The field is **`note`, not `notes`**, there is no `observedBy` (it is accepted and dropped),
+and `healthy` is not a status, so a reset goes to `active`. All three enums are validated in
+`parse_catalog` at load, so a typo is a load-time error rather than a 422 nobody is watching
+for mid-demo. **Learn a shape like this by sending a deliberately invalid body to a
+nonexistent id and reading the 422** - it names the enum, mutates nothing, and does not
+require reading the frozen upstream's source.
+
 **Chaos is seeded and it heals.** A `random.Random(CHAOS_SEED)` picks scenario,
 targets, and timing, so a seed replays a demo. Chaos that cannot be reproduced is a
 flake, not a fixture. Every event carries a TTL, and expiry is what produces `resolved`

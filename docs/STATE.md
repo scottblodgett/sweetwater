@@ -4,7 +4,9 @@ The session-start briefing. **Read this one file, then the nested `CLAUDE.md` fo
 
 Refreshed at every milestone boundary, same step as `JOURNEY.md`. If it disagrees with the code, the code wins and this file is stale, say so.
 
-**Last refreshed:** 2026-09-10, at the M2 boundary.
+**Last refreshed:** 2026-09-10, at the **M5** boundary. M5 was built in a parallel session
+while M3 was in flight, so **M3 may have landed after this line was written**; if the table
+below and `git log` disagree, `git log` wins.
 
 ---
 
@@ -12,10 +14,11 @@ Refreshed at every milestone boundary, same step as `JOURNEY.md`. If it disagree
 
 | | |
 | --- | --- |
-| Done | **M0**: tree, three log streams, `config.py`, `mcp_client.py`, live handshake. **M1**: the free pass, `catalog -> sweep -> triage -> reconcile -> route`, five stages and zero tokens, plus the `sw_ops` store and Alembic. **M2**: the first phase that spends. `evidence.py`, `llm_client.py`, `system_prompts.py`, `workers.py`, the water and feed SOPs, and one agent (`water_feed`) writing a real work order per newly-opened incident. |
-| Gate | 168 tests, `ruff check .` clean, `mypy --strict` clean on 29 files, three live ticks producing **19 work orders, 19 shipped, 0 rejected**, and a token count that **fell** 58.3k to 38.3k to 24.2k as the ledger grew 25 to 65 rows. |
-| Next | **M3, the other four agents and the supervisor.** Not started. Nothing blocks it. |
-| HEAD | The M2 boundary on `master`. A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. Working tree clean apart from `.env` and `logs/` (both gitignored). |
+| Done | **M0**: tree, three log streams, `config.py`, `mcp_client.py`, live handshake. **M1**: the free pass, `catalog -> sweep -> triage -> reconcile -> route`, five stages and zero tokens, plus the `sw_ops` store and Alembic. **M2**: the first phase that spends. `evidence.py`, `llm_client.py`, `system_prompts.py`, `workers.py`, the water and feed SOPs, and one agent (`water_feed`) writing a real work order per newly-opened incident. **M3**: the supervisor, all five agents, the tool slices, and the remaining SOPs. Its code is on `master`; **its own phase close, including its `JOURNEY.md` entry, belongs to that session and is not reflected here.** **M5**: chaos. The seeded overlay in `sw_ops.chaos_events` applied inside `sweep()`, the guarded animal write path, migration `0002`, the `python -m src.tools.chaos` CLI, and 64 new rails. Built beside M3, not after it. |
+| Gate | **279 tests on the tree M5 landed on** (M3 and M5 together; the count was still moving as the other session committed), `ruff check .` clean, `mypy` clean on 29 files, one alembic head. M5's live checks: the same live sweep read calm honestly and critical in three categories with the overlay on, and `--once` on the combined tree shipped **23/23 work orders on 161,851 tokens** against `sw_ops_test`. |
+| Next | **M4, the tick loop.** Bare `python main.py` still exits 3 naming M4. |
+| HEAD | The M5 boundary on `master`, rebased on top of M3's two commits. A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. |
+| Owed | Two verifications are **deferred to the M3 boundary and deliberately unrun**: that a storm front fuses into one work order, and that `herd_health` discovers the coyote kill through its own tools. Both need a supervisor that now exists, so both are now doable. Neither was faked or weakened. Also owed: three lines wiring `inject_for_tick` into `run_tick`, and `chaos_fired` on the tick line. **And one defect M5's boundary run found in M3's code**: the supervisor's shift report truncated at `max_tokens=1024` and fell back to `shift_report=code`. `logging.md` calls that exact signature a config bug rather than a weak model. Left for the M3 session, whose file it is. |
 
 Milestone list and the shape: `docs/architecture.md`. The layout, the milestone order, and which leaf lands when: `docs/Plan.md`, which is the authority the tree matches. What happened and what diverged: `docs/JOURNEY.md`. Phase-close ritual: root `CLAUDE.md`.
 
@@ -31,7 +34,8 @@ Milestone list and the shape: `docs/architecture.md`. The layout, the milestone 
 | `src/agent/agent.py` | `ROUTES`, all 18 categories to an owner | the LangGraph supervisor and the five worker factories at M3 |
 | `src/agent/workers.py` | `water_feed`: the rails (`check`), `to_work_order`, `judge_packet`, `run_water_feed` | the other four agents at M3 |
 | `src/agent/state.py` | `RanchState`, `Finding`, `Incident`, `WorkOrder` | |
-| `src/agent/memory.py` | `sw_ops` only: reconcile, the engine allowlist | chaos events at M5, the checkpointer at M6 |
+| `src/agent/memory.py` | `sw_ops` only: reconcile, the engine allowlist, and the chaos-event store (`insert_chaos_events`, `active_chaos_events`, `expire_chaos_events`, `chaos_counts_by_status`) | the checkpointer at M6 |
+| `src/tools/chaos.py` | the scenario catalog, the pure seeded `plan()`, `inject_for_tick`, `apply_overlay`, the guarded animal write path, and the CLI | more scenarios; nothing structural |
 | `src/tools/evidence.py` | `assemble`, `EvidencePacket.render`, `SOP_FOR_CATEGORY` | more SOP files as M3 adds sensing worlds |
 | `src/models/llm_client.py` | `resolve_provider`, `build_client`, `call_tier2`, `ModelResponse`, `THINKING_BUDGET` | Tier 1 at M7, and **not before** |
 | `src/prompts/system_prompts.py` | `INHERITED_RULES`, `MANDATES`, `WORK_ORDER_SCHEMA`, `system_prompt()` | four more mandates at M3 |
@@ -170,6 +174,60 @@ Three live ticks on 2026-09-10, chaos off, against prod `sw_ops`:
 Two things already known that M3 will trip over: **`system_prompt()` logs `no_mandate_for_agent` for the four agents with no brief yet**, which is deliberate and is the signal that one is missing. And **no sensor incident routes to `herd_health`** by design, so it stays idle until chaos writes real animal events at M5. That is correct, not a gap.
 
 Then the phase-close ritual in root `CLAUDE.md`, in order, no exceptions. M1 skipped step 2 and it is what made this file lie to the next session for a commit; M2's step 2 is what found a documented `jq` command that had been wrong in three files for two milestones.
+
+---
+
+## M5 is landed. What a session needs to know before touching chaos
+
+**`CHAOS_ENABLED` defaults to `0` and should stay `0` unless you are driving a demo.** With it
+off, `sweep()` costs one boolean and opens no connection, so a tick is byte-for-byte what it
+was before M5. An overlay firing underneath a cost measurement turns the numbers into noise,
+which is why it shipped off.
+
+| Knob | Default | What it does |
+| --- | --- | --- |
+| `CHAOS_ENABLED` | `0` | the master switch. Off means the overlay is never read |
+| `CHAOS_SEED` | `1` | same seed, same demo, forever. `plan()` is pure |
+| `CHAOS_ALLOW_WRITES` | `0` | the only thing standing between a scenario and a real `PATCH` on the deployed Farm API |
+| `CHAOS_ANIMAL_COHORT` | five `cow-090x` ids | every animal mutation is confined to this set. An empty cohort means no animal event can fire at all |
+| `CHAOS_MAX_ACTIVE` | `6` | the ceiling. A correlated group that would cross it is deferred **whole**, never half-fired |
+
+Two injection paths, and the asymmetry is deliberate: **sensor faults are a lie this repo
+tells over a truthful upstream**, applied in `sweep()` and nowhere else; **animal events are
+real writes** through two different APIs, because `herd_health` has to find them with its own
+tools. Detail in `src/tools/CLAUDE.md`, including the two-API table that M5 got wrong first.
+
+Driving a demo. **The store target is explicit on purpose**: `resolve_store` defaults to
+prod, which is right for a tick and wrong for a copy-pasted experiment.
+
+```bash
+export SW_OPS_TARGET=test CHAOS_ENABLED=1        # drop SW_OPS_TARGET when you mean prod
+python -m src.tools.chaos status                 # what is armed, and how far through its TTL
+python -m src.tools.chaos plan --ticks 6         # what this seed will do, against the live catalog, touching nothing
+python -m src.tools.chaos inject --tick 2        # arm tick 2's events, and heal anything expired
+python -m src.tools.chaos expire                 # heal everything whose TTL is up
+python -m src.tools.chaos restore                # put the cohort back to `active`. Needs CHAOS_ALLOW_WRITES=1
+```
+
+`restore` **exits 1 when it restored nothing**, which is what a guarded refusal looks like from
+a shell: the command did not do its job, and a script chaining off it should stop. The other
+four exit 0 whether or not they had anything to do, because "nothing was due" is a successful
+answer. `plan` reads the live catalog and touches no database at all.
+
+**A replay is not a re-run.** Event ids are derived from seed, tick, and index, so injecting
+the same seed twice inserts nothing the second time. Re-driving a demo from the top means
+truncating `chaos_events` first. `docs/cookbook.md` #19.
+
+**Two sessions cannot run `pytest` at the same time.** `conftest.py` drops `sw_ops_test`
+`CASCADE` and re-migrates from its own worktree's `alembic/`, and the local Postgres is
+shared. This actually happened twice during M5's phase close and looked exactly like a
+migration rolling itself back. `docs/cookbook.md` #18.
+
+**There is one known orphan on the deployed Care API**: observation
+`0328d7e2-d271-4410-907c-a84020c2c8c7` against the nonexistent animal `zz-does-not-exist-0000`,
+created by a contract probe that returned 201 instead of the expected 422. Observations are
+append-only upstream, so it cannot be deleted from this repo. It is invisible to every real
+animal. Written down so it is a known artifact, not a mystery.
 
 ---
 
