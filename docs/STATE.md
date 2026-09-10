@@ -4,9 +4,9 @@ The session-start briefing. **Read this one file, then the nested `CLAUDE.md` fo
 
 Refreshed at every milestone boundary, same step as `JOURNEY.md`. If it disagrees with the code, the code wins and this file is stale, say so.
 
-**Last refreshed:** 2026-09-10, at the **M5** boundary. M5 was built in a parallel session
-while M3 was in flight, so **M3 may have landed after this line was written**; if the table
-below and `git log` disagree, `git log` wins.
+**Last refreshed:** 2026-09-10, at the **M3** boundary, which closed *after* M5's did. The two
+were built in parallel sessions on one `master`, so the phase numbers are not the commit order.
+`git log` is the authority on what landed when.
 
 ---
 
@@ -14,11 +14,11 @@ below and `git log` disagree, `git log` wins.
 
 | | |
 | --- | --- |
-| Done | **M0**: tree, three log streams, `config.py`, `mcp_client.py`, live handshake. **M1**: the free pass, `catalog -> sweep -> triage -> reconcile -> route`, five stages and zero tokens, plus the `sw_ops` store and Alembic. **M2**: the first phase that spends. `evidence.py`, `llm_client.py`, `system_prompts.py`, `workers.py`, the water and feed SOPs, and one agent (`water_feed`) writing a real work order per newly-opened incident. **M3**: the supervisor, all five agents, the tool slices, and the remaining SOPs. Its code is on `master`; **its own phase close, including its `JOURNEY.md` entry, belongs to that session and is not reflected here.** **M5**: chaos. The seeded overlay in `sw_ops.chaos_events` applied inside `sweep()`, the guarded animal write path, migration `0002`, the `python -m src.tools.chaos` CLI, and 64 new rails. Built beside M3, not after it. |
-| Gate | **279 tests on the tree M5 landed on** (M3 and M5 together; the count was still moving as the other session committed), `ruff check .` clean, `mypy` clean on 29 files, one alembic head. M5's live checks: the same live sweep read calm honestly and critical in three categories with the overlay on, and `--once` on the combined tree shipped **23/23 work orders on 161,851 tokens** against `sw_ops_test`. |
+| Done | **M0**: tree, three log streams, `config.py`, `mcp_client.py`, live handshake. **M1**: the free pass, `catalog -> sweep -> triage -> reconcile -> route`, five stages and zero tokens, plus the `sw_ops` store and Alembic. **M2**: the first phase that spends. `evidence.py`, `llm_client.py`, `system_prompts.py`, `workers.py`, the water and feed SOPs, and one agent (`water_feed`) writing a real work order per newly-opened incident. **M3**: the four responders and the supervisor. `allowlists.py` and the five tool slices, `agent_prompts.py` and the five briefs, `workers.fan_out` under one global ceiling, `agent.synthesize` and the shift report, and the four remaining SOPs. **M5**: chaos. The seeded overlay in `sw_ops.chaos_events` applied inside `sweep()`, the guarded animal write path, migration `0002`, the `python -m src.tools.chaos` CLI, and 64 new rails. Built beside M3, not after it. |
+| Gate | **281 tests**, `ruff check .` clean, `mypy` clean on 29 files, one alembic head, and every command in root `CLAUDE.md` re-run. M3's live checks: two `--once` runs shipped **29/29 work orders across 3 worlds**, 0 rejected, 0 no-answer, and a fused shift report with `shift_report=model` and no violations. |
 | Next | **M4, the tick loop.** Bare `python main.py` still exits 3 naming M4. |
-| HEAD | The M5 boundary on `master`, rebased on top of M3's two commits. A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. |
-| Owed | Two verifications are **deferred to the M3 boundary and deliberately unrun**: that a storm front fuses into one work order, and that `herd_health` discovers the coyote kill through its own tools. Both need a supervisor that now exists, so both are now doable. Neither was faked or weakened. Also owed: three lines wiring `inject_for_tick` into `run_tick`, and `chaos_fired` on the tick line. **And one defect M5's boundary run found in M3's code**: the supervisor's shift report truncated at `max_tokens=1024` and fell back to `shift_report=code`. `logging.md` calls that exact signature a config bug rather than a weak model. Left for the M3 session, whose file it is. |
+| HEAD | The M3 boundary on `master`. A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. |
+| Owed | **One verification still deferred**: that `herd_health` discovers the coyote kill through its own tools. It needs chaos armed *and* the supervisor, so M4 is the first phase that can run it in one tick. Not faked, not weakened. Also owed: three lines wiring `inject_for_tick` into `run_tick`, and `chaos_fired` on the tick line, both M4's. **The defect M5's boundary run found in M3's code is fixed**: `SHIFT_REPORT_MAX_TOKENS` was 1,024, now 3,072 off a measurement, and a truncated tool call is no longer mislabelled as a model failure. |
 
 Milestone list and the shape: `docs/architecture.md`. The layout, the milestone order, and which leaf lands when: `docs/Plan.md`, which is the authority the tree matches. What happened and what diverged: `docs/JOURNEY.md`. Phase-close ritual: root `CLAUDE.md`.
 
@@ -31,20 +31,22 @@ Milestone list and the shape: `docs/architecture.md`. The layout, the milestone 
 | Module | Holds | Grows |
 | --- | --- | --- |
 | `src/agent/executor.py` | `run_tick`, the five free stages, the two spend stages, the `spend` flag, the one `tick.jsonl` line | cadence, backoff, graceful shutdown at M4 |
-| `src/agent/agent.py` | `ROUTES`, all 18 categories to an owner | the LangGraph supervisor and the five worker factories at M3 |
-| `src/agent/workers.py` | `water_feed`: the rails (`check`), `to_work_order`, `judge_packet`, `run_water_feed` | the other four agents at M3 |
-| `src/agent/state.py` | `RanchState`, `Finding`, `Incident`, `WorkOrder` | |
+| `src/agent/agent.py` | `ROUTES` (all 18 categories to an owner), `AGENTS` / `RESPONDERS`, and the supervisor's own stage: `render_shift_page`, `assemble_shift_report`, `check_shift_report`, `synthesize` | the LangGraph wiring at M4 |
+| `src/agent/workers.py` | the rails (`check`), `to_work_order`, `judge_packet`, `run_agent` for any of the four, `fan_out` under one shared semaphore | nothing structural |
+| `src/tools/allowlists.py` | `DEPLOYED_TOOLS` (all 19), `WRITE_TOOLS` (all 8), `SLICES`, `tools_for` / `bound_tools_for` / `assert_callable`, and `GATE_LANDED` | **M6 flips `GATE_LANDED`, and only M6 may** |
+| `src/agent/state.py` | `RanchState`, `Finding`, `Incident`, `WorkOrder`, `ShiftReport` | |
 | `src/agent/memory.py` | `sw_ops` only: reconcile, the engine allowlist, and the chaos-event store (`insert_chaos_events`, `active_chaos_events`, `expire_chaos_events`, `chaos_counts_by_status`) | the checkpointer at M6 |
 | `src/tools/chaos.py` | the scenario catalog, the pure seeded `plan()`, `inject_for_tick`, `apply_overlay`, the guarded animal write path, and the CLI | more scenarios; nothing structural |
-| `src/tools/evidence.py` | `assemble`, `EvidencePacket.render`, `SOP_FOR_CATEGORY` | more SOP files as M3 adds sensing worlds |
+| `src/tools/evidence.py` | `assemble`, `EvidencePacket.render`, `SOP_FOR_CATEGORY` covering all 18 categories | nothing structural |
 | `src/models/llm_client.py` | `resolve_provider`, `build_client`, `call_tier2`, `ModelResponse`, `THINKING_BUDGET` | Tier 1 at M7, and **not before** |
-| `src/prompts/system_prompts.py` | `INHERITED_RULES`, `MANDATES`, `WORK_ORDER_SCHEMA`, `system_prompt()` | four more mandates at M3 |
+| `src/prompts/system_prompts.py` | what a **machine** consumes: `WORK_ORDER_SCHEMA`, `SHIFT_REPORT_SCHEMA`, the tool names and descriptions, `system_prompt()` | more schemas |
+| `src/prompts/agent_prompts.py` | what a **model** reads: `INHERITED_RULES`, `MANDATES` (the four responders only, `chaos` absent and a test asserts it), `SUPERVISOR_MANDATE`. **`MANDATES` moved here at M3**; it is no longer in `system_prompts.py` | chaos's brief, if chaos ever needs one |
 | `src/models/routing.py` | nothing yet | job to tier to model at M7. **A different question than `agent.py`'s routing**, which is why the two do not share a name |
 | `tests/` | three files: `test_agent.py`, `test_tools.py`, `test_api.py` | |
 
 Seven other leaves are docstring-only placeholders naming the milestone that fills them. A stub never claims to be implemented, and the marker column in `docs/Plan.md`'s tree is how you tell unbuilt from missing.
 
-`data/knowledge_base/` holds `water.md` (`WATER-01` to `WATER-06`) and `feed.md` (`FEED-01` to `FEED-04`). **Both are derived from `docs/sweetwater-ranch.md`, one file per sensing world, and nothing else in this repo may source them.** A rule id is citable only if it is a heading in the file the packet carried, so an SOP file is the definition of what a work order is allowed to cite.
+`data/knowledge_base/` holds **six** files, not four: `water.md` (`WATER-01` to `WATER-06`), `feed.md` (`FEED-01` to `FEED-04`), `infrastructure.md` (`INFRA-01` to `INFRA-06`), `sensors.md` (`SENSOR-01` to `SENSOR-05`), `wellhead.md` (`WELL-01` to `WELL-04`), and `compliance.md` (`COMP-01` to `COMP-05`). Infrastructure splits into three because a fence, a broken probe, and a gas wellhead are three unrelated bodies of knowledge, and `SOP_FOR_CATEGORY` is what maps each of the 18 categories onto one of them. **All six are derived from `docs/sweetwater-ranch.md`, one file per sensing world, and nothing else in this repo may source them.** A rule id is citable only if it is a heading in the file the packet carried, so an SOP file is the definition of what a work order is allowed to cite.
 
 ---
 
@@ -60,7 +62,9 @@ Seven other leaves are docstring-only placeholders naming the milestone that fil
 8. **Structured output is a forced tool call, not a "reply in JSON" instruction.** The schema is enforced by the API, and - the reason that actually matters - `finish_reason` stays honest: `tool_use` is a real answer, `max_tokens` is a config bug. With free-form JSON both arrive as text and the distinction is gone.
 9. **Thinking is off for the work-order job, and `reasoning_effort` is an explicit per-call argument.** Turning thinking off is free exactly when the model is not the one classifying, and `triage.py` classified. Per-call rather than ambient so turning it on for one job later does not touch any other call site.
 10. **A work order is never dropped.** A model that never answered, timed out, or got truncated still produces a `WorkOrder` with `status="no_answer"` and the reason in `assessment`. A tick that silently loses an incident is indistinguishable from a ranch with nothing wrong.
-11. **`ruff format` is deliberately not in the gate.** `E501` is ignored on purpose so a long line may stay long; the formatter hard-wraps at 140 with no escape hatch, so the two contradict. `ruff check` is the lint gate. Do not add the formatter back.
+11. **A write tool is declared, withheld from the model, and refused at runtime, all three, until M6 flips `GATE_LANDED`.** A declared-but-withheld tool is a documented seam; a live write tool with no gate is a bug waiting for a demo. `GATE_LANDED` is a boolean in one module and not a config value, because an env var is something somebody sets on a laptop at 11pm to make a demo work.
+12. **Severity ownership extends to the shift report.** The supervisor may not restate a severity, and `linked` - its only causal claim - is checked in code against the incident keys the page actually carried. This is why `reasoning_effort` stays off even for fusion: the claim is verified rather than trusted.
+13. **`ruff format` is deliberately not in the gate.** `E501` is ignored on purpose so a long line may stay long; the formatter hard-wraps at 140 with no escape hatch, so the two contradict. `ruff check` is the lint gate. Do not add the formatter back.
 
 ## The boundary rule, sharpened
 
@@ -161,19 +165,45 @@ Three live ticks on 2026-09-10, chaos off, against prod `sw_ops`:
 
 ---
 
-## M3 scope, the other four agents and the supervisor
+## What M3 actually produces, so a new session does not re-derive it
 
-| Piece | Job |
+The tick has **nine** stages now. Six are free, two spend per newly-opened incident, and the last one decides for itself.
+
+**The tool slices are enforced in code, and the counts are the spec: 7 / 6 / 5 / 5 / 0.** A test asserts each one exactly, so a slice cannot grow by one tool without a deliberate edit to a number a human reads. Three agents legitimately share the three sensor read tools and that is **not** carved up: the isolation that matters is the brief, the SOP set, and which sensor types reach each agent, and carving it further would mean editing a frozen server. `herd_health` has no sensor reads at all, by design rather than omission.
+
+**No write tool reaches a model before M6.** Three functions, and they are not redundant:
+
+| | |
 | --- | --- |
-| `src/agent/agent.py` | the LangGraph supervisor and the five worker factories. The routing table is already there |
-| `src/agent/workers.py` | the other four agents. `run_water_feed` is the shape; `MANDATES` is where each brief goes |
-| `src/prompts/agent_prompts.py` | the five briefs. **A sub-agent inherits nothing**, so anything it needs is in its brief or its packet |
-| `src/tools/allowlists.py` | the five tool slices, enforced in **code**. An explicit set of literal names, never a prefix match |
-| `data/knowledge_base/` | the remaining SOPs, one file per sensing world, derived from `docs/sweetwater-ranch.md` and nothing else |
+| `tools_for(agent)` | the declaration. Includes the writes, so the asserted counts are real counts |
+| `bound_tools_for(agent)` | what a model would be handed. Subtracts `WRITE_TOOLS` while `GATE_LANDED` is False |
+| `assert_callable(tool)` | the runtime guard in `mcp_client.call_tool`. Raises `WriteGateError`. This one covers **us**, not the model |
 
-Two things already known that M3 will trip over: **`system_prompt()` logs `no_mandate_for_agent` for the four agents with no brief yet**, which is deliberate and is the signal that one is missing. And **no sensor incident routes to `herd_health`** by design, so it stays idle until chaos writes real animal events at M5. That is correct, not a gap.
+`WRITE_TOOLS` names all **eight** deployed writes, not the four that appear in a slice. `assign_to_pasture`, `remove_from_pasture`, `assign_to_shelter`, and `remove_from_shelter` are in no slice and belong in none, which is exactly why they are named: those are the ones somebody adds later while chasing one read out of the same API.
 
-Then the phase-close ritual in root `CLAUDE.md`, in order, no exceptions. M1 skipped step 2 and it is what made this file lie to the next session for a commit; M2's step 2 is what found a documented `jq` command that had been wrong in three files for two milestones.
+**`DEPLOYED_TOOLS` is all 19, read off the wire and not out of the upstream's source.** `--handshake` compares the deployed list against it and fails on drift in either direction. That check lives in the handshake rather than in `pytest`, because `pytest` has to pass on a plane.
+
+The fan-out and the shift report:
+
+- **`AGENT_CONCURRENCY = 4` is a global ceiling on Opus calls in flight.** `fan_out` builds one semaphore and hands the same object into every agent. Four agents each bounding themselves at four would be sixteen.
+- **An agent failing is not the tick failing**, at both levels: a packet raising inside an agent, and the whole agent raising inside the fan-out. Either way every incident it carried comes back as a `no_answer` order.
+- **`synthesize` runs on every tick and spends on almost none.** It calls a model only when `spend` is true *and* `FUSION_THRESHOLD = 2` or more sensing worlds opened incidents. Below that it assembles the page in code for free, and the same `assemble_shift_report` is both the calm-tick answer and the failure fallback, deliberately. A rejected report is **replaced**, carrying its violations, never retried.
+- Two rails on the report, both blocking: `invented_incident` (`linked` against the keys the page carried) and `all_clear` (priorities and headline, never the `situation` prose).
+
+Two live `--once` runs on 2026-09-10, against a ledger that had just been refilled, so both are unusually expensive:
+
+| | tick A | tick B |
+| --- | --- | --- |
+| newly-opened, so calls | 15 across 3 worlds | 14 across 3 worlds |
+| tokens (in + out) | 104,500 + 15,308 | 91,468 + 15,545 |
+| wall clock | 85 s | 96 s |
+| rail failures | 0 of 16 | 0 of 15 |
+
+**29 work orders, 29 shipped, 0 rejected, 0 no-answer.** Per-call cost is unchanged from M2, so fan-out multiplies calls and not price. The supervisor is about 13% of the bill for one call against fourteen. **A calm tick is $0.00 exactly.** Do not read either tick as a steady-state budget; M4 measures that. Full numbers and the assumed rate: `docs/model-routing.md`.
+
+**`herd_health` was handed nothing on both ticks and logged nothing about it.** Decision 5 working. A warning per tick per idle agent trains everyone to ignore the log.
+
+**The rails cannot detect a missing brief, and that is measured rather than suspected.** `docs/no-brief-transcript.md` and `docs/with-brief-transcript.md` are the same model on the same packet with `COMPLIANCE_MANDATE` removed, and the unbriefed answer **passes every rail with zero violations** while naming no neighbour at all. Every rail asks whether an answer is defensible about its own incident; scope is not answerable from inside one work order. Both are pinned as fixtures. Do not turn any of it into a blocking rail: a rail that counts actions gets satisfied by padding.
 
 ---
 

@@ -374,6 +374,167 @@ Disclosed at the boundary rather than merged quietly:
 
 ---
 
+## M3 - The four responders
+
+**2026-09-10. Done.**
+
+M2 proved one agent end to end. M3 turns it into four and gives them a supervisor.
+`allowlists.py` carves the 19 deployed tools into five slices, `agent_prompts.py` carries four
+briefs plus the supervisor's, `workers.fan_out` runs the responders under one ceiling, and
+`agent.synthesize` fuses their work orders into one shift report when two or more sensing worlds
+opened incidents in the same tick. Still Tier 2 for everything; the cascade is still M7's.
+
+Built in the mandated order, rails first: `allowlists.py` with its counting tests before any agent
+existed, then the briefs, then the fan-out, then the shift report. **Rails before the agents they
+constrain**, because a slice is easy to widen quietly once something is already failing.
+
+### The write-tool question, answered before the slices were built
+
+Between M3 and M6 there is nothing between a model and a PATCH against the live Care API. The
+instruction was to declare the write tools so the asserted counts are real counts, and withhold
+them from what the model is handed until the gate lands. That is what shipped, with two additions
+the question did not ask for and both of which turned out to matter.
+
+**Three functions, not one filtered list.** `tools_for` is the declaration, `bound_tools_for`
+subtracts `WRITE_TOOLS` while `GATE_LANDED` is False, and `assert_callable` raises `WriteGateError`
+from `mcp_client.call_tool`. They look redundant and are not: withholding a tool from the model
+covers the model, and the runtime guard covers **us**. The next person to write a helper that calls
+`consume_feed` directly is not a model.
+
+**There are eight write tools on the deployed surface, not four.** `docs/architecture.md` marked
+four with a `*`; the wire also has `assign_to_pasture`, `remove_from_pasture`, `assign_to_shelter`,
+and `remove_from_shelter`. They are in no slice and belong in none - moving an animal between
+places is a crew decision, not an inference from a sensor - but they are named in `WRITE_TOOLS`
+anyway, because the ones nobody assigned are exactly the ones somebody adds later while chasing one
+read out of the same API. Naming them means that edit trips the guard.
+
+**`DEPLOYED_TOOLS` had no home in this repo until now**, which is why the rail "no agent names a
+tool outside its set" had nothing to be checked against: the doc set names only the 15 that appear
+in a slice. All 19 are written down, read off the wire rather than out of the frozen upstream's
+source, and `--handshake` now fails on drift in **either** direction. That check belongs in the
+handshake and not in `pytest`, because `pytest` has to pass on a plane.
+
+### The number that came before `asyncio.gather`
+
+Asked for and delivered before the fan-out was wired, then re-measured live at the boundary. Two
+`--once` runs against a ledger that had just been refilled:
+
+| | tick A | tick B |
+| --- | --- | --- |
+| newly-opened, so calls | 15 across 3 worlds | 14 across 3 worlds |
+| tick total tokens | 104,500 in / 15,308 out | 91,468 in / 15,545 out |
+| wall clock | 85 s | 96 s |
+| calls that failed a rail | 0 of 16 | 0 of 15 |
+
+At an assumed $15/M in and $75/M out that is **$2.72 and $2.54**. The rate is an assumption stated
+in one place, because the pricing table and `cost_usd` on the tick line are M7's and inventing them
+early would have put a number in the ledger nothing measured. **A calm tick is $0.00 exactly**, not
+approximately: zero newly-opened incidents is zero responder calls, and one world synthesizes in
+code. And the supervisor is about 13% of the bill for one call against fourteen, which makes it the
+cheapest thing in the tick per unit of value, because it is the only call that reads across worlds.
+
+Neither tick is a steady-state budget and `docs/model-routing.md` says so with the arithmetic
+attached: 288 ticks a day at tick B is roughly $730, and that figure is fiction. M4 runs unattended
+for 30 minutes and measures the real thing.
+
+### The experiment disagreed with its own hypothesis, which is why it was worth running
+
+The one thing to prove rather than port: run a sub-agent with no brief, capture it flailing, pass
+the brief, capture it working. `docs/no-brief-transcript.md` and `docs/with-brief-transcript.md` are
+that pair - same model, same evidence packet byte for byte, one variable, whether
+`COMPLIANCE_MANDATE` was in the brief.
+
+**It did not flail.** The unbriefed answer echoed severity correctly, named its sensor, quoted only
+numbers that were on the page, cited three real rule ids, escalated for a real reason, and **passed
+every rail with zero violations.** It would have shipped.
+
+What it did instead was invisible to code. One action instead of five, and that action was filing a
+note. The two stock tanks it correctly identified as somebody else's got "belong to a separate water
+work order" with no name attached. The gauge it could not believe went into `unknowns`, which is
+where facts go to be nobody's problem, rather than to the agent that repairs instruments. Its
+headline promised a GM escalation its actions list never contained.
+
+So the finding is sharper than the one the experiment was set up to catch, and it is now the honest
+limit of the whole rail suite: **every rail asks whether an answer is defensible about its own
+incident, and scope is not answerable from inside one work order.** A slice whose brief silently
+regresses to nothing keeps a green suite. Both answers are pinned in `test_agent.py` and the tests
+over them assert the *sameness* of the verdict rather than a quality gap. Nothing here became a
+blocking rail: a rail that counts actions is a rail that gets satisfied by padding.
+
+**Worth its own sentence.** The whole of `compliance.md` was on the page in both runs, including the
+two rules that name the owner of a bad instrument and of a stock tank in as many words. The SOP did
+not rescue it. Standing orders describe the domain; the brief says which part of it is yours.
+
+### Four defects M3 caught in itself
+
+**1. `SHIFT_REPORT_MAX_TOKENS = 1_024`, reasoned about instead of measured.** 15 work orders across
+three worlds is a 32.5k-char page, and the first live tick spent the whole budget on the situation
+paragraph and the first few priorities before `max_tokens` cut the tool call mid-object. This is the
+M2 lesson word for word: **print the page before sizing the budget.** Now 3,072, sized off a
+measured 1,646-token complete answer, with the schema's own caps reasoned about in the comment so
+the next person does not size it a third time.
+
+**2. The truncation mislabelled itself, and the label was the worst one available.** A tool call cut
+off at `max_tokens` still arrives carrying a partially filled `input` dict. `synthesize` checked
+`payload is None`, which was False, so the half-answer went through the rails, where empty
+priorities read as an all-clear. The log said the supervisor wrote an all-clear about a ranch with
+ten criticals on it. `ModelResponse.ok` already knew better; two call sites were not asking. Both
+`synthesize` and `to_work_order` now treat truncated as no answer, and both have a rail. The general
+version, in `docs/cookbook.md`: **a fallback that fires correctly while attributing the failure to
+the wrong component is worse than a crash, because it is quiet and it accuses.**
+
+**3. The grounding grader was asymmetric.** M2 fixed it in one direction (substring containment:
+`"40"` graded as grounded against `13:40:00`) by stripping timestamps from the page. `compliance` is
+briefed to write for an auditor eight months out, so it quotes the date it was handed, and
+`2026-09-10T20:08:41Z` in an assessment then graded as five invented numbers. Times and dates now
+come off **both** sides. The accepted cost is written down rather than discovered later: a fabricated
+timestamp goes ungraded, and nothing in the prose is anchored to a time anyway. **A normalization
+applied to one side of a comparison is a bug waiting for the other side to start using the thing you
+normalized away.**
+
+**4. `AGENT_CONCURRENCY = 4` would have meant sixteen.** Caught in design rather than in production.
+The constant had one meaning when there was one agent; four agents each calling `gather_bounded` at
+four is a ceiling of sixteen that appears nowhere in the code. `fan_out` builds **one** semaphore and
+hands the same object down, and the rail measures peak in-flight calls across a 16-packet fan-out
+rather than asserting the constant equals 4, which would have passed on the broken version.
+
+### Divergence from the plan
+
+**`agent_prompts.py` is a new module, and `MANDATES` moved out of `system_prompts.py`.** M2 put the
+one brief it needed beside the schemas. Four briefs plus a supervisor's is a different thing from a
+schema, and `system_prompts.py` keeps what a machine consumes while `agent_prompts.py` keeps what a
+model reads. `docs/STATE.md` said the mandates lived in `system_prompts.py`; that line is now
+corrected rather than left to be discovered.
+
+**Four briefs, not five.** Chaos's brief arrives with chaos. It is not a responder, it is never a
+route target, and writing its brief early would have been writing against a job that did not exist.
+`RESPONDERS` and `AGENTS` are two names in `agent.py` for exactly this reason.
+
+**`WorkOrder`, not `Finding`, is the sub-agent handoff contract.** The plan said `Finding`, which is
+triage's code-owned output and reaches the supervisor with no model in between. What the supervisor
+actually reads is `render_shift_page` over the work orders. `src/agent/CLAUDE.md` is corrected. This
+matters more than a name: a sub-agent inherits nothing and the supervisor inherits nothing back, so
+anything the supervisor needs has to be *in* the order rather than assumed to be in shared context.
+
+**`herd_health` was handed nothing on both live ticks and logged nothing about it.** It cannot read
+a sensor, so no sensor incident can route to it, and it stays idle until chaos writes real animal
+events. That is `docs/STATE.md` decision 5 working, so it is not warned about: a line per tick per
+idle agent trains everyone to ignore the log.
+
+### Work not asked for, and why each one is here
+
+| Added | Why it was not optional |
+| --- | --- |
+| `synthesize` runs **outside** the `spend` guard | every tick has to end with a shift report, including a free-pass tick and a tick where the model failed. It decides for itself: `spend` and `FUSION_THRESHOLD` both have to hold before it calls anything, so a free tick still gets a page and still costs nothing |
+| shift-report fields on the tick line | `shift_report` (`model` or `code`) and `shift_report_violations` are how defect 2 was found at all. A stage that can silently fall back needs the fallback in the line |
+| `bound_tools_for` and `assert_callable` | the withheld list covers the model; the runtime guard covers us |
+| `WRITE_TOOLS` naming all eight | four of them are in no slice, which is exactly why they are named |
+| `DEPLOYED_TOOLS` plus handshake drift check | the isolation rail had no universe to be checked against |
+| `FUSION_THRESHOLD = 2` | the same claim `src/agent/CLAUDE.md` already makes about when cross-domain reasoning is worth paying for. M7 should read one constant rather than agree with itself twice |
+| `run_agent` generalized, `run_water_feed` kept as a wrapper | `water_feed` is the only agent whose output has been measured against a real ranch, and the calibration fixture is a recording of that call |
+
+---
+
 ## M5 - Chaos, built beside M3 rather than after it
 
 **M3 was in flight in another session while this phase was built.** Two worktrees, one
