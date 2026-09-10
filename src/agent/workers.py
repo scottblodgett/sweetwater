@@ -157,7 +157,12 @@ def to_work_order(*, packet: EvidencePacket, agent: str, response: ModelResponse
         "output_tokens": response.output_tokens,
     }
 
-    if response.payload is None:
+    # `or response.truncated`: a tool call cut off at `max_tokens` still arrives with an
+    # `input` dict on it, partially filled. Checking only for `None` sends that half-answer
+    # through the rails, where it fails as `all_clear` or `schema_invalid` and blames the model
+    # for a budget bug. Measured at M3, on the supervisor rather than here, but the hole is the
+    # same shape in both places. `ok` already says a truncated answer is not an answer.
+    if response.payload is None or response.truncated:
         detail = response.error or ("truncated before it answered" if response.truncated else "no tool call in the response")
         log.error("work_order_no_answer", incident=incident.key, agent=agent, finish_reason=response.finish_reason, detail=detail)
         return WorkOrder(incident_key=incident.key, agent=agent, severity=severity, status="no_answer", violations=("no_payload", response.finish_reason), assessment=detail, **receipt)

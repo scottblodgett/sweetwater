@@ -134,7 +134,14 @@ def unrouted_categories() -> frozenset[str]:
 
 #: A page of finished work orders is roughly 1,100 output tokens each, so ten of them is a
 #: 12k-token read. The supervisor's answer is one page and does not need room to think.
-SHIFT_REPORT_MAX_TOKENS = 1_024
+#:
+#: **1,024 was the first value here and the first live tick truncated it.** 15 work orders across
+#: three worlds is a 32.5k-char page, and the supervisor spent the whole budget on the situation
+#: paragraph and the first few priorities before `max_tokens` cut the tool call mid-object. That is
+#: the M2 lesson repeating verbatim (`docs/model-routing.md`: print the page before sizing the
+#: budget), so this is now the same 2,048 the work order gets: one number to reason about, and the
+#: output scales with how many things are worth linking rather than with the ranch's size.
+SHIFT_REPORT_MAX_TOKENS = 2_048
 
 #: Below this, there is nothing to fuse. **One world is a concatenation of length one**, and
 #: paying Opus to reformat a single agent's work orders into a shift report buys a header.
@@ -313,7 +320,7 @@ async def synthesize(state: RanchState, *, spend: bool = True) -> ShiftReport:
         "output_tokens": response.output_tokens,
     }
 
-    if response.payload is None:
+    if response.payload is None or response.truncated:  # see `workers.to_work_order`: a truncated tool call still carries a half-filled dict
         detail = response.error or ("truncated before it answered" if response.truncated else "no tool call in the response")
         log.error("shift_report_no_answer", tick=state.tick, finish_reason=response.finish_reason, detail=detail)
         fallback = assemble_shift_report(orders, worlds=worlds, violations=("no_payload", response.finish_reason))

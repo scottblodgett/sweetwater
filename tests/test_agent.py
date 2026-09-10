@@ -992,6 +992,17 @@ def test_a_truncated_answer_is_a_config_bug_and_says_so() -> None:
     assert order.status == "no_answer" and "truncated" in order.assessment
 
 
+def test_a_half_filled_tool_call_is_no_answer_and_not_a_rail_failure() -> None:
+    """The live M3 tick's actual defect, caught on the supervisor and fixed in both places. A tool
+    call cut off at `max_tokens` still arrives carrying its `input` dict, partially filled, so a
+    check for `payload is None` sends the half-answer through the rails. It then fails as
+    `all_clear` and the log blames the model for what is a budget bug."""
+    order = _order(_answer(actions=[], unknowns=[]), finish_reason="max_tokens")
+    assert order.status == "no_answer", "not 'rejected': nothing was judged, so there is nothing to reject"
+    assert order.violations == ("no_payload", "max_tokens"), "and the receipt says which of the two it was"
+    assert "all_clear" not in order.violations
+
+
 # --- graded, not asserted --------------------------------------------------- #
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 #: Stripped from **both** sides before either is tokenized. A clock reading is not a quotable
@@ -1443,6 +1454,19 @@ async def test_a_supervisor_that_never_answered_still_produces_a_page(monkeypatc
     assert report.violations == ("no_payload", "transport_error")
     assert report.finish_reason == "transport_error", "and the receipt says which failure it was"
     assert "Alkali Flat tank dry" in report.render(), "the work orders are still on the page"
+
+
+async def test_a_truncated_supervisor_is_a_budget_bug_and_is_labelled_as_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**What the first live M3 tick actually did**, and the reason `SHIFT_REPORT_MAX_TOKENS`
+    doubled. 15 work orders is a 32.5k-char page, 1,024 output tokens ran out inside the
+    priorities list, and the half-filled `input` dict then failed the `all_clear` rail. The log
+    said the supervisor wrote an all-clear about a ranch with 10 critical incidents on it. It did
+    not: it was cut off, and the two are worth telling apart at 2am."""
+    _supervisor(monkeypatch, _report_payload(priorities=[], linked=[]), finish_reason="max_tokens")
+    report = await synthesize(_state(STORM))
+
+    assert report.violations == ("no_payload", "max_tokens"), "not ('all_clear',)"
+    assert report.source == "code" and "Alkali Flat tank dry" in report.render()
 
 
 def test_the_code_page_never_writes_an_all_clear_even_with_nothing_to_report() -> None:
