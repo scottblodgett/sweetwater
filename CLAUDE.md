@@ -7,6 +7,24 @@ cattle ranch. One orchestrator runs continuously, driving **five sub-agents**
 (`water_feed`, `herd_health`, `infrastructure`, `compliance`, `chaos`) against a ranch
 that is genuinely trying to break. Scenario canon: `docs/sweetwater-ranch.md`.
 
+## Starting a session
+
+**Read `docs/STATE.md` first, then the nested `CLAUDE.md` for the package you are about to
+touch, then stop and check in.** That file is the briefing: where the build stands, the
+decisions already made, the verified environment, and the live ranch facts already paid
+for. It is refreshed at every milestone boundary.
+
+Then, until asked otherwise:
+
+- **Do not read the doc set to get oriented.** The table at the bottom of this file says
+  which doc answers which question. Go to one when you have that question.
+- **Do not probe the live ranch to learn its topology.** 160 sensors, 13 types, units, and
+  observed ranges are in `docs/STATE.md`. Probe to verify a change, not to orient.
+- **Do not read `C:\temp\MCP-Farm` or any other repo.** See the frozen-upstream rule below.
+- **Keep answers short.** No recap tables of what was already agreed, no restating the plan
+  back. Batch independent reads and commands into one round, and summarize command output
+  rather than pasting it.
+
 ## The one rule that defines the project
 
 On any multi-step task, report back after 5 minutes or when you discover work I
@@ -41,6 +59,11 @@ different repo (`scott-jasper/mcp-farm`, read-only). **19 flat-named tools** plu
 scoped change over there and a conversation, never a drive-by. This repo adds no
 endpoints to the ranch.
 
+**The contract is the tools and the REST surface, not that repo's source.** A clone sits at
+`C:\temp\MCP-Farm`; do not read it. A constant copied out of its internals is a value
+nothing here can verify, and it fails silently when the other side retunes it. Everything
+needed is reachable over the wire or already written down in this repo.
+
 ## Two rules that decide most arguments
 
 1. **Code owns what a machine consumes; the model owns what a human judges.**
@@ -62,6 +85,7 @@ endpoints to the ranch.
 | architecture | `docs/architecture.md` |
 | model cost decisions | `docs/model-routing.md` (a ledger, not a plan) |
 | log schemas | `docs/logging.md` |
+| where the build stands right now | `docs/STATE.md` - the session-start briefing |
 | what actually happened | `docs/JOURNEY.md` |
 
 ## Tech stack
