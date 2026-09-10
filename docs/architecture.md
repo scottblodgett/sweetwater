@@ -75,9 +75,35 @@ counted by a test. `create_react_agent` receives a **filtered** list.
 | `herd_health` | `list_animals` `get_animal` `list_observations` `create_observation`* `list_care_tasks` `update_care_task`* | sick, down, dead, or missing animals; the care write path |
 | `infrastructure` | `list_sensors` `read_sensor` `get_sensor_readings` `list_pastures` `list_shelters` | containment, power, fuel, no spill no fine |
 | `compliance` | `list_sensors` `read_sensor` `get_sensor_readings` `list_pastures` `list_animals` | AUM stocking, habitat, keep the payments |
-| `chaos` | none of the above; its own hands in `tools/chaos.py` | breaks the ranch on purpose |
+| `chaos` | **empty at M3**, by construction. Its surface is the Care API and the four placement writes, and it arrives with it at M5 | breaks the ranch on purpose |
 
-`*` = write, gated behind a human.
+`*` = write, withheld from the model until M6 lands the gate.
+
+**There are eight write tools on the deployed surface, not four.** The four marked above are the
+ones inside a responder's slice. The other four - `assign_to_pasture`, `remove_from_pasture`,
+`assign_to_shelter`, `remove_from_shelter` - move animals, belong to `chaos`, and sit in
+`UNASSIGNED_TOOLS` until M5. They are in `WRITE_TOOLS` from M3 regardless, so `assert_callable`
+already refuses them.
+
+**How the gate is faked before it exists.** Writes reach the real ranch and `interrupt()` is M6,
+so between M3 and M6 there are two independent boundaries, and they are not redundant:
+
+- `tools_for(agent)` is the **declaration**, writes included, and it is what the count tests
+  assert against. A slice that quietly omits its writes to look safe makes the counts lie about
+  the real surface, and the day the gate lands nobody knows what to widen back.
+- `bound_tools_for(agent)` is what a model may be handed, and it subtracts `WRITE_TOOLS` while
+  `GATE_LANDED` is False. It logs `write_tools_withheld` when it removes something.
+- `assert_callable` is the belt behind the filter, raising `WriteGateError` from inside
+  `mcp_client.call_tool`. The filtered list only protects the code paths that remember to use it;
+  a test fixture or an M4 edit in a hurry are both paths that might not.
+
+A declared-but-withheld tool is a documented seam. A live write tool with no gate is a bug waiting
+for a demo. **M6 is the only thing that may set `GATE_LANDED`.**
+
+Nothing at M3 binds tools at all: the workers judge a packet `evidence.py` already assembled, in
+one call, with nothing to navigate. `bound_tools_for` exists now so that the M4 or M6 wiring has
+one obvious place to get its list from rather than reaching for `tools_for` because it was
+shorter.
 
 **The line worth defending: `herd_health` cannot read a sensor, and nothing but
 `water_feed` can touch feed.** That is what makes the supervisor real rather than

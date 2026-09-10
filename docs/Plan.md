@@ -82,7 +82,7 @@ sweetwater/                                lands at
 │   │   └── embeddings.py           --    SOP retrieval seam; stays a seam in V1, see the note below
 │   ├── prompts/
 │   │   ├── system_prompts.py      (M2)   shared rules: severity is not yours, cite your SOP, no invented premises
-│   │   └── agent_prompts.py       (M3)   the five briefs (a sub-agent inherits nothing)
+│   │   └── agent_prompts.py       (M3)   the four responder briefs + the supervisor's (chaos's arrives with chaos, M5)
 │   ├── utils/
 │   │   ├── helpers.py              M0
 │   │   ├── logger.py               M0    structlog: three streams, JSON to file, pretty to console
@@ -94,12 +94,12 @@ sweetwater/                                lands at
 ├── tests/
 │   ├── CLAUDE.md                   M0    never Supabase; sw_ops_test schema; what each rail proves
 │   ├── conftest.py                 M1    the sw_ops_test fixtures, and the skip when no local Postgres answers
-│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), no-brief flail (M3), gate resume (M6)
+│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), the no-brief pair (M3, and it did not flail: see docs/no-brief-transcript.md), gate resume (M6)
 │   ├── test_tools.py               M1    triage truth table, sweep concurrency; chaos determinism (M5)
 │   └── test_api.py                (M8)   envelope shape, gate endpoints
 ├── data/
 │   ├── examples.json              (M5)   chaos scenario catalog + golden fixtures
-│   └── knowledge_base/            (M2)   the SOPs, one file per sensing world
+│   └── knowledge_base/            (M2)   the SOPs. Six files, not four: infrastructure splits into plant / wellhead / sensors, because a packet is billed for every rule in the file it carries (see SOP_FOR_CATEGORY)
 ├── docs/
 │   ├── Plan.md                     M1    this file. Tracked in git at the M1 boundary; the tree above is the authority
 │   ├── STATE.md                    M0    the session-start briefing, refreshed at every boundary
@@ -400,13 +400,13 @@ Each ends runnable and verifiable. **M0 through M9 need no containers and no new
 
 **M2 One agent, Opus only.** `tools/evidence.py` assembles the packet in code, then a single agent reads its SOP file and returns a Pydantic `Finding` (severity echoed not authored, work order, citations), invoked only on newly-opened incidents. Deliberately before any fan-out, and deliberately **Tier 2 only** so there is a known-good baseline to measure local models against later. _Verify:_ token cost flat across three sweeps while incident count grows; every work order names a real sensor and quotes its real reading; `agent.jsonl` carries `finish_reason` on every call; one narrow pytest grades the **reason text** for grounding facts, not just the severity label.
 
-**M3 The four responders.** Supervisor, allowlists, explicit briefs, `asyncio.gather` fan-out, `Finding` as the handoff contract, cross-domain synthesis into one shift report. **The one thing worth proving rather than porting:** run a sub-agent once with no brief, capture it flailing, then pass the brief and capture it working, committed side by side. Sub-agents inherit nothing, and that fact is what this whole architecture rests on. _Verify:_ a test asserts each agent's exact tool count and that no agent can name a tool outside its set.
+**M3 The four responders.** Supervisor, allowlists, explicit briefs, bounded fan-out, `WorkOrder` as the handoff contract, cross-domain synthesis into one shift report. **The one thing worth proving rather than porting:** run a sub-agent once with no brief, capture it flailing, then pass the brief and capture it working, committed side by side. Sub-agents inherit nothing, and that fact is what this whole architecture rests on. _Verify:_ a test asserts each agent's exact tool count and that no agent can name a tool outside its set. _What actually happened:_ it did not flail. Both answers pass every rail with zero violations, and the unbriefed one writes one action instead of five and hands nothing to a named neighbour. The pair is in `docs/no-brief-transcript.md` and `docs/with-brief-transcript.md`; the finding is that the rails cannot detect a missing brief. `Finding` above was wrong: it is triage's type, and what a sub-agent hands up is a `WorkOrder`.
 
 **M4 The continuous loop.** `executor.py`: tick cadence from config, graceful shutdown, per-tick structured log line, exponential backoff on upstream failure, and a tick that survives one sub-agent raising. _Verify:_ run for 30 minutes unattended; every tick logged; kill an upstream by pointing it at a bad URL mid-run and watch it back off and recover rather than die.
 
 **M5 Chaos, the fifth agent.** `tools/chaos.py`, the overlay, the real-write path, the scenario catalog, TTL healing. _Verify:_ same `CHAOS_SEED` replays an identical event sequence across two runs; a storm front produces one fused work order rather than two unrelated ones; a healed sensor shows up as `resolved`; with `CHAOS_ALLOW_WRITES=0` no animal is ever mutated.
 
-**M6 Gate and validation.** LangGraph Postgres checkpointer so a pause outlives the process, `interrupt()` on all four write tools, and three level-3 return-path checks: **shape**, **key**, **grounding**. The key match is on a real incident key, never on a model-written index. _Verify:_ let a tick pause on a `create_observation`, kill the process, restart, resume with reject and then approve; a planted-bad-response suite asserts _which_ check fires.
+**M6 Gate and validation.** LangGraph Postgres checkpointer so a pause outlives the process, `interrupt()` on the write tools (**eight, not four**: the four in a responder's slice plus the four animal-placement writes that arrive with `chaos` at M5; all eight are in `WRITE_TOOLS` from M3 and `assert_callable` already refuses them), and three level-3 return-path checks: **shape**, **key**, **grounding**. The key match is on a real incident key, never on a model-written index. _Verify:_ let a tick pause on a `create_observation`, kill the process, restart, resume with reject and then approve; a planted-bad-response suite asserts _which_ check fires.
 
 **M7 Model routing, one job at a time.** `models/routing.py` and the escalation predicate. Move the cheapest job to local first (chaos observation prose), confirm the rails hold, then the work-order write, then packet-judging. Each move gets a row in `docs/model-routing.md` with the before and after numbers. **The all-clear rail goes in before the first job moves down**, not after. _Verify:_ a calm tick costs $0.00 and logs `tier: 1`; a critical incident escalates and logs `escalation_reasons: ["critical"]`; a planted local-model all-clear on a code-flagged incident is rejected and escalated rather than believed.
 
