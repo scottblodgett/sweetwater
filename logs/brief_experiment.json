@@ -1,0 +1,94 @@
+{
+  "incident": {
+    "key": "alkali-flat-soil:range_dry",
+    "sensor_id": "alkali-flat-soil",
+    "sensor_type": "soil-moisture",
+    "location": "Alkali Flat",
+    "category": "range_dry",
+    "severity": "critical",
+    "status": "opened",
+    "summary": "Alkali Flat: soil moisture reads 4.2% on alkali-flat-soil, at or below the critical line of 5%. This ground is bare-dry. Grazing it at planned stocking is how a conservation payment turns into a finding.",
+    "last_value": "4.2%",
+    "unit": "%",
+    "threshold": 5.0,
+    "occurrences": 1,
+    "first_seen_at": "2026-09-10T20:08:41.585000Z",
+    "last_seen_at": "2026-09-10T20:08:41.585000Z",
+    "resolved_at": null,
+    "tick_opened": 0,
+    "tick_last_seen": 0,
+    "run_id": "",
+    "owner": "compliance",
+    "row_id": null
+  },
+  "sop_name": "compliance.md",
+  "page": "## The incident, as triage ranked it in code\n\n- severity: CRITICAL (already decided; not yours to change)\n- category: range_dry\n- sensor: alkali-flat-soil, a soil moisture sensor\n- location: Alkali Flat\n- reading: 4.2%, against a critical line of 5%\n- triage said: Alkali Flat: soil moisture reads 4.2% on alkali-flat-soil, at or below the critical line of 5%. This ground is bare-dry. Grazing it at planned stocking is how a conservation payment turns into a finding.\n- history of this incident: seen 1 time(s), first at 2026-09-10T20:08:41.585000+00:00, still opened\n\n## This sensor's last 12 readings, newest first\n\n  (This series is generated independently of the reading above and does NOT contain it. Use it for the range and the trend; the authoritative current value is the triaged reading.)\n  - 2026-09-10T20:08:45.396Z: 58%\n  - 2026-09-10T19:58:45.396Z: 18.2%\n  - 2026-09-10T19:48:45.396Z: 26.1%\n  - 2026-09-10T19:38:45.396Z: 31.4%\n  - 2026-09-10T19:28:45.396Z: 28.2%\n  - 2026-09-10T19:18:45.396Z: 25.1%\n  - 2026-09-10T19:08:45.396Z: 35.8%\n  - 2026-09-10T18:58:45.396Z: 17.1%\n  - 2026-09-10T18:48:45.396Z: 6.9%\n  - 2026-09-10T18:38:45.396Z: 56.2%\n  - 2026-09-10T18:28:45.396Z: 45.6%\n  - 2026-09-10T18:18:45.396Z: 23.1%\n\n## Other sensors at Alkali Flat, read in this same sweep\n\n  - battery charge (alkali-flat-battery): 11.1%\n  - fence energizer voltage (alkali-flat-fence): 5.8 kV\n  - gate (alkali-flat-gate): closed\n  - relative humidity (alkali-flat-humidity): 37%\n  - air temperature (alkali-flat-temp): 71 F\n  - stock-tank level (alkali-flat-water): 2.6 gal\n  - stock-tank level (alkali-flat-water-2): 17.6 gal\n\n## What is standing behind it\n\n  Alkali Flat (alkali-flat): 2400 acres, 111 head on it, barbed-wire, pasture status open\n\n## The standing orders that apply (compliance.md)\n\n# SOP: Compliance - range, habitat, and the payments attached to both\n\nDerived from `docs/sweetwater-ranch.md`. Nothing else in this repo may source these rules,\nand no rule here may be invented at the prompt: an agent that cites `COMP-06` when there is no\n`COMP-06` is worse than one that says it has no rule to cite.\n\n**The standing order this file serves:** keep the payments, prove the stewardship. Two of this\nranch's revenue lines are not cattle. State and federal grazing leases carry AUM stocking\nobligations, and the conservation and habitat programs pay against grazing management, water\ninfrastructure, and wildlife migration. Both are paid for demonstrated conditions, and a\ncondition nobody recorded was not demonstrated.\n\n**What makes this world different, and do not borrow urgency from the others.** Nothing in this\nfile kills an animal this afternoon. What it costs is money and eligibility, months later, in a\nform nobody can drive out and fix: a stocking obligation missed, a reach run thin through a\nperiod that gets scored, a stewardship claim with no record behind it. There is no hauling water\nto repair a record. That is a longer clock, not a lower priority, and the two are easy to\nconfuse.\n\n**So these work orders are evidence as much as instruction.** Be specific about the reading, the\nsensor, the location, and the time in a way somebody could hand to an auditor eight months from\nnow without you in the room to explain it. Vagueness costs nothing today and costs the payment\nlater.\n\n---\n\n## COMP-01 - Bare-dry ground is a stocking decision, and it will not wait for the next season\n\n**Applies to:** `range_dry`, severity `critical`, on a `soil-moisture` sensor.\n\nSoil moisture on this ground has fallen far below what the grazing plan assumes. Continuing to\ngraze it at planned stocking is how a conservation payment turns into an audit finding.\n\n1. **Record the reading, the sensor, the location, and the time first,** before any\n   recommendation. This is the part that is still useful in eight months.\n2. **Name the allotment or pasture and whether the packet shows animals on it.** A dry\n   allotment with nothing on it is a note. A dry allotment carrying cattle is a decision.\n3. **Recommend a stocking review, not a number.** Reducing AUMs on a leased allotment is the\n   general manager's call with the lease in front of them. Say the ground will not carry what\n   the plan assumed and let that conversation happen.\n4. **Say what is unknown.** Recovery depends on precipitation, forage stage, and rest, and none\n   of that is on this page. Put it in the unknowns rather than forecasting it.\n\n**Escalate to the general manager** on every critical range reading on a state or federal\nallotment. A stocking obligation on somebody else's ground is a lease question and a\nrelationship, and it is not the crew's to answer.\n\n## COMP-02 - Drying past the plan is the moment the record is cheap to make\n\n**Applies to:** `range_dry`, severity `warning`, on a `soil-moisture` sensor.\n\nThe ground is drying past what the grazing plan assumed. It is not yet a stocking problem.\n\n1. **Log it as a dated observation with the reading.** That is the entire deliverable and it is\n   worth more than it looks: a documented trend that starts in the warning band is what makes a\n   later stocking decision defensible rather than reactive.\n2. **Read it against the other soil sensors in the packet.** One dry site is a site. Several\n   across the allotments is a season, and only the second one changes a grazing plan.\n3. **Do not dispatch anybody.** There is nothing for a truck to do about soil moisture, and a\n   work order that sends one teaches the crew that this whole category is noise.\n\n## COMP-03 - The creek gauges are what the habitat program is scored on\n\n**Applies to:** `stream_flow_low` at any severity, on a `stream-flow` sensor.\n\nRiparian flow on this ranch is a scored condition. Several habitat and conservation payments are\ntied to it and to the wildlife that depend on it, and a thin reach through a scored period is\nmoney.\n\n1. **Critical:** the reach is nearly dry. Record it precisely, note the date, and flag it for\n   the program file. Whether it is drought, an upstream diversion, or a change in irrigation\n   practice is the question that follows, and the packet does not answer it.\n2. **Warning:** flow is thin. Log the reading and the trend from the recent readings. This is\n   the band where a documented series is built.\n3. **Say whether irrigation is a plausible factor and mark it unknown if the page cannot say.**\n   The irrigated hay ground and the creeks draw from related water, so a thin reach during\n   irrigation season is a different record than a thin reach in October. Do not assert which one\n   this is without evidence on the page.\n4. **A dry reach also matters to the migration corridors and the camera sites near it.** One\n   sentence, if the packet shows anything at that location. Do not build the wildlife case out of\n   nothing.\n\n## COMP-04 - Stock water is not the compliance gauge, and this is the mistake to not make\n\n**Applies to:** `stream_flow_low`, and to every temptation to read a creek gauge as stock water\nor a tank as evidence of flow.\n\nThis is the single most likely error in this file, because both are water and one agent can see\nboth.\n\n1. **A thin creek is not permission to leave a tank empty.** The stock tanks are `water_feed`'s\n   and they run on a clock of hours. Nothing in this file changes that or defers it.\n2. **A full tank is not evidence a reach is flowing.** They are different water, measured by\n   different instruments, scored for different reasons.\n3. **Keep them in separate work orders,** always. Merging them produces a document that is\n   useless to the crew this afternoon and useless to an auditor next year.\n4. **You may count animals. You may not diagnose them.** The head count on a pasture is the\n   numerator of every stocking question and that is what it is for here. Animal health belongs\n   to `herd_health`, and a compliance work order is a poor place for a medical opinion.\n\n## COMP-05 - A record without a reading is not a record\n\n**Applies to:** every category in this file, at every severity.\n\n1. **Every claim traces to a sensor id and a value on this page.** Name both. An assertion about\n   range condition with no instrument behind it is worth nothing at audit and it is worth less\n   than nothing if it turns out to be wrong.\n2. **Never estimate acres, AUMs, forage tonnage, precipitation, or a percentage of a lease.**\n   These are exactly the numbers that look authoritative in a compliance document and exactly\n   the ones a program officer can check. If it is not measured, it is an unknown.\n3. **A stated absence is a gap, not a zero.** \"No animal roster returned for this pasture\" is\n   not \"no animals on this pasture,\" and in a stocking record those two sentences are opposites.\n4. **When a gauge cannot be believed, the reach cannot be evidenced.** The instrument is\n   `infrastructure`'s repair. The hole in the record is yours: say which period has no defensible\n   reading behind it, because that gap is what somebody asks about later.\n\n---\n\n## The two things never to write in a compliance work order\n\n1. **An all-clear.** Code already put this reading outside its band. \"Range conditions appear\n   satisfactory\" in a document meant to demonstrate stewardship is worse than saying nothing,\n   because it is a stewardship claim nobody verified.\n2. **A finding of compliance or non-compliance.** You are not the program officer and you are\n   not the lease administrator. Record the condition, name the obligation it bears on, and let a\n   human make the determination. A work order that rules on a lease creates a written admission\n   or a written false assurance, and both are expensive.",
+  "runs": {
+    "no_brief": {
+      "system_chars": 3343,
+      "payload": {
+        "severity_echo": "critical",
+        "headline": "Alkali Flat: soil moisture 4.2% with 111 head on it, log the reading and get GM on stocking review",
+        "assessment": "alkali-flat-soil reads 4.2% at Alkali Flat, at or below the 5% critical line, first seen 2026-09-10T20:08:41Z and still open. Alkali Flat is 2400 acres carrying 111 head, pasture status open, so this is a stocking decision and not just a note. The recent series on the same sensor swings from 6.9% to 58% within two hours, so the instrument's own record is erratic and the defensible record for this period is thin; the current triaged value is still the authoritative reading. Sibling sensors in the same sweep say nothing wet or dry about the ground: alkali-flat-temp 71 F, alkali-flat-humidity 37%, alkali-flat-battery 11.1% (low enough to question the datalogging), and two tanks reading alkali-flat-water 2.6 gal and alkali-flat-water-2 17.6 gal, which are stock water on an hours clock and belong to a separate water work order, not to this record.",
+        "actions": [
+          "Log the compliance record now: alkali-flat-soil 4.2% at Alkali Flat, critical line 5%, first seen 2026-09-10T20:08:41Z, pasture alkali-flat 2400 acres, 111 head on it, status open (COMP-01, COMP-05)"
+        ],
+        "rules_cited": [
+          "COMP-01",
+          "COMP-05",
+          "COMP-04"
+        ],
+        "escalate": true,
+        "escalate_reason": "COMP-01 requires the general manager on every critical range reading, and 111 head on Alkali Flat makes this a stocking and lease question that is not the crew's to answer.",
+        "unknowns": [
+          "Whether Alkali Flat sits on a state or federal allotment, and its AUM stocking obligation",
+          "Recent precipitation, forage stage, and rest history for this pasture: none on this page",
+          "Whether alkali-flat-soil is reading true; battery alkali-flat-battery at 11.1% and a series ranging 6.9% to 58% in two hours are not a trustworthy record",
+          "Which period of the moisture record has no defensible reading behind it if the sensor is bad"
+        ]
+      },
+      "finish_reason": "tool_use",
+      "input_tokens": 5713,
+      "output_tokens": 884,
+      "latency_ms": 12661,
+      "provider": "bedrock",
+      "model": "us.anthropic.claude-opus-5",
+      "error": ""
+    },
+    "with_brief": {
+      "system_chars": 5463,
+      "payload": {
+        "severity_echo": "critical",
+        "headline": "Alkali Flat: soil moisture 4.2% with 111 head on it, stocking review to GM, gauge suspect",
+        "assessment": "Alkali Flat, 2026-09-10: alkali-flat-soil reads 4.2% soil moisture, at or below the 5% critical line, with 111 head standing on the 2400-acre pasture (status open, barbed-wire). This is a stocking decision, not a note. The same sensor's last 12 readings swing from 6.9% to 58% inside two hours (18.2% at 19:58Z, 58% at 20:08:45Z), so the instrument's stability is questionable and the defensible record for this period is thin; that repair belongs to infrastructure, but the hole in the record is ours. Supporting conditions in the same sweep: alkali-flat-temp 71 F, alkali-flat-humidity 37%, alkali-flat-battery at 11.1% charge, which may bear on why the soil series is jumping. Stock tank readings at this location (alkali-flat-water 2.6 gal, alkali-flat-water-2 17.6 gal) are water_feed's work order, not evidence about range condition, and are not addressed here.",
+        "actions": [
+          "Log for the program file now: Alkali Flat, sensor alkali-flat-soil, 4.2% soil moisture, 2026-09-10T20:08:41Z, critical line 5%, pasture alkali-flat 2400 acres carrying 111 head, status open (COMP-01, COMP-05)",
+          "Escalate to the general manager for a stocking review on Alkali Flat with the lease in front of them: this ground will not carry what the grazing plan assumed. Do not set an AUM number in the field (COMP-01)",
+          "Send someone to Alkali Flat to eyeball forage and ground cover against the reading, and to note whether the site is representative of the pasture, recorded as a dated observation (COMP-01, COMP-05)",
+          "Hand alkali-flat-soil to infrastructure for verification: the 12-reading series runs 6.9% to 58% within two hours and alkali-flat-battery reads 11.1%. Note in the file that this period has no stable reading behind it (COMP-05)",
+          "Pass the alkali-flat-water 2.6 gal and alkali-flat-water-2 17.6 gal tank readings to water_feed in their own work order, separate from this one (COMP-04)"
+        ],
+        "rules_cited": [
+          "COMP-01",
+          "COMP-04",
+          "COMP-05"
+        ],
+        "escalate": true,
+        "escalate_reason": "COMP-01 requires the general manager on every critical range reading, and this pasture is carrying 111 head, which makes it a stocking and lease question rather than a crew call.",
+        "unknowns": [
+          "Whether Alkali Flat is state, federal, or deeded ground, and the AUM obligation attached to it; the packet does not say",
+          "Recent precipitation, forage stage, and rest history for Alkali Flat, all of which govern recovery and none of which is on this page",
+          "Readings from other soil moisture sensors on other allotments, needed to tell one dry site from a season",
+          "Whether alkali-flat-soil is calibrated and powered correctly, given the 6.9% to 58% swing and 11.1% battery charge"
+        ]
+      },
+      "finish_reason": "tool_use",
+      "input_tokens": 6370,
+      "output_tokens": 1215,
+      "latency_ms": 16156,
+      "provider": "bedrock",
+      "model": "us.anthropic.claude-opus-5",
+      "error": ""
+    }
+  }
+}
