@@ -1,0 +1,6 @@
+{
+  "_note": "The chaos scenario catalog and the golden fixtures. Populated at M5 with src/tools/chaos.py; empty until then on purpose, so an unbuilt catalog reads as unbuilt rather than as a chaos agent configured to do nothing. See docs/Plan.md.",
+  "_arrives_in": "M5",
+  "scenarios": [],
+  "fixtures": []
+}

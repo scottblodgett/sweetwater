@@ -1,4 +1,10 @@
-"""Category to owning sub-agent. A pure function over a table, and nothing more.
+"""The supervisor. In M1 that is the routing table and nothing else.
+
+The LangGraph supervisor and the five worker factories arrive at M3 and land here, next
+to the table that decides which of them owns a finding. Routing lives with the supervisor
+rather than in its own module because deciding who works an incident is the supervisor's
+whole job, and `src/models/routing.py` is a different question (which model tier runs a
+job) that should not share a name with this one.
 
 No model is involved in routing, ever. Which of five agents owns a dry tank is a fact
 about the ranch's org chart, not a judgment call, and asking a model to make it costs
@@ -78,7 +84,7 @@ def owner_for(category: str) -> str:
     if owner is None:
         if category not in _warned_categories:
             _warned_categories.add(category)
-            log.warning("unrouted_category", category=category, owner=DEFAULT_OWNER, hint="add it to ROUTES in src/agent/routing.py")
+            log.warning("unrouted_category", category=category, owner=DEFAULT_OWNER, hint="add it to ROUTES in src/agent/agent.py")
         return DEFAULT_OWNER
     return owner
 

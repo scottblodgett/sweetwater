@@ -1,0 +1,2 @@
+# Path-globbed rules live here: anything too long for a directory-level CLAUDE.md, with a
+# `paths:` glob. The directory is tracked so it survives a clone; there are no rules yet.

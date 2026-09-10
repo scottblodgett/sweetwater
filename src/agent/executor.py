@@ -1,10 +1,14 @@
-"""One tick, start to finish. In M1 that is the free pass and nothing else.
+"""The continuous loop. In M1 that is one tick, and the tick is the free pass.
 
     catalog -> sweep -> triage -> reconcile -> route
 
 Five stages, zero tokens. The fan-out and the synthesis that cost money arrive at M2 and
 hang off `state.routed`, which is why this returns a `RanchState` rather than an exit
 code: the graph at M4 needs exactly this object, and `main.py` needs one integer.
+
+Cadence, backoff, and graceful shutdown wrap `run_tick` here at M4. They belong in this
+module rather than in `main.py`, which owns argument parsing and an exit code and nothing
+else.
 
 Two rules from `src/agent/CLAUDE.md` are enforced here rather than described:
 
@@ -19,8 +23,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from src.agent.agent import owners_for, route
 from src.agent.memory import StoreTarget, counts_by_status, reconcile, resolve_store, store_session
-from src.agent.routing import owners_for, route
 from src.agent.state import RanchState
 from src.tools.sensors import fetch_catalog, sweep
 from src.tools.triage import triage_sweep

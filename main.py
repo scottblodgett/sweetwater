@@ -100,8 +100,8 @@ async def once() -> int:
     Supabase, through the same resolver `alembic` uses. Prod is the default: a default
     that quietly writes somewhere harmless is a default that ships.
     """
+    from src.agent.executor import run_tick, summarize
     from src.agent.memory import SchemaGuardError, resolve_store
-    from src.agent.tick import run_tick, summarize
 
     log = get_logger("sweetwater.once")
     settings = get_settings()
