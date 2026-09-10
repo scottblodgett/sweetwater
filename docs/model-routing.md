@@ -112,6 +112,56 @@ first real answer would have clipped. Print the page before sizing the budget.
 **The cost lever is the SOP, not the evidence.** Trimming the assembled facts saves a few
 hundred tokens; the SOP file is thousands. Worth knowing before M7 optimizes the wrong half.
 
+## What M3 added to the bill, measured on two live ticks
+
+Fan-out does not change the per-call cost, it changes how many calls a tick makes. Two live
+`--once` runs on a ranch whose ledger already held 8 to 11 `ongoing` incidents:
+
+| | tick A | tick B |
+| --- | --- | --- |
+| newly-opened, so calls | 15 across 3 worlds | 14 across 3 worlds |
+| responder input / output | 90,165 / 14,284 | 77,375 / 13,899 |
+| supervisor input / output | 14,335 / **1,024, truncated** | 14,093 / 1,646 |
+| tick total | 104,500 / 15,308 | 91,468 / 15,545 |
+| wall clock | 85 s | 96 s |
+| calls that failed a rail | 0 of 16 | 0 of 15 |
+
+**Tokens are the measurement here; dollars are arithmetic on top of it.** The pricing table lands
+at M7 and `cost_usd` joins the tick line with it (`docs/logging.md`), so until then any figure below
+is a rate times a token count and the rate is an assumption, stated so it can be corrected in one
+place. At **$15/M in and $75/M out**, tick A is **$2.72** and tick B **$2.54**.
+
+**The supervisor is 14% of the input, 11% of the output, and about 13% of the bill** - one call
+against fourteen. Per unit of value it is the cheapest thing in the tick, because it is the only
+call that reads across worlds.
+
+**A calm tick is $0.00, and that is exact rather than approximate.** Zero newly-opened incidents
+means zero responder calls, and `synthesize` assembles in code below `FUSION_THRESHOLD`, so nothing
+bills. That is M2's central claim with a fan-out on top of it, unchanged: **cost tracks
+newly-opened incidents, not open ones, and not sensor count.**
+
+**Do not read either tick as a steady-state budget.** Both were unusually expensive: the ledger had
+just been refilled after M2's rows resolved, so nearly everything wrong on the ranch presented as
+new. Naively, 288 ticks a day at tick B's cost is roughly $730/day, and that number is fiction. A
+steady-state loop opens a handful of incidents per tick, not fourteen, which is a materially
+different bill. M4 runs for 30 minutes unattended and measures it rather than either of us guessing.
+
+**Both ticks were `reasoning_effort="none"`, including the supervisor.** Fusion is the one job in
+this repo where that looks arguable, since deciding two incidents are one event is closer to
+classification than to writing. It stays off because the fusion claim is *checked* rather than
+trusted: `linked` is a list of keys `check_shift_report` verifies against the page, so a wrong
+claim is caught in code instead of paid for in tokens. Turning it on is a one-argument change with
+a ledger row, if a bad fused report ever survives that rail.
+
+**One config bug found by the first live tick, and it is the M2 lesson word for word.**
+`SHIFT_REPORT_MAX_TOKENS` was 1,024, reasoned about rather than measured, and tick A truncated
+mid-priorities. Worse, the truncation *mislabelled itself*: a tool call cut off at `max_tokens`
+still arrives carrying a partially filled `input` dict, so a `payload is None` check let the
+half-answer through the rails, where it failed `all_clear`. The log said the supervisor wrote an
+all-clear about a ranch with ten criticals on it. Both `synthesize` and `to_work_order` now treat
+truncated as no answer. **Print the page before sizing the budget, and then check that a budget
+failure still says it was a budget failure.**
+
 ## The Ollama traps
 
 See `src/models/CLAUDE.md` for the code-level versions. In short: `ChatOllama` not the
@@ -127,11 +177,13 @@ One row per job that moved tiers. No row, no move.
 | Date | Job | From | To | Evidence | Verdict |
 | --- | --- | --- | --- | --- | --- |
 | 2026-09-10 | evidence-packet judging **plus** work-order write, `water_feed` | - | Tier 2 | 3 live ticks, 19 work orders. 58,339 then 38,328 then 24,161 tokens as the ledger grew 25 to 65 rows. 19/19 shipped, 0 rejected, all `tool_use`. Rule citations discriminate: `WATER-05` on 12 of 19, but `east-allotment-water` cited only `WATER-02` | **baseline set.** The number to beat, not a decision |
+| 2026-09-10 | the same job across **four** responders, fanned out | - | Tier 2 | 2 live ticks, 29 work orders, 3 worlds each. 29/29 shipped, 0 rejected, 0 no-answer. Per-call cost unchanged from the row above, so fan-out multiplies calls and not price. `herd_health` was handed nothing on both ticks and logged nothing about it, which is `docs/STATE.md` decision 5 working | **baseline widened.** Still no move |
+| 2026-09-10 | shift-report synthesis, the supervisor | - | Tier 2 | 1 call per tick, gated at `FUSION_THRESHOLD = 2` worlds, so most ticks make none. 14,093 in / 1,646 out on a 14-order page, `tool_use`, 0 violations. The design table above puts "shift-report assembly" in Tier 1; that is still the intent, and it is not this job. Assembly in code is what a calm tick already does for free | **not moved, and the table's Tier-1 row is about `assemble_shift_report`, not about fusion** |
 | _(M7)_ | chaos observation prose | Tier 2 | Tier 1 | pending | pending |
 | _(M7)_ | work-order write | Tier 2 | Tier 1 | pending | pending |
 | _(M7)_ | evidence-packet judging | Tier 2 | Tier 1 | pending | pending |
 
-The first row is what the three M7 rows are measured against, which is why it exists at all
+The first three rows are what the M7 rows are measured against, which is why they exist at all
 in a table that says "one row per job that moved tiers." Nothing moved; a floor was
 established. The falling token count is the architecture's central claim landing: **cost
 tracks newly-opened incidents, not open ones.** Tick 3 cost 41% of tick 1 while watching

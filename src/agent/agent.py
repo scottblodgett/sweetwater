@@ -139,9 +139,14 @@ def unrouted_categories() -> frozenset[str]:
 #: three worlds is a 32.5k-char page, and the supervisor spent the whole budget on the situation
 #: paragraph and the first few priorities before `max_tokens` cut the tool call mid-object. That is
 #: the M2 lesson repeating verbatim (`docs/model-routing.md`: print the page before sizing the
-#: budget), so this is now the same 2,048 the work order gets: one number to reason about, and the
-#: output scales with how many things are worth linking rather than with the ranch's size.
-SHIFT_REPORT_MAX_TOKENS = 2_048
+#: budget).
+#:
+#: So this one is sized off a measurement instead: **a complete answer to a 14-order page came back
+#: at 1,646 output tokens.** 2,048 would have shipped with 400 tokens of headroom, which is how you
+#: get to do this twice. `SHIFT_REPORT_SCHEMA` caps the answer at 6 priorities and 4 escalations,
+#: and `linked` is the only unbounded field (deliberately: it must be able to name every key on the
+#: page), which puts a long-but-legal answer near 2,200.
+SHIFT_REPORT_MAX_TOKENS = 3_072
 
 #: Below this, there is nothing to fuse. **One world is a concatenation of length one**, and
 #: paying Opus to reformat a single agent's work orders into a shift report buys a header.
