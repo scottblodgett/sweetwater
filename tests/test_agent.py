@@ -994,10 +994,14 @@ def test_a_truncated_answer_is_a_config_bug_and_says_so() -> None:
 
 # --- graded, not asserted --------------------------------------------------- #
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
-#: Stripped before the page is tokenized. A timestamp is not a quotable fact, and leaving it
-#: in makes almost any two-digit number look grounded: `13:40:00` grounds "40", which is how
-#: the first version of this grader passed an invented head count.
-_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z?")
+#: Stripped from **both** sides before either is tokenized. A clock reading is not a quotable
+#: quantity, and leaving it on the page makes almost any two-digit number look grounded:
+#: `13:40:00` grounds "40", which is how the first version of this grader passed an invented head
+#: count. Leaving it in the prose fails the opposite way: an agent told to write for an auditor
+#: eight months out quotes the date it was given, and `2026-09-10T20:08:41Z` then grades as five
+#: invented numbers. Dropping times everywhere means a fabricated timestamp goes ungraded, which
+#: is a real hole and a small one, because nothing in the prose is anchored to a time anyway.
+_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?|\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?")
 
 
 def ungrounded_numbers(order: WorkOrder, packet: EvidencePacket) -> set[str]:
@@ -1013,7 +1017,7 @@ def ungrounded_numbers(order: WorkOrder, packet: EvidencePacket) -> set[str]:
     an unrelated one and grades nothing.
     """
     grounded = set(_NUMBER.findall(_TIMESTAMP.sub(" ", packet.render())))
-    prose = f"{order.headline} {order.assessment} {' '.join(order.actions)}"
+    prose = _TIMESTAMP.sub(" ", f"{order.headline} {order.assessment} {' '.join(order.actions)}")
     return set(_NUMBER.findall(prose)) - grounded
 
 
@@ -1029,6 +1033,14 @@ def test_the_grader_catches_an_invented_number() -> None:
     packet, and both are exactly the kind of number that reads as authority."""
     order = _order(_answer(assessment="alkali-flat-water at 1.9 gal is roughly 300 gallons short of full and will run 40 head short by dark."))
     assert ungrounded_numbers(order, TANK_PACKET) == {"300", "40"}
+
+
+def test_quoting_the_date_off_the_page_is_not_an_invented_number() -> None:
+    """The other direction, found by the `compliance` transcript below. That agent is briefed to
+    write for an auditor eight months out, so it quotes the timestamp it was given, and a grader
+    that strips times from the page but not from the prose calls the date five inventions."""
+    order = _order(_answer(assessment="alkali-flat-water read 1.9 gal at 2026-09-10T13:40:00.000Z, first seen 13:10Z."))
+    assert ungrounded_numbers(order, TANK_PACKET) == set()
 
 
 # --- the fan-out ------------------------------------------------------------ #
@@ -1479,3 +1491,151 @@ def test_the_shift_report_schema_makes_the_fusion_claim_checkable() -> None:
     assert SHIFT_REPORT_SCHEMA["properties"]["linked"]["items"] == {"type": "string"}
     assert SHIFT_REPORT_SCHEMA["properties"]["priorities"]["minItems"] == 1, "a report with no priorities is an all-clear in a different shape"
     assert SHIFT_REPORT_SCHEMA["additionalProperties"] is False
+
+
+# --- the no-brief experiment ------------------------------------------------ #
+# The pair in `docs/no-brief-transcript.md` and `docs/with-brief-transcript.md`, pinned. Both
+# answers are recorded verbatim from the live run on 2026-09-10, and the point of the block is
+# what it CANNOT assert: the rails do not separate them.
+
+COMPLIANCE_SOP = (REPO_ROOT / "data" / "knowledge_base" / "compliance.md").read_text(encoding="utf-8")
+
+RANGE_INCIDENT = Incident(
+    key="alkali-flat-soil:range_dry",
+    sensor_id="alkali-flat-soil",
+    sensor_type="soil-moisture",
+    location="Alkali Flat",
+    category="range_dry",
+    severity="critical",
+    status="opened",
+    summary="Alkali Flat: soil moisture reads 4.2% on alkali-flat-soil, at or below the critical line of 5%. This ground is bare-dry. Grazing it at planned stocking is how a conservation payment turns into a finding.",
+    last_value="4.2%",
+    unit="%",
+    threshold=5.0,
+    first_seen_at="2026-09-10T20:08:41.585000Z",
+    last_seen_at="2026-09-10T20:08:41.585000Z",
+    owner="compliance",
+)
+
+#: The page both live runs were handed, reproduced from `logs/brief_experiment.json`. Recorded
+#: rather than invented for the same reason the answers are: a recorded answer graded against a
+#: made-up input grades nothing.
+RANGE_PACKET = EvidencePacket(
+    incident=RANGE_INCIDENT,
+    history=tuple(
+        HistoryPoint(recorded_at=f"2026-09-10T{hour:02d}:{minute:02d}:45.396Z", value=value)
+        for hour, minute, value in ((20, 8, 58.0), (19, 58, 18.2), (19, 48, 26.1), (19, 38, 31.4), (19, 28, 28.2), (19, 18, 25.1), (19, 8, 35.8), (18, 58, 17.1), (18, 48, 6.9), (18, 38, 56.2), (18, 28, 45.6), (18, 18, 23.1))
+    ),
+    siblings=(
+        SiblingReading(sensor_id="alkali-flat-battery", sensor_type="battery-charge", status="online", value=11.1),
+        SiblingReading(sensor_id="alkali-flat-fence", sensor_type="fence-voltage", status="online", value=5.8),
+        SiblingReading(sensor_id="alkali-flat-gate", sensor_type="gate", status="online", value=False),
+        SiblingReading(sensor_id="alkali-flat-humidity", sensor_type="humidity", status="online", value=37.0),
+        SiblingReading(sensor_id="alkali-flat-temp", sensor_type="temperature", status="online", value=71.0),
+        SiblingReading(sensor_id="alkali-flat-water", sensor_type="water-level", status="online", value=2.6),
+        SiblingReading(sensor_id="alkali-flat-water-2", sensor_type="water-level", status="online", value=17.6),
+    ),
+    pasture=PastureContext(pasture_id="alkali-flat", name="Alkali Flat", acreage=2400, fence_type="barbed-wire", status="open", head_count=111),
+    sop_name="compliance.md",
+    sop_text=COMPLIANCE_SOP,
+)
+
+#: `compliance` answering `RANGE_PACKET` with `system_prompt("compliance", mandate=" ")`: the
+#: inherited rules, the whole SOP, and no patch. 5,713 in / 884 out, `tool_use`. `unknowns` is
+#: trimmed to the one that matters here; the other three are in the transcript.
+NO_BRIEF_ANSWER: dict[str, object] = {
+    "severity_echo": "critical",
+    "headline": "Alkali Flat: soil moisture 4.2% with 111 head on it, log the reading and get GM on stocking review",
+    "assessment": (
+        "alkali-flat-soil reads 4.2% at Alkali Flat, at or below the 5% critical line, first seen 2026-09-10T20:08:41Z and still open. Alkali Flat is 2400 acres carrying 111 head, "
+        "pasture status open, so this is a stocking decision and not just a note. The recent series on the same sensor swings from 6.9% to 58% within two hours, so the instrument's "
+        "own record is erratic and the defensible record for this period is thin; the current triaged value is still the authoritative reading. Sibling sensors in the same sweep say "
+        "nothing wet or dry about the ground: alkali-flat-temp 71 F, alkali-flat-humidity 37%, alkali-flat-battery 11.1% (low enough to question the datalogging), and two tanks "
+        "reading alkali-flat-water 2.6 gal and alkali-flat-water-2 17.6 gal, which are stock water on an hours clock and belong to a separate water work order, not to this record."
+    ),
+    "actions": ["Log the compliance record now: alkali-flat-soil 4.2% at Alkali Flat, critical line 5%, first seen 2026-09-10T20:08:41Z, pasture alkali-flat 2400 acres, 111 head on it, status open (COMP-01, COMP-05)"],
+    "rules_cited": ["COMP-01", "COMP-05", "COMP-04"],
+    "escalate": True,
+    "escalate_reason": "COMP-01 requires the general manager on every critical range reading, and 111 head on Alkali Flat makes this a stocking and lease question that is not the crew's to answer.",
+    "unknowns": ["Whether alkali-flat-soil is reading true; battery alkali-flat-battery at 11.1% and a series ranging 6.9% to 58% in two hours are not a trustworthy record"],
+}
+
+#: The same model, the same page, `system_prompt("compliance")`. Five actions instead of one, and
+#: two of them hand something to a named neighbour.
+WITH_BRIEF_ANSWER: dict[str, object] = {
+    "severity_echo": "critical",
+    "headline": "Alkali Flat: soil moisture 4.2% with 111 head on it, stocking review to GM, gauge suspect",
+    "assessment": (
+        "Alkali Flat, 2026-09-10: alkali-flat-soil reads 4.2% soil moisture, at or below the 5% critical line, with 111 head standing on the 2400-acre pasture (status open, "
+        "barbed-wire). This is a stocking decision, not a note. The same sensor's last 12 readings swing from 6.9% to 58% inside two hours (18.2% at 19:58Z, 58% at 20:08:45Z), so "
+        "the instrument's stability is questionable and the defensible record for this period is thin; that repair belongs to infrastructure, but the hole in the record is ours. "
+        "Supporting conditions in the same sweep: alkali-flat-temp 71 F, alkali-flat-humidity 37%, alkali-flat-battery at 11.1% charge, which may bear on why the soil series is "
+        "jumping. Stock tank readings at this location (alkali-flat-water 2.6 gal, alkali-flat-water-2 17.6 gal) are water_feed's work order, not evidence about range condition, "
+        "and are not addressed here."
+    ),
+    "actions": [
+        "Log for the program file now: Alkali Flat, sensor alkali-flat-soil, 4.2% soil moisture, 2026-09-10T20:08:41Z, critical line 5%, pasture alkali-flat 2400 acres carrying 111 head, status open (COMP-01, COMP-05)",
+        "Escalate to the general manager for a stocking review on Alkali Flat with the lease in front of them: this ground will not carry what the grazing plan assumed. Do not set an AUM number in the field (COMP-01)",
+        "Send someone to Alkali Flat to eyeball forage and ground cover against the reading, and to note whether the site is representative of the pasture, recorded as a dated observation (COMP-01, COMP-05)",
+        "Hand alkali-flat-soil to infrastructure for verification: the 12-reading series runs 6.9% to 58% within two hours and alkali-flat-battery reads 11.1%. Note in the file that this period has no stable reading behind it (COMP-05)",
+        "Pass the alkali-flat-water 2.6 gal and alkali-flat-water-2 17.6 gal tank readings to water_feed in their own work order, separate from this one (COMP-04)",
+    ],
+    "rules_cited": ["COMP-01", "COMP-04", "COMP-05"],
+    "escalate": True,
+    "escalate_reason": "COMP-01 requires the general manager on every critical range reading, and this pasture is carrying 111 head, which makes it a stocking and lease question rather than a crew call.",
+    "unknowns": ["Whether alkali-flat-soil is calibrated and powered correctly, given the 6.9% to 58% swing and 11.1% battery charge"],
+}
+
+
+def _compliance_order(payload: dict[str, object]) -> WorkOrder:
+    return to_work_order(packet=RANGE_PACKET, agent="compliance", response=_response(payload))
+
+
+def test_the_rails_cannot_tell_the_unbriefed_answer_from_the_briefed_one() -> None:
+    """**The finding of the M3 experiment, and the reason `RECORDED_ANSWER` exists at all.**
+
+    An unbriefed Opus did not flail. It echoed severity, named its sensor, quoted only numbers on
+    the page, cited three real rule ids, and asked for a real action, so every rail in
+    `workers.check` passes and the order ships. The rails ask whether an answer is defensible
+    about its own incident, and that question has nothing to do with whether the agent knew which
+    of four patches was its own.
+
+    Which is exactly why nothing below can be turned into a blocking rail. Do not try: a rail
+    that counts actions is a rail that gets satisfied by padding.
+    """
+    no_brief, with_brief = _compliance_order(NO_BRIEF_ANSWER), _compliance_order(WITH_BRIEF_ANSWER)
+
+    for order in (no_brief, with_brief):
+        assert order.violations == (), "both answers are clean; see docs/no-brief-transcript.md"
+        assert order.status == "ok" and order.shippable
+        assert ungrounded_numbers(order, RANGE_PACKET) == set(), "and both quote only the page"
+        assert RANGE_INCIDENT.sensor_id in order.assessment and "4.2" in order.assessment
+
+    assert len(no_brief.actions) == 1, "one action, and it is filing a note"
+    assert len(with_brief.actions) == 5
+
+
+def test_only_the_briefed_answer_hands_anything_to_a_neighbour() -> None:
+    """What the brief buys, and the part no rail reads. Both answers noticed the two stock tanks
+    and the suspect gauge; only the briefed one said whose they are.
+
+    `data/knowledge_base/compliance.md` was on the page in both runs, COMP-04 and COMP-05
+    included, and both of those name the owner in as many words. **The SOP alone did not produce
+    the handoff.** Standing orders describe the ranch; the brief says which part of it is yours.
+    """
+    no_brief, with_brief = _compliance_order(NO_BRIEF_ANSWER), _compliance_order(WITH_BRIEF_ANSWER)
+    neighbours = ("water_feed", "infrastructure", "herd_health")
+
+    assert {"COMP-04", "COMP-05"} <= citable_rules(COMPLIANCE_SOP), "both runs could cite them, and both did"
+    assert not [n for n in neighbours if n in " ".join(no_brief.actions)], "it deferred to 'a separate water work order' and named nobody"
+    assert [n for n in neighbours if n in " ".join(with_brief.actions)] == ["water_feed", "infrastructure"]
+
+
+def test_the_unbriefed_headline_promises_an_action_it_never_writes_down() -> None:
+    """The sharpest single difference, and unreachable from a rail. "get GM on stocking review"
+    is in the headline and in `escalate_reason`, and the actions list a human works from does not
+    contain it. The order is internally inconsistent and completely defensible."""
+    no_brief = _compliance_order(NO_BRIEF_ANSWER)
+    assert "GM on stocking review" in no_brief.headline and no_brief.escalate
+    assert not [a for a in no_brief.actions if "escalat" in a.lower() or "general manager" in a.lower()]
+    assert any("Escalate to the general manager" in a for a in _compliance_order(WITH_BRIEF_ANSWER).actions)

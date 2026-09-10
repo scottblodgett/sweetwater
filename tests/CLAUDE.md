@@ -78,6 +78,7 @@ pass is the failure mode this file exists to prevent.
 | a supervisor that never answered still produces a page | the person coming on shift is briefed whatever failed upstream | the fallback stopped carrying the work orders or the receipt |
 | a tick told not to spend produces zero work orders | the free pass is genuinely free | a spend stage ran above the `spend` check |
 | nothing a model reads carries an em dash | the house convention reaches the prompt too | a rewrite of the brief or an SOP |
+| the unbriefed and the briefed answer are **both** clean | the honest limit of every rail above: they grade one incident, not scope | nothing. It is a pinned finding, not a rail. See below |
 
 ## Graded, not asserted
 
@@ -90,10 +91,34 @@ the product is useless.
 appears nowhere on the page the model was given. It comes with its own failure case, because
 a grader that cannot fail is decoration.
 
-**It compares number tokens on both sides, and strips ISO timestamps from the page first.**
+**It compares number tokens on both sides, and strips times and dates from both sides first.**
 The first version asked whether the string `"40"` appeared anywhere in the rendered packet.
 It did - inside `13:40:00` - so an invented "40 head short by dark" graded as grounded
 against an unrelated timestamp. Substring containment is not grounding.
+
+Stripping only the page failed the other way, which the `compliance` transcript below caught:
+that agent is briefed to write for an auditor eight months out, so it quotes the date it was
+given, and `2026-09-10T20:08:41Z` in the prose then graded as five invented numbers. Times come
+off both sides. The cost is that a fabricated timestamp goes ungraded, and that is accepted: no
+number in the prose is anchored to a time anyway.
+
+## The two things a rail cannot see
+
+`docs/no-brief-transcript.md` and `docs/with-brief-transcript.md` are one live pair: the same
+model, the same evidence packet byte for byte, one variable, which is whether
+`COMPLIANCE_MANDATE` was in the brief. **Both answers pass every rail with zero violations.**
+The unbriefed one writes one action instead of five, hands nothing to a named neighbour, buries
+a suspect gauge in `unknowns`, and promises an escalation in its headline that its actions list
+never contains.
+
+Both are pinned in `test_agent.py` as `NO_BRIEF_ANSWER` and `WITH_BRIEF_ANSWER`, and the tests
+over them assert the **sameness** of the rail verdict, not a quality difference. That is the
+point: every rail asks whether an answer is defensible about its own incident, and scope is not
+answerable from inside one work order. `RECORDED_ANSWER` is the only thing in the suite that
+would notice a brief regressing, and it notices by diff rather than by rule.
+
+Do not turn any of it into a blocking rail. A rail that counts actions is a rail that gets
+satisfied by padding.
 
 ## Determinism
 
