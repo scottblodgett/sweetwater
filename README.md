@@ -24,17 +24,21 @@ thinks.
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1   # PowerShell; bash on Windows: source .venv/Scripts/activate
 pip install -r requirements-dev.txt
-cp .env.example .env          # fill in ANTHROPIC_API_KEY and DATABASE_URL
+cp .env.example .env          # fill in DATABASE_URL, and ANTHROPIC_API_KEY from M2 on
 python main.py --handshake    # proves the deployed ranch is reachable
 ```
 
 A good handshake reports **19 tools, 160 sensors, 32 locations** in about two seconds.
 
 ```bash
-python main.py --once   # exactly one tick        (stub until M1, exits 3)
+python main.py --once   # exactly one tick        (live: sweeps, triages, and spends)
 python main.py          # the continuous loop     (stub until M4, exits 3)
 python main.py --api    # read API only           (stub until M8, exits 3)
 ```
+
+`--once` is real from M1 and **costs money from M2**: its last two stages assemble an
+evidence packet and hand it to Opus, once per newly-opened incident. Roughly 24k to 58k
+tokens on a first run against a quiet ledger, falling as incidents become `ongoing`.
 
 An unbuilt mode exits **3** and names the milestone that brings it, so "not written yet"
 never looks like "broken."
@@ -59,9 +63,14 @@ indistinguishable from a process that never started.
 ## Watching it work
 
 ```bash
-tail -f logs/tick.jsonl | jq -r '[.tick,.opened,.ongoing,.resolved,.cost_usd]|@tsv'
-jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl    # should be empty
+tail -f logs/tick.jsonl | jq -r '[.tick,(.opened//0),(.ongoing//0),(.resolved//0),(.input_tokens//0),(.output_tokens//0)]|@tsv'
+jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl
 ```
+
+The second one should be empty. It names the healthy **set** rather than one healthy value
+because the two providers disagree: Anthropic says `tool_use` and `end_turn`, Ollama says
+`stop`. This file previously shipped `select(.finish_reason!="stop")`, which flagged every
+healthy Opus call as a config bug.
 
 Three streams: `tick.jsonl` (the heartbeat), `agent.jsonl` (the instrument),
 `audit.jsonl` (the receipt). Schemas in [docs/logging.md](docs/logging.md).

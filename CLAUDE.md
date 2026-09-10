@@ -81,6 +81,7 @@ needed is reachable over the wire or already written down in this repo.
 | `src/tools/` | `src/tools/CLAUDE.md` - allowlists, severity ownership, chaos guards |
 | `src/models/` | `src/models/CLAUDE.md` - the Ollama traps, when thinking may be off |
 | `src/api/` | `src/api/CLAUDE.md` - envelope and error conventions |
+| `data/knowledge_base/` | the SOPs, one file per sensing world, **derived from `docs/sweetwater-ranch.md` and nothing else.** A rule id is citable only if it is a heading in the file the packet carried |
 | `tests/` | `tests/CLAUDE.md` - never Supabase; what each rail proves |
 | architecture | `docs/architecture.md` |
 | model cost decisions | `docs/model-routing.md` (a ledger, not a plan) |
@@ -102,7 +103,7 @@ only way to reach ranch data is over HTTP through the deployed APIs.
 
 ```bash
 python main.py --handshake   # prove the deployed ranch is reachable, then exit
-python main.py --once        # exactly one tick        (stub until M1, exits 3)
+python main.py --once        # exactly one tick        (live, and SPENDS from M2)
 python main.py               # the continuous loop     (stub until M4, exits 3)
 python main.py --api         # read API only           (stub until M8, exits 3)
 
@@ -113,6 +114,11 @@ mypy src main.py
 
 An unbuilt mode exits **3** with a `not_implemented` line naming the milestone that
 brings it, rather than failing as if it were broken.
+
+**`--once` costs money from M2.** Its last two stages assemble an evidence packet and hand
+it to Opus, once per newly-opened incident: 24k to 58k tokens depending on how much of the
+ledger is already `ongoing`. In code, `run_tick(spend=False)` stops at the end of the free
+pass, and `conftest.no_model_calls` makes a forgotten flag fail loudly rather than bill.
 
 Windows venv: `.venv/Scripts/python.exe`. No Docker until M10 - the upstreams are
 already deployed and `sw_ops` is in Supabase, so there is nothing local to stand up.

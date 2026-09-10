@@ -31,6 +31,23 @@ from src.utils.config import get_settings
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def no_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that reaches a real model fails here instead of billing for it.
+
+    The same rule as `assert_local_test_url`, applied to the other expensive mistake. From
+    M2 the tick spends money at its last two stages, so `run_tick` takes `spend=False` and
+    every rail passes it. This fixture is what happens when somebody forgets: a forgotten
+    flag becomes a loud failure rather than a slow suite and a bill, and `pytest` keeps
+    passing on a plane. Rails that exercise the response path build a `ModelResponse`
+    directly, which is the honest way to test a parser anyway.
+    """
+    def _refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a test tried to construct a real model client. Pass spend=False, or build a ModelResponse directly (tests/CLAUDE.md).")
+
+    monkeypatch.setattr("src.models.llm_client.build_client", _refuse)
+
+
 async def _probe(url: str) -> None:
     engine = build_engine(url, schema=SCHEMA_TEST)
     try:

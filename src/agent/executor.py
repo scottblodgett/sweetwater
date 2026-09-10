@@ -23,9 +23,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src.agent.agent import owners_for, route
+from src.agent.agent import WATER_FEED, owners_for, route
 from src.agent.memory import StoreTarget, counts_by_status, reconcile, resolve_store, store_session
 from src.agent.state import RanchState
+from src.agent.workers import run_water_feed
+from src.tools.evidence import assemble
 from src.tools.sensors import fetch_catalog, sweep
 from src.tools.triage import triage_sweep
 from src.utils.logger import Stopwatch, bind_tick, get_logger, get_run_id, log_tick
@@ -33,8 +35,13 @@ from src.utils.logger import Stopwatch, bind_tick, get_logger, get_run_id, log_t
 log = get_logger(__name__)
 
 
-async def run_tick(*, tick: int = 1, store: StoreTarget | None = None, now: datetime | None = None) -> RanchState:
-    """Run the free pass once and fold the result into `sw_ops`.
+async def run_tick(*, tick: int = 1, store: StoreTarget | None = None, now: datetime | None = None, spend: bool = True) -> RanchState:
+    """Run the pass once, fold the result into `sw_ops`, and write the work orders.
+
+    `spend=False` stops the tick at the end of the free pass, before the roster call and
+    before any model call. That is how `tests/` exercises the whole pipeline without a
+    token: `tests/CLAUDE.md` forbids a test that reaches a model, and a flag read here
+    beats five call sites each remembering to pass a fake.
 
     `store` and `now` are injected so a test can point at `sw_ops_test` and assert on a
     fixed timestamp. Left alone, the target comes from `SW_OPS_TARGET` through the same
@@ -89,6 +96,18 @@ async def run_tick(*, tick: int = 1, store: StoreTarget | None = None, now: date
         # its owner every five minutes is how a service teaches its client to ignore it.
         state.routed = route(result.opened)
 
+        # --- from here on the tick costs money ---------------------------------
+        # Skipped entirely, both stages, when nothing new opened. A calm tick must not pay
+        # for a roster call it has no packet to put in.
+        water_feed_keys = frozenset(state.routed.get(WATER_FEED, ()))
+        newly_opened = tuple(inc for inc in result.opened if inc.key in water_feed_keys)
+        if newly_opened and spend:
+            state.failed_stage = "evidence"
+            packets = await assemble(newly_opened, readings=swept.readings, ranch_map=ranch_map)
+
+            state.failed_stage = "water_feed"
+            state.work_orders = await run_water_feed(packets)
+
         state.failed_stage = None
     # Broad on purpose: a tick reports its own failure and never propagates one, because
     # an exception escaping here takes the M4 loop down over one bad stage.
@@ -109,6 +128,14 @@ async def run_tick(*, tick: int = 1, store: StoreTarget | None = None, now: date
         resolved=len(state.resolved),
         held_unread=held_unread,
         agents_routed=sorted(state.routed),
+        work_orders=len(state.work_orders),
+        work_orders_shipped=sum(1 for o in state.work_orders if o.shippable),
+        work_orders_rejected=sum(1 for o in state.work_orders if not o.shippable),
+        escalated=sum(1 for o in state.work_orders if o.escalate),
+        # The M2 verification lives on this pair: token cost stays flat across sweeps while
+        # incident count moves, because only newly-opened incidents reach a model.
+        input_tokens=sum(o.input_tokens for o in state.work_orders),
+        output_tokens=sum(o.output_tokens for o in state.work_orders),
         ledger=ledger,
         error=state.error,
         failed_stage=state.failed_stage,
@@ -121,7 +148,11 @@ def summarize(state: RanchState) -> str:
     if state.error:
         return f"tick {state.tick} FAILED at {state.failed_stage}: {state.error}"
     fan = ", ".join(f"{agent}:{len(keys)}" for agent, keys in state.routed.items()) or "nobody"
+    spend = ""
+    if state.work_orders:
+        tokens = sum(o.input_tokens + o.output_tokens for o in state.work_orders)
+        spend = f", {sum(1 for o in state.work_orders if o.shippable)}/{len(state.work_orders)} work orders shipped on {tokens} tokens"
     return (
         f"tick {state.tick} ok - {state.sensors_read} read ({state.sensors_failed} failed) via {state.catalog_source}, "
-        f"{len(state.findings)} findings, opened {len(state.opened)} / ongoing {len(state.ongoing)} / resolved {len(state.resolved)}, routed to {fan}"
+        f"{len(state.findings)} findings, opened {len(state.opened)} / ongoing {len(state.ongoing)} / resolved {len(state.resolved)}, routed to {fan}{spend}"
     )

@@ -206,6 +206,170 @@ read is the thing that has to be put where a human trips over it.**
 
 ---
 
-_More entries arrive with M2 onward. Candidates already known from the design: severity
-ownership, the `num_ctx` shim trap, `finish_reason` as a diagnostic, seeded chaos as a
-fixture rather than a flake, and why a gate must outlive its process._
+## 10. A field whose vocabulary is per provider, and a query that hardcoded one word
+
+**Pain.** `src/models/CLAUDE.md`, `README.md`, and `docs/logging.md` all shipped
+`jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl` with the comment "should be empty.
+Anything in it is a config bug." Run against M2's first real `agent.jsonl`, it returned
+**every single line**, all 19 of them, all healthy.
+
+**Why.** Anthropic's stop reasons are `tool_use`, `end_turn`, `stop_sequence`, `max_tokens`.
+It never emits `stop`; that is the OpenAI and Ollama spelling. So the query that exists to
+find config bugs reported a 100% config-bug rate on a phase that worked perfectly, which is
+the exact loss of signal it was written to prevent. Worse, a diagnostic that cries wolf
+about everything gets ignored, and then it is not there when one line really is `max_tokens`.
+
+**Fix.** Name the healthy **set**, not one healthy value:
+`select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)`. Both
+vocabularies pass, and both truncation spellings still fail. `ModelResponse.ok` and
+`.truncated` hold the same sets in code, and they are the definition. Fixed in all four files
+that carried it: `src/models/CLAUDE.md`, `README.md`, `docs/logging.md`, `docs/Plan.md`.
+
+**The first attempt at that fix was also broken, and running it is the only reason we know.**
+It was written `select(["stop",…]|index(.finish_reason)|not)`, which is wrong in a way that
+reads perfectly: inside the pipe `.` is now the *array*, so `.finish_reason` tries to index an
+array with a string and every line errors. That puts thirty errors on stderr and **nothing on
+stdout**, so piped to `wc -l` it reports `0` - which is precisely what a healthy log looks
+like. A broken query and a passing query produce the same output. So the check needs a
+**negative control**: `IN("stop")` on its own must list all 30 Anthropic lines. It does.
+
+**Lesson.** The moment a field's values come from an external vocabulary, a check written
+against one literal is a check written against one provider. And this is M0's fourth defect
+again: **the gate was green while the file describing how to read the gate was wrong**, for
+two whole milestones, because no test reads a `jq` line out of a markdown file. Running every
+documented command at the boundary is what caught it, on the first boundary where the command
+had real data to run against.
+
+And the sharper half: **a diagnostic that fails by producing no output cannot be verified by
+running it once.** It has to be run against data that is known to trip it. That is the same
+demand cookbook #11 makes of the grounding grader, arriving here from a completely different
+direction, which is usually the sign it is a rule rather than a coincidence.
+
+**Found:** M0 wrote it, M2 was the first phase that could disprove it.
+
+---
+
+## 11. Substring containment is not grounding
+
+**Pain.** The grading rail that catches invented numbers in a work order. Its own failure
+case asserted that `"300"` and `"40"` in "roughly 300 gallons short and 40 head short by
+dark" are ungrounded. It reported only `{"300"}`.
+
+**Why.** The first implementation asked `if n not in packet.render()`, a substring test.
+`"40"` appears in the rendered page - inside the timestamp `13:40:00`. So an invented head
+count graded as grounded against an unrelated minute field.
+
+**Fix.** Strip ISO timestamps from the page first, then compare **number tokens on both
+sides** rather than asking whether a string occurs somewhere. That made the grader strictly
+harder to pass, which is the only direction a grader is allowed to move.
+
+**Lesson.** A grounding check is a claim that a specific value came from a specific place.
+`in` answers a different and much weaker question, and it fails in the generous direction:
+every digit string in a long page is a false alibi for some invented number. Also worth
+noting the shape - **the bug was in the test's own failure case, and only having one
+revealed it.** A grader with no red case is decoration, and it would have shipped here
+looking green.
+
+**Found:** M2.
+
+---
+
+## 12. Two honest numbers that disagree, handed to a model with no note
+
+**Pain.** The first printed evidence packet said the Alkali Flat tank read **3.4 gal**
+(what the sweep and triage judged) while the newest point of its own history series said
+**0.8 gal**, at a *later* timestamp.
+
+**Why.** `GET /sensors/:id` and `GET /sensors/:id/readings` are synthesized independently on
+every call. Neither is wrong and neither is stale; they are two draws from the same
+generator. The packet presented both as facts on one page.
+
+**Fix.** One line in `render()` saying the series is shape and trend only and is not the
+current reading, and the current reading stated once, unambiguously, as the thing triage
+judged. The live model then quoted 1.9 gal as current and used the history only as a range
+and a direction, which is exactly the intended behavior.
+
+**Lesson.** A model handed two contradictory numbers with no guidance **will pick one**, and
+it will sound just as confident either way. Assembling evidence in code is not only about
+gathering it; the packet has to say which fact is load-bearing. Anywhere two sources of the
+same quantity land on one page, the page owes the reader a sentence about precedence.
+
+**Found:** M2, by printing the packet before any model existed, which was the whole reason
+to do it in that order.
+
+---
+
+## 13. A token budget sized against an imagined page
+
+**Pain.** `MAX_OUTPUT_TOKENS = 1536`, chosen against an estimate of ~1,400 input and ~450
+output. The first live call measured **5,555 in and 1,137 out**. The estimate was off 4x on
+input, and the output cap had about 400 tokens of headroom left on an answer that could
+easily have been longer.
+
+**Why.** The estimate counted the interesting part. The SOP file, loaded whole into every
+prompt, is the majority of the input and was mentally filed as "small, it's just rules."
+
+**Fix.** Measure, then set the constant, with the measured numbers **in the comment beside
+it** so the next person changing it knows what it was fitted to. Raised to 2,048. And the
+real finding: the cost lever is the SOP, not the evidence, which is the opposite of what it
+looks like from the outside.
+
+**Lesson.** A ceiling set below a real response does not error, it **truncates**, and a
+truncated structured answer looks like a weak model rather than a config mistake. That is
+what makes `finish_reason` worth logging, but the cheaper move is to print one real page
+before choosing any number that bounds it.
+
+**Found:** M2, on the first live call.
+
+---
+
+## 14. A flag that prevents an expensive mistake needs a guard behind it
+
+**Pain.** None, because it was caught while wiring the spend stages. `run_tick` grew two
+stages that call Opus. Ten existing test rails called `run_tick`. All ten would have started
+billing, silently, and the suite would still have gone green.
+
+**Fix, two layers.** `run_tick(spend=False)` at every call site, **and** an autouse
+`conftest.no_model_calls` fixture that replaces `build_client` with something that raises.
+The flag is the intent; the fixture is what happens when somebody forgets the flag.
+
+`spend` defaults to `True`, deliberately. A default that quietly does nothing is a default
+that ships, and a tick that silently stopped spending is indistinguishable from a calm ranch.
+
+**Lesson.** Exactly the same shape as `assert_local_test_url`, which keeps the suite off
+Supabase: a rule that only exists as "remember to pass the flag" is not a rule. This repo now
+has two expensive mistakes, and each one has a flag for intent and a guard for reality. When
+you add a third capability that costs money or mutates something, the question is not whether
+there is an option to turn it off, it is **what fails loudly when nobody turns it off.**
+
+**Found:** M2, in design.
+
+---
+
+## 15. Joining two services on a display name
+
+**Pain.** The first evidence packet came back with **zero** sibling sensors and no pasture
+context. Both lookups matched on location name.
+
+**Why.** The `ranch://sensors/map` resource spells a location `"Alkali Flat (alkali-flat)"`
+while the Sensor API's REST records say `"Alkali Flat"`. And the Farm API's pasture for the
+sensor location `"East Allotment"` is named `"East BLM Allotment"`. Two independent name
+mismatches, one cosmetic and one genuinely different label for the same ground.
+
+**Fix.** Slugify to the id and match on that, handling both spellings of the map's format.
+Match a pasture by id, never by display name.
+
+**Lesson.** The failure mode is what makes this worth an entry: a name join that misses
+returns **an empty set, not an error**. "No siblings at this location" and "no animals in
+this pasture" are perfectly plausible facts about a ranch, so the packet read as complete and
+merely thin. Same disease as cookbook #4 and #8 - a lookup that cannot distinguish "nothing
+there" from "I asked the wrong question." When joining across services, join on the id, and
+if a join can legitimately return empty, log the count so zero is visible.
+
+**Found:** M2, by printing the packet and counting refs.
+
+---
+
+_More entries arrive with M3 onward. Candidates already known from the design: the `num_ctx`
+shim trap, seeded chaos as a fixture rather than a flake, and why a gate must outlive its
+process._

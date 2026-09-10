@@ -44,13 +44,47 @@ a ranch to explore. That is `evidence.py`'s entire reason to exist.
 
 ## Log `finish_reason` on every single call
 
-`length` means the model never got to answer. `stop` means it answered and answered
-badly. One is a config bug and one is a model-selection decision, and **in the response
-text they are identical**. A log holding only the final text cannot tell them apart,
-and telling them apart is worth more than any other field in `agent.jsonl`.
+A truncated call means the model never got to answer. A completed call means it answered
+and answered badly. One is a config bug and one is a model-selection decision, and **in
+the response text they are identical**. A log holding only the final text cannot tell
+them apart, and telling them apart is worth more than any other field in `agent.jsonl`.
 
-`jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl` should be empty. Anything in
-it is a config bug, not a weak model.
+**The two providers do not share a vocabulary, and the query has to know that.** Anthropic
+says `tool_use`, `end_turn`, `stop_sequence`, `max_tokens`. Ollama and the OpenAI-shaped
+APIs say `stop`, `length`, `tool_calls`. M2 shipped with a documented `jq` that selected
+`.finish_reason != "stop"`, which reported **every healthy Opus call** as a config bug,
+because no Anthropic call has ever returned `stop`. So the query names the healthy set
+rather than one healthy value:
+
+```bash
+jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl
+```
+
+Empty is healthy. `max_tokens` or `length` in there is a config bug, not a weak model.
+`ModelResponse.ok` and `.truncated` in `llm_client.py` hold the same two sets, and they
+are the definition; if a third provider arrives, widen both together.
+
+## Two credentials, one call path
+
+`resolve_provider()` picks first-party Anthropic when a key exists and **Bedrock**
+otherwise, scoping the model id to `us.anthropic.…` for the Bedrock path only, so
+`TIER2_MODEL` stays the first-party spelling in `.env`. `AsyncAnthropic` and
+`AsyncAnthropicBedrock` expose an identical `messages.create`, so provider choice is a
+constructor decision and nothing downstream changes shape.
+
+**The Bedrock path is right for a supervised M2 and wrong for M4.** It rides this
+session's temporary AWS credentials, which expire; a continuous loop needs a real
+`ANTHROPIC_API_KEY`. When they expire, the failure is data (`ExpiredTokenException` in
+`ModelResponse.error`, a `no_answer` work order), not an exception.
+
+## `THINKING_BUDGET`, and the two ways to misconfigure it
+
+`{"none": 0, "low": 2048, "medium": 6144, "high": 12288}`, keyed by `reasoning_effort`.
+`none` **omits the thinking block entirely** rather than sending a zero budget, which the
+API rejects. Two traps beyond that: `temperature` may not be set at all while thinking is
+on, so the knob is only offered when it is off; and `max_tokens` has to be raised **above**
+`budget_tokens`, or the answer is all reasoning and no content. `call_tier2` adds the
+budget to `max_tokens` rather than sharing it.
 
 ## embeddings.py is a seam, not a feature
 

@@ -202,4 +202,172 @@ about the tree where a reader trips over it, since a test never will.
 
 ## M2 - One agent, Opus only
 
-_Not started._
+**2026-09-10. Done.**
+
+The first phase that spends money. `evidence.py` assembles the page, `llm_client.py` calls
+Opus once, `system_prompts.py` carries the brief, `workers.py` runs the rails, and
+`water_feed` writes a work order for every newly-opened incident it owns. Tier 2 only: no
+cascade, no local fallback, no retry.
+
+Built in the mandated order, and the order was the point. **The packet was printed before
+any model existed**, which is what caught defects 1, 2, and 3 below; the brief was written
+last, against a page that had actually been read. A brief drafted against an imagined packet
+reads fine and grounds nothing.
+
+**M2 gate, all green:**
+
+| Check | Result |
+| --- | --- |
+| `pytest` | **168 passed** (132 before) |
+| `ruff check .` | clean |
+| `mypy src main.py` (strict) | clean, 29 files |
+| `--once` three times live | **19 work orders, 19 shipped, 0 rejected, 0 no-answer**, every call `finish_reason=tool_use` |
+| token cost flat as incidents grow | **58,339 then 38,328 then 24,161** while the ledger went 25 to 65 rows |
+| every order names a real sensor and quotes its real reading | yes, graded not asserted |
+| `finish_reason` on every call | yes, and written before validation |
+| every command the docs claim works | `--handshake` exit 0 (19 tools, 160 sensors, 32 locations), `--once` exit 0 (**10/10 shipped, 63,446 tokens**), bare loop exit 3 `arrives_in=M4`, `--api` exit 3 `arrives_in=M8`, and all three documented `jq` queries, one of which was wrong. See below |
+
+The token curve is the phase's actual claim. **Cost tracks newly-opened incidents, not open
+ones**, so tick 3 cost 41% of tick 1 while watching more of the ranch. That is the free pass
+paying for itself, and it is a measurement rather than an argument.
+
+### The first work order, because "it reads well" is the deliverable
+
+Alkali Flat, tank at 1.9 gal against a 2 gal floor, 111 head on 2,400 acres. Opus quoted
+1.9 gal as current and used the 0.8-3.9 gal history **only as a range and a trend**, used the
+second tank on the same ground at 16.7 gal to argue float-or-supply rather than a
+pasture-wide outage, noted the battery at 82.5% to rule out a dead solar site, cited
+`WATER-01` and `WATER-05`, and pushed six facts it did not have - starting with tank capacity
+- into `unknowns` instead of inventing them.
+
+Citations discriminate rather than pattern-match: `WATER-05` appears in 12 of the 19 orders,
+but `east-allotment-water` cited only `WATER-02`. Worth watching, not a defect.
+
+### Divergence: the credential is Bedrock, not first-party Anthropic
+
+`ANTHROPIC_API_KEY` was empty and `docs/STATE.md` called it a hard M2 blocker. It was not
+one: this session authenticates to Bedrock (`us-east-1`, `us.anthropic.claude-opus-5`), so
+`resolve_provider()` picks first-party when a key exists and Bedrock otherwise, scoping the
+model id on the Bedrock path only so `TIER2_MODEL` stays one setting for both.
+`AsyncAnthropic` and `AsyncAnthropicBedrock` expose an identical `messages.create`, so this
+cost a constructor and nothing downstream changed shape.
+
+**It is right for a supervised M2 and wrong for M4.** Session credentials expire, and a
+continuous loop cannot depend on one. When they do expire the failure is data - an
+`ExpiredTokenException` in `ModelResponse.error` and a `no_answer` work order - and there is
+a rail for exactly that.
+
+Also: the raw SDK rather than `ChatAnthropic`, because `langchain-anthropic` has no Bedrock
+path and M2 has no tool loop for LangChain to run. `anthropic[bedrock]` was missing from
+`requirements.txt` entirely, arriving transitively through `langchain-anthropic` without the
+extra, so the first call failed on `No module named 'botocore'`. Now named as the first-order
+dependency it is.
+
+### Divergence: `src/agent/workers.py` is new to the plan's tree
+
+`docs/Plan.md` had `agent.py` carrying the routing table **and** the worker factories. M2 split
+the second half into `workers.py`, because the two answer different questions: `agent.py` says
+which agent owns a category, `workers.py` says what an agent's answer must satisfy. Folding the
+rails, the checker, and the fan-out into a 113-line routing table reproduces the exact confusion
+the M1 `routing.py` rename existed to remove.
+
+The plan's tree is amended with the reason written into it, which is the M1 lesson applied
+rather than repeated: the defect there was **silent** drift, and no test reads a diagram.
+
+### Five defects M2 caught in itself
+
+Full entries as cookbook #10 through #15. The first three are all consequences of printing
+the packet first.
+
+**1. A name join across two services returned an empty set, not an error.** The first packet
+had **zero** siblings and no pasture. `ranch://sensors/map` spells a location
+`"Alkali Flat (alkali-flat)"` where REST says `"Alkali Flat"`, and the Farm API's pasture for
+sensor location `"East Allotment"` is `"East BLM Allotment"`. Now slugified to the id and
+matched on that. The dangerous part is that "no siblings here" and "no animals in this
+pasture" are plausible facts about a ranch, so the packet read as complete and merely thin.
+
+**2. Two honest numbers on one page with no note about precedence.** Triage judged 3.4 gal
+while the newest history point said 0.8 gal at a *later* timestamp. Both are honest -
+`/sensors/:id` and `/sensors/:id/readings` are synthesized independently - but a model handed
+two contradictory numbers picks one and sounds equally confident either way. `render()` now
+says in one line that the series is shape and trend only.
+
+**3. The token estimate was off 4x.** Sized `MAX_OUTPUT_TOKENS = 1536` against a guess of
+~1,400 in / ~450 out. Measured **5,555 in / 1,137 out**. The SOP file, loaded whole, is the
+majority of the input and had been filed mentally as "just a few rules." Raised to 2,048 with
+the measured numbers in the comment. The finding underneath it: **the cost lever is the SOP,
+not the evidence**, which matters before M7 optimizes the wrong half.
+
+**4. The grader's own failure case caught the grader.** `ungrounded_numbers()` asserted that
+`300` and `40` in an invented sentence were both ungrounded; it found only `300`. `"40"` is a
+substring of the timestamp `13:40:00` in the rendered packet, so a substring test grounded an
+invented head count against an unrelated minute field. Now strips ISO timestamps and compares
+number **tokens** on both sides, which made the grader strictly harder to pass. It only
+surfaced because the grader had a red case at all.
+
+**5. Ten test rails were about to start billing.** `run_tick` grew two spend stages and ten
+existing rails called it. Fixed twice over: `spend=False` at every call site, and an autouse
+`conftest.no_model_calls` fixture that raises if anything constructs a real client. The flag
+is the intent, the fixture is what happens when somebody forgets it. Same shape as
+`assert_local_test_url` keeping the suite off Supabase.
+
+### The doc defect, and this time step 2 is what found it
+
+M0 concluded "re-run every command the docs claim works." M2 is the first phase where one of
+those commands had real data to run against, and it failed immediately:
+
+> `jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl` **# should be empty**
+
+It returned **all 19 lines, every one healthy.** Anthropic's stop reasons are `tool_use`,
+`end_turn`, `stop_sequence`, `max_tokens`; `stop` is the OpenAI and Ollama spelling and no
+Anthropic call has ever produced it. So the diagnostic written to find config bugs reported a
+100% config-bug rate on a phase that worked perfectly. It shipped in **four** files -
+`src/models/CLAUDE.md`, `README.md`, `docs/logging.md`, `docs/Plan.md` - and survived two
+milestones, because no test reads a `jq` line out of a markdown file.
+
+**And the first fix was broken too.** Written as
+`select(["stop",…]|index(.finish_reason)|not)`, which is wrong in a way that reads perfectly:
+inside the pipe `.` is the array, so it tries to index an array with a string and every line
+errors. Thirty errors on stderr, nothing on stdout, and `wc -l` reports `0` - identical to a
+healthy log. Caught only by adding a **negative control** (`IN("stop")` alone must list all 30
+Anthropic lines) and running it. A diagnostic that fails by producing no output cannot be
+verified by running it once; see cookbook #10 and #11, which arrive at the same rule from
+opposite directions.
+
+Fixed by naming the healthy **set** rather than one healthy value, in all four files, with
+`ModelResponse.ok` and `.truncated` holding the same sets in code as the definition. The same
+audit found `docs/logging.md` and `docs/Plan.md` printing `tokens_in` / `tokens_out` where the
+code writes `input_tokens` / `output_tokens`, which is a query that returns `null` and looks
+like a calm ranch, plus `README.md` and root `CLAUDE.md` still calling `--once` a stub. Both
+`tick.jsonl` examples were also two milestones out of date on their field names.
+
+The general lesson is M0's fourth defect one more layer out: **a doc defect and a code defect
+have the same cause, and only the code one gets caught by a test.** The habit works. It just
+cannot fire until the command has something to say.
+
+### Two decisions worth not re-litigating
+
+**Structured output is a forced tool call**, not a "reply in JSON" instruction. The schema is
+enforced by the API rather than by a parser, and - the reason that actually matters - it keeps
+`finish_reason` honest: `tool_use` is a real answer and `max_tokens` is a config bug. With
+free-form JSON both arrive as text and that distinction is gone.
+
+**The all-clear rail reads the actions list, not the prose.** "The second tank at 16.7 gal is
+fine, so this is the float and not the pasture" is a correct, useful sentence and the actual
+diagnosis; a prose matcher rejects it. A rail that punishes accurate writing gets switched off
+inside a week, so the rail asks the only question that cannot be argued with: does this order
+tell somebody to do something.
+
+### Work not asked for, and why each one is here
+
+Disclosed at the boundary rather than merged quietly:
+
+| Added | Why it was not optional |
+| --- | --- |
+| `anthropic[bedrock]` in `requirements.txt` | the phase does not run without it |
+| `conftest.no_model_calls` | defect 5; a flag alone is not a rule |
+| `spend` on `run_tick` | the only way rails above the model layer stay free |
+| `AGENT_CONCURRENCY = 4` | four 15s calls in flight, same reason `SWEEP_CONCURRENCY` exists |
+| `maxItems` on `actions` and `unknowns` | the first live answer returned 7 actions and 6 unknowns. A work order nobody reads to the end is not a work order |
+| `WorkOrder` in `state.py` | `Finding` is the sub-agent-to-supervisor contract; this is a different object with a code-owned half |
+| the grader tightening | defect 4 |

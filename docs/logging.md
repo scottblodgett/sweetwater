@@ -29,13 +29,18 @@ container). Files are **always** JSON regardless of environment.
 
 ```jsonc
 { "ts":"2026-09-10T14:30:00.000Z","run_id":"9a10c5f00357","tick":42,"duration_ms":8140,
+  "store":"prod","catalog_source":"mcp_resource",
   "sensors_read":160,"sensors_failed":0,
-  "findings":7,"opened":2,"ongoing":5,"resolved":1,
-  "agents_invoked":["water_feed","infrastructure"],
-  "escalations":1,"escalation_reasons":["critical"],
-  "tokens_in":3120,"tokens_out":812,"cost_usd":0.0184,
-  "chaos_fired":"storm_front" }
+  "findings":21,"critical":6,"opened":9,"ongoing":8,"resolved":4,"held_unread":0,
+  "agents_routed":["water_feed","infrastructure"],
+  "work_orders":9,"work_orders_shipped":9,"work_orders_rejected":0,"escalated":1,
+  "input_tokens":50385,"output_tokens":7954,
+  "ledger":{"opened":9,"ongoing":8,"resolved":4} }
 ```
+
+The M2 shape. `chaos_fired` joins at M5 and `cost_usd` at M7 with the pricing table; a
+field is added to this line when the stage that produces it exists, not before, so a
+`null` here always means the stage ran and had nothing to say.
 
 **Written at tick end, always, including when the tick failed** (with `error` and
 `failed_stage`). A tick that produces no line is indistinguishable from a dead loop, and
@@ -51,17 +56,27 @@ notices it stop being flat.
 ## `logs/agent.jsonl` - the instrument, one line per model call
 
 ```jsonc
-{ "ts":"…","run_id":"…","tick":42,"agent":"infrastructure","tier":1,
-  "provider":"ollama","model":"gemma4:e4b","reasoning_effort":"none","num_ctx":16384,
-  "tool_calls":0,"input_tokens":1698,"output_tokens":214,
-  "finish_reason":"stop","latency_ms":11200,
-  "escalated_from":null,"validation":{"shape":"pass","key":"pass","grounding":"pass"} }
+{ "ts":"…","run_id":"…","tick":3,"agent":"water_feed","tier":2,
+  "provider":"bedrock","model":"us.anthropic.claude-opus-5","reasoning_effort":"none",
+  "max_tokens":2048,"tool_calls":1,"input_tokens":4816,"output_tokens":1102,
+  "finish_reason":"tool_use","latency_ms":14095,
+  "content_types":["tool_use"],"incident_key":"feed-bin-03:feed_low" }
 ```
 
+That is a real M2 line. Tier 1 adds `num_ctx` and Tier 2 does not have one; the required
+fields are the ones in `log_agent_call`'s signature and everything else is per-call
+context. `content_types` is the block types the response actually contained, which is how
+"answered with no tool call" reads differently from "never answered."
+
 **`finish_reason` is the most valuable field in this whole scheme and it is required.**
-`length` means the model never got to answer; `stop` means it answered and answered
+Truncation means the model never got to answer; completion means it answered and answered
 badly. One is a config bug, one is a model-selection decision, and **in the response
 text they look identical**. Telling them apart cost a real investigation once.
+
+**The vocabulary is per provider.** Anthropic returns `tool_use`, `end_turn`,
+`stop_sequence`, `max_tokens`; Ollama and the OpenAI-shaped APIs return `stop`, `length`,
+`tool_calls`. Any query over this field has to name the healthy **set**, not one healthy
+value, or it flags an entire provider as broken. See below, and `src/models/CLAUDE.md`.
 
 **Written immediately on return, before validation runs**, so a response that fails a
 check still leaves a receipt of what was actually returned rather than vanishing into a
@@ -107,14 +122,20 @@ job: a finding that reads wrong and a log that cannot say why.
 ## Reading the logs is the real test of whether the instrument works
 
 ```bash
-jq -r '[.tick,.tokens_in,.tokens_out,.cost_usd,.escalations]|@tsv' logs/tick.jsonl
-jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl        # should be empty
+jq -r '[.tick,(.input_tokens//0),(.output_tokens//0),(.work_orders_shipped//0),(.escalated//0)]|@tsv' logs/tick.jsonl
+jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl
 jq -r '.audit_id' logs/audit.jsonl | sort | uniq -c | awk '$1!=2'   # should be empty
 ```
 
 Cost flat on calm ticks, spiking only where an escalation is logged beside it. Anything
 in the second query is a config bug, not a weak model. Anything in the third is a pause
 nobody answered.
+
+The first query's field names are `input_tokens` and `output_tokens`, matching the model
+API and `agent.jsonl` rather than the `tokens_in` / `tokens_out` this file used to print,
+because two spellings for one number is a query that returns `null` and looks like a calm
+ranch. `cost_usd` arrives with the pricing table at M7; until then the token counts are the
+cost signal.
 
 `logs/*.jsonl` is gitignored; `logs/.gitkeep` is not. A captured run worth keeping goes
 into `docs/` next to the finding it supports.

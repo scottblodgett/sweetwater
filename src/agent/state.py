@@ -93,6 +93,68 @@ class Incident(BaseModel):
     row_id: int | None = None
 
 
+WorkOrderStatus = Literal["ok", "rejected", "no_answer"]
+
+
+class WorkOrder(BaseModel):
+    """What a sub-agent wrote about one incident, plus the receipt for the call.
+
+    Arrives at M2. The split of ownership is the whole point of this shape: every field
+    above `status` is the model's prose, every field below it is a fact code established,
+    and `severity` is triage's rather than the model's echo of it. The echo is checked and
+    then thrown away, because storing what a model said the severity was creates a second
+    answer to a question that already has one.
+
+    `violations` is populated rather than raised. A rejected work order still has to be
+    readable: "the model said this and here is why we did not ship it" is the record M7
+    needs to move this job down a tier, and an exception leaves nothing behind.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    incident_key: str
+    agent: str
+    severity: Severity  # triage's, always. Never the model's echo.
+
+    headline: str = ""
+    assessment: str = ""
+    actions: tuple[str, ...] = ()
+    rules_cited: tuple[str, ...] = ()
+    escalate: bool = False
+    escalate_reason: str = ""
+    unknowns: tuple[str, ...] = ()
+
+    status: WorkOrderStatus = "ok"
+    violations: tuple[str, ...] = ()
+    severity_echo: str = ""
+
+    provider: str = ""
+    model: str = ""
+    finish_reason: str = ""
+    latency_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def shippable(self) -> bool:
+        return self.status == "ok"
+
+    def render(self) -> str:
+        """The work order as a person on shift reads it. Also what a human grades."""
+        lines = [f"[{self.severity.upper()}] {self.headline}", ""]
+        lines.append(self.assessment)
+        lines.append("")
+        lines.extend(f"  {i}. {action}" for i, action in enumerate(self.actions, start=1))
+        if self.unknowns:
+            lines.extend(["", "Not known from the sensors:", *(f"  - {u}" for u in self.unknowns)])
+        if self.escalate:
+            lines.extend(["", f"ESCALATE: {self.escalate_reason or 'no reason given'}"])
+        lines.extend(["", f"Rules: {', '.join(self.rules_cited) or 'none cited'}"])
+        if self.violations:
+            lines.append(f"REJECTED ({self.status}): {', '.join(self.violations)}")
+        return "\n".join(lines)
+
+
 class RanchState(BaseModel):
     """What one tick knows, carried between stages.
 
@@ -114,6 +176,9 @@ class RanchState(BaseModel):
     ongoing: tuple[Incident, ...] = ()
     resolved: tuple[Incident, ...] = ()
     routed: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    #: The first stage that spends money. One per newly-opened incident whose owner has a
+    #: worker built; at M2 that is `water_feed` alone and the other four route to nobody.
+    work_orders: tuple[WorkOrder, ...] = ()
 
     # Set BEFORE a stage is attempted, never after. A line reading `failed_stage: null`
     # next to an error says a tick died without saying where, which is the one question

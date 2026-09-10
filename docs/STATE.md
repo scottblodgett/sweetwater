@@ -4,7 +4,7 @@ The session-start briefing. **Read this one file, then the nested `CLAUDE.md` fo
 
 Refreshed at every milestone boundary, same step as `JOURNEY.md`. If it disagrees with the code, the code wins and this file is stale, say so.
 
-**Last refreshed:** 2026-09-10, at the M1 boundary.
+**Last refreshed:** 2026-09-10, at the M2 boundary.
 
 ---
 
@@ -12,10 +12,10 @@ Refreshed at every milestone boundary, same step as `JOURNEY.md`. If it disagree
 
 | | |
 | --- | --- |
-| Done | **M0**: tree, three log streams, `config.py`, `mcp_client.py`, live handshake. **M1**: the free pass, `catalog -> sweep -> triage -> reconcile -> route`, five stages and zero tokens, plus the `sw_ops` store and Alembic. |
-| Gate | 132 tests, `ruff check .` clean, `mypy --strict` clean on 28 files, `--once` twice against the live ranch showing `ongoing` on the second run. |
-| Next | **M2, one agent, Opus only.** Not started. `ANTHROPIC_API_KEY` is a hard blocker, see below. |
-| HEAD | The M1 boundary on `master`: `ac8822d` is the last code commit, followed by the doc commit that carries this file. Working tree clean apart from `.env` (gitignored). A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. |
+| Done | **M0**: tree, three log streams, `config.py`, `mcp_client.py`, live handshake. **M1**: the free pass, `catalog -> sweep -> triage -> reconcile -> route`, five stages and zero tokens, plus the `sw_ops` store and Alembic. **M2**: the first phase that spends. `evidence.py`, `llm_client.py`, `system_prompts.py`, `workers.py`, the water and feed SOPs, and one agent (`water_feed`) writing a real work order per newly-opened incident. |
+| Gate | 168 tests, `ruff check .` clean, `mypy --strict` clean on 29 files, three live ticks producing **19 work orders, 19 shipped, 0 rejected**, and a token count that **fell** 58.3k to 38.3k to 24.2k as the ledger grew 25 to 65 rows. |
+| Next | **M3, the other four agents and the supervisor.** Not started. Nothing blocks it. |
+| HEAD | The M2 boundary on `master`. A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. Working tree clean apart from `.env` and `logs/` (both gitignored). |
 
 Milestone list and the shape: `docs/architecture.md`. The layout, the milestone order, and which leaf lands when: `docs/Plan.md`, which is the authority the tree matches. What happened and what diverged: `docs/JOURNEY.md`. Phase-close ritual: root `CLAUDE.md`.
 
@@ -27,14 +27,20 @@ Milestone list and the shape: `docs/architecture.md`. The layout, the milestone 
 
 | Module | Holds | Grows |
 | --- | --- | --- |
-| `src/agent/executor.py` | `run_tick`, the five free stages, the one `tick.jsonl` line | cadence, backoff, graceful shutdown at M4 |
+| `src/agent/executor.py` | `run_tick`, the five free stages, the two spend stages, the `spend` flag, the one `tick.jsonl` line | cadence, backoff, graceful shutdown at M4 |
 | `src/agent/agent.py` | `ROUTES`, all 18 categories to an owner | the LangGraph supervisor and the five worker factories at M3 |
-| `src/agent/state.py` | `RanchState`, `Finding`, `Incident` | |
+| `src/agent/workers.py` | `water_feed`: the rails (`check`), `to_work_order`, `judge_packet`, `run_water_feed` | the other four agents at M3 |
+| `src/agent/state.py` | `RanchState`, `Finding`, `Incident`, `WorkOrder` | |
 | `src/agent/memory.py` | `sw_ops` only: reconcile, the engine allowlist | chaos events at M5, the checkpointer at M6 |
+| `src/tools/evidence.py` | `assemble`, `EvidencePacket.render`, `SOP_FOR_CATEGORY` | more SOP files as M3 adds sensing worlds |
+| `src/models/llm_client.py` | `resolve_provider`, `build_client`, `call_tier2`, `ModelResponse`, `THINKING_BUDGET` | Tier 1 at M7, and **not before** |
+| `src/prompts/system_prompts.py` | `INHERITED_RULES`, `MANDATES`, `WORK_ORDER_SCHEMA`, `system_prompt()` | four more mandates at M3 |
 | `src/models/routing.py` | nothing yet | job to tier to model at M7. **A different question than `agent.py`'s routing**, which is why the two do not share a name |
 | `tests/` | three files: `test_agent.py`, `test_tools.py`, `test_api.py` | |
 
-Eleven other leaves are docstring-only placeholders naming the milestone that fills them. A stub never claims to be implemented, and the marker column in `docs/Plan.md`'s tree is how you tell unbuilt from missing.
+Seven other leaves are docstring-only placeholders naming the milestone that fills them. A stub never claims to be implemented, and the marker column in `docs/Plan.md`'s tree is how you tell unbuilt from missing.
+
+`data/knowledge_base/` holds `water.md` (`WATER-01` to `WATER-06`) and `feed.md` (`FEED-01` to `FEED-04`). **Both are derived from `docs/sweetwater-ranch.md`, one file per sensing world, and nothing else in this repo may source them.** A rule id is citable only if it is a heading in the file the packet carried, so an SOP file is the definition of what a work order is allowed to cite.
 
 ---
 
@@ -47,7 +53,10 @@ Eleven other leaves are docstring-only placeholders naming the milestone that fi
 5. **No sensor incident routes to `herd_health`**, because by design it cannot read a sensor. It stays idle until chaos writes real animal events at M5. That is correct, not a gap.
 6. **A sensor that did not answer resolves nothing.** `reconcile` takes the set of sensors that actually replied. "No finding" and "no reading" are different facts, and conflating them lets one upstream outage close every incident and report an all-clear.
 7. **An empty catalog is a failed tick, not a calm one.** Nothing is swept and nothing is reconciled, because resolving every incident on the strength of a map we could not read is the worst available outcome.
-8. **`ruff format` is deliberately not in the gate.** `E501` is ignored on purpose so a long line may stay long; the formatter hard-wraps at 140 with no escape hatch, so the two contradict. `ruff check` is the lint gate. Do not add the formatter back.
+8. **Structured output is a forced tool call, not a "reply in JSON" instruction.** The schema is enforced by the API, and - the reason that actually matters - `finish_reason` stays honest: `tool_use` is a real answer, `max_tokens` is a config bug. With free-form JSON both arrive as text and the distinction is gone.
+9. **Thinking is off for the work-order job, and `reasoning_effort` is an explicit per-call argument.** Turning thinking off is free exactly when the model is not the one classifying, and `triage.py` classified. Per-call rather than ambient so turning it on for one job later does not touch any other call site.
+10. **A work order is never dropped.** A model that never answered, timed out, or got truncated still produces a `WorkOrder` with `status="no_answer"` and the reason in `assessment`. A tick that silently loses an incident is indistinguishable from a ranch with nothing wrong.
+11. **`ruff format` is deliberately not in the gate.** `E501` is ignored on purpose so a long line may stay long; the formatter hard-wraps at 140 with no escape hatch, so the two contradict. `ruff check` is the lint gate. Do not add the formatter back.
 
 ## The boundary rule, sharpened
 
@@ -61,7 +70,8 @@ Learned the hard way on 2026-09-10, in this repo, by doing exactly that and retr
 
 - **Interpreter is `.venv/Scripts/python.exe`.** System `python` is 3.11.9 with none of the dependencies installed. Every command in the docs assumes the venv.
 - **`.env` is filled in and working.** All five upstreams, both database URLs, chaos cohort.
-- **`ANTHROPIC_API_KEY` is still empty.** It cost nothing through M1. It is a **hard blocker on M2**, which is Opus-only by design, so fill it before starting that phase.
+- **`ANTHROPIC_API_KEY` is still empty, and M2 shipped anyway.** It was called a hard blocker here and was not one: this machine authenticates to **AWS Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`, `us-east-1`, session-scoped temporary credentials), and `resolve_provider()` in `llm_client.py` picks first-party Anthropic when a key exists and Bedrock otherwise. One code path, two credentials. **This is right for a supervised phase and wrong for M4:** session credentials expire, so the continuous loop needs a real key. Expiry surfaces as `ExpiredTokenException` in `ModelResponse.error` and a `no_answer` work order, not as a crash.
+- **`anthropic[bedrock]` is a first-order dependency now.** It was absent from `requirements.txt` and arrived transitively through `langchain-anthropic` without the extra, so the first live call failed on `No module named 'botocore'`. `llm_client.py` calls the raw SDK, not `ChatAnthropic`, because `langchain-anthropic` has no Bedrock path and M2 has no tool loop.
 - **Ollama is up** on `localhost:11434`. Not needed until M7.
 - **Supabase**: PostgreSQL 17.6, connects as `postgres`, can create schemas. **`sw_ops` now exists**, migrated to `0001`, with `alembic_version` inside it. The connection also has write access to `farm`, `feed`, `animal_care`, and `sensor`, and must never use it. The engine pins `search_path` to the target schema, and a test fails if any SQL in this repo names a ranch schema.
 - **Local Postgres**: 16.4, database **`farm_systems_test`**, connects as `postgres` with no password. It already holds the upstream project's `farm`, `feed`, `animal_care`, and `sensor` schemas, so **`sw_ops_test` is the only schema this repo may create or drop.** A two-value allowlist in `memory.py` refuses anything else, and the store tests skip rather than fail when no local Postgres answers. This is the exact accident that cost three answer keys in a previous life of the project.
@@ -76,7 +86,9 @@ Learned the hard way on 2026-09-10, in this repo, by doing exactly that and retr
 
 - `GET /sensors?limit=500` returns the whole catalog in one page. Pagination only, no `type` filter, so filtering happens in Python.
 - `GET /sensors/:id` returns the catalog entry plus `latestReading: { value, recordedAt }`, **synthesized fresh on every call and unanchored to the previous one.** Never cache it, never expect two reads a second apart to agree.
-- `GET /sensors/:id/readings?limit=N` returns invented history, newest first, one every ten minutes.
+- `GET /sensors/:id/readings?limit=N` returns invented history, newest first, one every ten minutes. **It is synthesized independently of `/sensors/:id` and does not contain the value the sweep read**, even when its newest point carries a later timestamp. Both are honest; they are two draws. The evidence packet therefore labels the series as shape and trend only.
+- **`/animals` and `/pastures` are on the Farm API, not the Care API.** A wrong base URL 404s rather than naming itself.
+- **Join across services on the id, never the display name.** The sensor map spells a location `"Alkali Flat (alkali-flat)"` where REST says `"Alkali Flat"`, and the Farm API's pasture for sensor location `"East Allotment"` is `"East BLM Allotment"`. A name match returns an **empty set, not an error**, which reads exactly like a pasture with no animals in it.
 - `GET /health` on the Sensor API returns `{ status, service }`. There is no `/locations` route.
 - A dark sensor returns `status: "offline"` **and** `latestReading: null`.
 - A faulted probe returns **`-500`** with `status: "online"`. That is a sensor fault, not a cold snap, and must not be triaged as a temperature reading.
@@ -117,22 +129,47 @@ The free pass is live and token-free. Numbers from the two verification runs on 
 
 ---
 
-## M2 scope, one agent, Opus only
+## What M2 actually produces, so a new session does not re-derive it
 
-The first phase that spends money. Deliberately before any fan-out, and deliberately **Tier 2 only**, so there is a known-good baseline to measure local models against at M7.
+The tick now has seven stages. Five are free; the last two spend. `run_tick(spend=False)` stops at the end of `route`, which is how every rail above the model layer exercises the whole pipeline for nothing, and `conftest.no_model_calls` is the autouse guard behind the flag.
+
+Per newly-opened incident that `water_feed` owns:
+
+1. **`evidence.assemble`** buys roughly **four extra HTTP calls** - that sensor's history, its siblings at the same location, the pasture, the animal roster - and renders one page. Bounded by `SWEEP_CONCURRENCY`, invisible next to a 160-sensor sweep.
+2. **`call_tier2`** sends that page plus the brief in **one** call, structured output as a **forced tool call** (`write_work_order`), thinking **off**. Measured **~4,800 to 5,600 in / ~1,100 out**, 14 to 16s, 4 in flight (`AGENT_CONCURRENCY = 4`).
+3. **`workers.check`** runs the rails and stores a `WorkOrder`.
+
+**The cost lever is the SOP file, not the evidence.** The SOP is the majority of those input tokens; the assembled facts are a few hundred. Worth knowing before M7 optimizes the wrong half.
+
+Three live ticks on 2026-09-10, chaos off, against prod `sw_ops`:
+
+| | tick 1 | tick 2 | tick 3 |
+| --- | --- | --- | --- |
+| packets judged | 9 | 6 | 4 |
+| tokens (in + out) | 58,339 | 38,328 | 24,161 |
+| ledger rows after | 25 | ~45 | 65 |
+
+**19 work orders, 19 shipped, 0 rejected, 0 no-answer, every call `finish_reason=tool_use`.** Cost tracks **newly-opened** incidents, not open ones, which is the architecture's central claim arriving as a measurement. Rule citations discriminate rather than pattern-match: `WATER-05` on 12 of 19, but `east-allotment-water` cited only `WATER-02`.
+
+**Severity is stored from the incident, never from the model's echo.** The echo lives in its own field so a disagreement is recorded rather than smoothed over, and a mismatch is a blocking violation. Five rails block (`severity_mismatch`, `all_clear`, `invented_rule`, `no_payload`, `schema_invalid`); two record and still ship (`no_rule_cited`, `sensor_not_named`). The all-clear rail reads the **actions list**, not the prose, because "the second tank at 16.7 gal is fine" is a correct sentence and the actual diagnosis. Details in `src/agent/CLAUDE.md`.
+
+**There is no cascade, no local fallback, and no retry.** Tier 1 is absent rather than stubbed. M7 moves jobs down one at a time with a rail and a row in `docs/model-routing.md`, whose first row is now the Tier 2 baseline to beat.
+
+---
+
+## M3 scope, the other four agents and the supervisor
 
 | Piece | Job |
 | --- | --- |
-| `src/models/llm_client.py` | provider registry, `reasoning_effort` as an explicit per-call argument, usage receipts. Four Ollama traps are already written down in the file's docstring and in `src/models/CLAUDE.md`; read them before writing a line |
-| `src/tools/evidence.py` | assemble the packet in **code**: the incident, that sensor's recent history, its siblings at the same location, the animals in that pasture, the relevant SOP. The model judges one page and drives no tool loop |
-| `src/prompts/system_prompts.py` | the three inherited rules. Write them against a real assembled packet, not an imagined one |
-| `data/knowledge_base/` | the SOPs, one file per sensing world |
-| one agent | reads its SOP, returns a Pydantic `Finding`: severity **echoed, never authored**, work order, citations. Invoked only on newly-opened incidents |
-| `logs/agent.jsonl` | its first real lines. `finish_reason` written on return, **before** validation runs |
+| `src/agent/agent.py` | the LangGraph supervisor and the five worker factories. The routing table is already there |
+| `src/agent/workers.py` | the other four agents. `run_water_feed` is the shape; `MANDATES` is where each brief goes |
+| `src/prompts/agent_prompts.py` | the five briefs. **A sub-agent inherits nothing**, so anything it needs is in its brief or its packet |
+| `src/tools/allowlists.py` | the five tool slices, enforced in **code**. An explicit set of literal names, never a prefix match |
+| `data/knowledge_base/` | the remaining SOPs, one file per sensing world, derived from `docs/sweetwater-ranch.md` and nothing else |
 
-**M2 verification:** token cost flat across three sweeps while incident count grows; every work order names a real sensor and quotes its real reading; `finish_reason` on every call; one narrow test grades the **reason text** for grounding facts, not just the severity label.
+Two things already known that M3 will trip over: **`system_prompt()` logs `no_mandate_for_agent` for the four agents with no brief yet**, which is deliberate and is the signal that one is missing. And **no sensor incident routes to `herd_health`** by design, so it stays idle until chaos writes real animal events at M5. That is correct, not a gap.
 
-Then the phase-close ritual in root `CLAUDE.md`, in order, no exceptions. M1 skipped step 2 and it is what made this file lie to the next session for a commit.
+Then the phase-close ritual in root `CLAUDE.md`, in order, no exceptions. M1 skipped step 2 and it is what made this file lie to the next session for a commit; M2's step 2 is what found a documented `jq` command that had been wrong in three files for two milestones.
 
 ---
 

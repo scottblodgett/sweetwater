@@ -18,12 +18,26 @@ a respx route against a fake host.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 import respx
 from structlog.testing import capture_logs
 
+from src.agent.state import Incident
+from src.tools.evidence import (
+    SOP_FOR_CATEGORY,
+    EvidencePacket,
+    HistoryPoint,
+    PastureContext,
+    PastureRoster,
+    assemble,
+    load_sop,
+    parse_history,
+    siblings_for,
+    slugify,
+)
 from src.tools.mcp_client import SensorRef
 from src.tools.sensors import SensorReading, SweepError, parse_sensor_payload, read_sensor, sweep
 from src.tools.triage import (
@@ -434,3 +448,125 @@ def test_every_category_triage_can_emit_is_registered() -> None:
     emitted = {f.category for row in TRUTH_TABLE if row[3] for f in triage_reading(reading(row[0], row[1]))}
     assert emitted <= ALL_CATEGORIES
     assert {CATEGORY_OFFLINE, CATEGORY_DEGRADED, CATEGORY_FAULT, CATEGORY_UNKNOWN_TYPE} <= ALL_CATEGORIES
+
+
+# =========================================================================== #
+# 3. the evidence packet
+# =========================================================================== #
+# What these rails protect: the packet is the whole cheap-path argument, so a packet that
+# quietly loses a piece produces a work order that reads complete and grounds nothing.
+# Three of them exist because the live packet failed exactly that way before it was printed.
+def _incident(**over: object) -> Incident:
+    base: dict[str, object] = {
+        "key": "alkali-flat-water:water_low",
+        "sensor_id": "alkali-flat-water",
+        "sensor_type": "water-level",
+        "location": "Alkali Flat",
+        "category": "water_low",
+        "severity": "critical",
+        "status": "opened",
+        "summary": "stock-tank level at Alkali Flat is 1.9 gal, below the critical line of 2 gal",
+        "last_value": "1.9 gal",
+        "unit": " gal",
+        "threshold": 2.0,
+        "first_seen_at": datetime(2026, 9, 10, 14, 0, tzinfo=UTC),
+        "last_seen_at": datetime(2026, 9, 10, 14, 0, tzinfo=UTC),
+    }
+    return Incident(**(base | over))  # type: ignore[arg-type]
+
+
+ROSTER = PastureRoster(
+    pastures=(
+        PastureContext(pasture_id="alkali-flat", name="Alkali Flat", acreage=2400, fence_type="barbed-wire", status="open", head_count=111),
+        PastureContext(pasture_id="east-allotment", name="East BLM Allotment", acreage=8800, fence_type="barbed-wire", status="open", head_count=240),
+    )
+)
+
+
+def test_a_location_the_map_spells_with_its_id_still_finds_its_pasture() -> None:
+    """The bug the first printed packet had. `GET /sensors/:id` says `Alkali Flat` and the
+    ranch map says `Alkali Flat (alkali-flat)`; naive slugging turns the second into
+    `alkali-flat-alkali-flat`, matches nothing, and reports no cattle on ground with 111 head.
+    """
+    assert slugify("Alkali Flat") == "alkali-flat"
+    assert slugify("Alkali Flat (alkali-flat)") == "alkali-flat"
+    assert ROSTER.for_location("Alkali Flat (alkali-flat)")[0] is ROSTER.pastures[0]
+
+
+def test_a_pasture_is_matched_by_id_not_by_display_name() -> None:
+    """`East Allotment` the sensor location is `East BLM Allotment` the pasture. A name match
+    drops it and says no cattle are there, which is the most dangerous way to be wrong."""
+    found, note = ROSTER.for_location("East Allotment")
+    assert found is not None and found.head_count == 240
+    assert note == ""
+
+
+def test_a_site_that_is_not_grazing_ground_says_so_rather_than_reading_as_empty() -> None:
+    found, note = ROSTER.for_location("Home Place")
+    assert found is None
+    assert "site rather than grazing ground" in note, "an absence has to be a sentence; a silent None becomes 'zero head' in a work order"
+
+
+def test_a_missing_roster_is_stated_not_silently_zero() -> None:
+    found, note = PastureRoster(error="ConnectError").for_location("Alkali Flat")
+    assert found is None and "unavailable" in note
+
+
+def test_a_gate_reading_stays_boolean_through_history_too() -> None:
+    """Same trap as the sweep: `isinstance(True, int)` is True, so a number check first turns
+    every gate reading in the series into the number 1."""
+    points = parse_history({"data": [{"value": True, "recordedAt": FROZEN_TS}, {"value": 3.5, "recordedAt": FROZEN_TS}, {"value": None, "recordedAt": FROZEN_TS}]})
+    assert [p.value for p in points] == [True, 3.5, None]
+    assert points[0].value is True
+
+
+def test_siblings_are_this_ticks_readings_at_this_location_and_never_the_sensor_itself() -> None:
+    readings = [
+        reading("water-level", 1.9, sensor_id="alkali-flat-water"),
+        reading("water-level", 16.7, sensor_id="alkali-flat-water-2"),
+        reading("battery-level", 82.5, sensor_id="alkali-flat-battery"),
+        reading("water-level", 40.0, sensor_id="home-place-water", location="Home Place"),
+    ]
+    siblings = siblings_for("Alkali Flat", "alkali-flat-water", readings)
+    assert [s.sensor_id for s in siblings] == ["alkali-flat-battery", "alkali-flat-water-2"]
+    assert "16.7 gal" in siblings[1].render()
+
+
+def test_every_category_water_feed_owns_has_an_sop_file_that_exists() -> None:
+    """The SOPs are derived from `docs/sweetwater-ranch.md` and nothing else may source them.
+    A missing file is silent in the packet and turns rule 4 of the brief into an invitation
+    to invent a rule id."""
+    for category in SOP_FOR_CATEGORY:
+        name, text = load_sop(category)
+        assert name and text.strip(), f"{category} maps to {SOP_FOR_CATEGORY[category]} and it did not load"
+
+
+def test_a_category_with_no_sop_returns_nothing_rather_than_guessing_a_filename() -> None:
+    assert load_sop("fence_down") == ("", "")
+
+
+def test_the_packet_warns_that_the_history_series_is_not_the_current_reading() -> None:
+    """The seam the first printed packet exposed: triage judged 1.9 gal while the newest
+    history point read 0.8 gal at a LATER timestamp, because `GET /sensors/:id/readings`
+    synthesizes its series independently of `GET /sensors/:id`. Unlabeled, a model quotes the
+    top of the list as 'now' and the work order carries a number no human ever saw."""
+    packet = EvidencePacket(incident=_incident(), history=(HistoryPoint(recorded_at=FROZEN_TS, value=0.8),), sop_name="water.md", sop_text="## WATER-01 - haul today")
+    page = packet.render()
+    assert "does NOT contain it" in page
+    assert "authoritative current value is the triaged reading" in page
+    assert "1.9 gal" in page and "0.8 gal" in page
+
+
+def test_an_absent_piece_of_the_packet_is_a_sentence_not_a_gap() -> None:
+    page = EvidencePacket(incident=_incident(), history_note="HTTP 503").render()
+    assert "none available: HTTP 503" in page
+    assert "only one of them" not in page  # no SOP was loaded, so no rule text leaked in
+    assert "no SOP exists for this category yet" in page
+    assert "this sensor is the only one at this location" in page
+
+
+async def test_assembling_nothing_costs_nothing() -> None:
+    """A calm tick must not pay for a roster call it has no packet to put in."""
+    with respx.mock(assert_all_called=False) as mock:
+        assert await assemble([]) == ()
+        assert not mock.calls

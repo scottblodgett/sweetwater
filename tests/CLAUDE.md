@@ -11,6 +11,17 @@ A test that needs the live ranch is marked and skipped by default. `pytest` must
 a plane. The store tests skip rather than fail when no local Postgres answers, for the
 same reason.
 
+## And never point a test at a model
+
+Same rule, other expensive mistake. `conftest.no_model_calls` is **autouse** and replaces
+`llm_client.build_client` with something that raises, so a test that reaches a real model
+fails instead of billing. From M2 the tick's last two stages spend money, so `run_tick`
+takes `spend=False` and every rail passes it; the fixture is what happens when somebody
+forgets. Rails that need a response build a `ModelResponse` directly, which is the honest
+way to test a parser anyway. A recorded real Opus answer sits in `test_agent.py` as
+`RECORDED_ANSWER` and is the calibration fixture: **if a prompt change makes it fail, the
+rails did not get stricter, the answer got worse.**
+
 ## Three files, and do not add a fourth
 
 `docs/Plan.md` names exactly `test_agent.py`, `test_tools.py`, and `test_api.py`, and the
@@ -42,6 +53,16 @@ pass is the failure mode this file exists to prevent.
 | gate survives a process restart | a pause is a gate, not a delay | the checkpointer is not actually writing |
 | every `audit_id` appears twice | no side effect is proposed without a recorded decision | a decision path skipped its log line |
 | `finish_reason` present on every model call | "too weak" stays distinguishable from "never answered" | a call path bypassed `llm_client.py` |
+| `finish_reason` logged **before** validation | a rejected answer still leaves a receipt | the log line moved below the parse |
+| the recorded Opus answer passes every rail | the rails are calibrated against real prose | a prompt change made the answer worse, or a rail got stricter without meaning to |
+| stored severity is triage's when the echo disagrees | one question has one answer | somebody stored the echo "because the model was right" |
+| no-real-action, and an all-clear headline, cannot ship | the worst possible output cannot reach a human | **do not relax this one** |
+| an accurate sentence about a healthy sibling is **not** an all-clear | the rail reads actions, not prose | somebody made the matcher scan the assessment |
+| an invented rule id is rejected | a citation points at something that exists | the SOP text stopped reaching the checker |
+| a call that never answered still produces a work order | an incident is never silently dropped | an exception path returns `None` instead of a `no_answer` order |
+| one agent raising is not an outage for the other ten | a tick survives one sub-agent failing | `gather_bounded` lost its per-task guard |
+| a tick told not to spend produces zero work orders | the free pass is genuinely free | a spend stage ran above the `spend` check |
+| nothing a model reads carries an em dash | the house convention reaches the prompt too | a rewrite of the brief or an SOP |
 
 ## Graded, not asserted
 
@@ -49,6 +70,15 @@ Two checks grade the **reason text**, not the label: a work order must name a re
 sensor and quote its real reading. A model can get severity right by echoing it and
 still produce prose that helps nobody, and a label-only assertion passes happily while
 the product is useless.
+
+`ungrounded_numbers()` in `test_agent.py` is the grader: every number in the prose that
+appears nowhere on the page the model was given. It comes with its own failure case, because
+a grader that cannot fail is decoration.
+
+**It compares number tokens on both sides, and strips ISO timestamps from the page first.**
+The first version asked whether the string `"40"` appeared anywhere in the rendered packet.
+It did - inside `13:40:00` - so an invented "40 head short by dark" graded as grounded
+against an unrelated timestamp. Substring containment is not grounding.
 
 ## Determinism
 

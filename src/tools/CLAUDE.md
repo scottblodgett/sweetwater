@@ -15,6 +15,14 @@ flat tool names**, no namespaces. Consequences that are easy to get wrong:
 - `GET /sensors/:id` **synthesizes a fresh value on every call**, unanchored to the
   previous one. Never cache it, never prefetch it, and never expect two reads a second
   apart to agree.
+- `GET /sensors/:id/readings` is synthesized the same way and **does not contain the value
+  the sweep read**, even when its newest point carries a later timestamp. M2 printed a
+  packet where triage judged 3.4 gal and the newest history point said 0.8 gal at a later
+  time. Both are honest; they are two independent draws. The packet therefore labels the
+  series as shape and trend only, and says in one line that it is not the current reading,
+  because a model handed two contradictory numbers with no note will pick one.
+- `/animals` and `/pastures` are on the **Farm API**, not the Care API. Easy to get
+  backwards, and the wrong base URL 404s rather than erroring in a way that names itself.
 - A Lambda Function URL routes **every path** to the same handler, so appending a
   bogus path to `MCP_URL` does not produce a failure. Test failure paths with an
   unreachable host instead.
@@ -29,6 +37,27 @@ project. A sub-agent may **echo** severity and must never author it.
 Every critical-capable type gets a **warning tier** between nominal and critical, and
 an unrecognized sensor type trips a `warn_once` rather than falling through a default
 branch. A new sensor type silently reading as nominal is the failure mode here.
+
+## evidence.py buys HTTP to avoid tokens, and the trade is measured
+
+One packet is the incident, that sensor's recent history, its siblings at the same
+location, the animals in that pasture, and the whole relevant SOP. That is roughly **four
+extra HTTP calls per newly-opened incident**, which on a first tick against a quiet ledger
+means 9 to 11 packets and ~40 extra requests, all bounded by `SWEEP_CONCURRENCY` and lost
+in the noise of a 160-sensor sweep.
+
+What it buys: the model judges **one page** and drives no tool loop. Measured on the Alkali
+Flat tank, **5,555 input tokens per packet, of which the SOP is the majority** and the
+evidence itself is a few hundred. So the lever on cost is the SOP file, not the evidence,
+which is the opposite of what it looks like before you print one.
+
+**Match a pasture by id, never by display name.** The sensor map says
+`"Alkali Flat (alkali-flat)"` where REST says `"Alkali Flat"`, and the Farm API's pasture
+is `East BLM Allotment` where the sensor's location is `East Allotment`. A name match
+returns zero refs and reads exactly like a pasture with no animals in it.
+
+**An absence is written as a sentence, never as a zero or an omission.** "No animal roster
+returned for this pasture" and "0 head" are different facts, and only one of them is true.
 
 ## Bounded fan-out, always
 

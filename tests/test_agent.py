@@ -25,6 +25,7 @@ import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -33,6 +34,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from src.agent import agent
 from src.agent.agent import AGENTS, DEFAULT_OWNER, HERD_HEALTH, ROUTES, owner_for, owners_for, route, unrouted_categories
@@ -55,7 +57,11 @@ from src.agent.memory import (
     open_incidents,
     reconcile,
 )
-from src.agent.state import Finding, Incident
+from src.agent.state import Finding, Incident, WorkOrder
+from src.agent.workers import citable_rules, run_water_feed, to_work_order
+from src.models.llm_client import THINKING_BUDGET, ModelResponse, call_tier2, resolve_provider
+from src.prompts.system_prompts import WORK_ORDER_SCHEMA, system_prompt
+from src.tools.evidence import EvidencePacket, HistoryPoint, PastureContext, SiblingReading
 from src.tools.mcp_client import RanchMap, SensorRef, flatten_exception, parse_ranch_map
 from src.tools.triage import ALL_CATEGORIES
 from src.utils.config import Settings
@@ -178,14 +184,14 @@ async def test_a_tick_opens_incidents_and_the_next_tick_calls_them_ongoing(catal
     ignore it."""
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
 
-    first = await run_tick(tick=1, store=target, now=T0)
+    first = await run_tick(tick=1, store=target, now=T0, spend=False)
     assert first.error is None and first.failed_stage is None
     assert (first.sensors_read, first.sensors_failed) == (3, 0)
     assert [f.category for f in first.findings] == ["water_low"]
     assert len(first.opened) == 1 and first.ongoing == () and first.resolved == ()
     assert first.routed == {"water_feed": ("alkali-flat-water:water_low",)}
 
-    second = await run_tick(tick=2, store=target, now=T1)
+    second = await run_tick(tick=2, store=target, now=T1, spend=False)
     assert len(second.opened) == 0 and len(second.ongoing) == 1
     assert second.ongoing[0].occurrences == 2
     # Nothing new opened, so nothing is handed to a model. This is the entire cost story.
@@ -195,11 +201,11 @@ async def test_a_tick_opens_incidents_and_the_next_tick_calls_them_ongoing(catal
 @respx.mock
 async def test_a_fault_that_heals_resolves_on_the_next_tick(catalog: RanchMap, target: StoreTarget) -> None:
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
-    await run_tick(tick=1, store=target, now=T0)
+    await run_tick(tick=1, store=target, now=T0, spend=False)
 
     respx.mock.reset()
     serve(respx.mock, {"alkali-flat-water": 9.0, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
-    healed = await run_tick(tick=2, store=target, now=T1)
+    healed = await run_tick(tick=2, store=target, now=T1, spend=False)
 
     assert healed.findings == () and len(healed.resolved) == 1
     assert healed.resolved[0].status == "resolved" and healed.resolved[0].resolved_at == T1
@@ -211,11 +217,11 @@ async def test_a_sensor_that_did_not_answer_holds_its_incident_open(catalog: Ran
     facts, and conflating them means one upstream failure closes every incident on the
     ranch and reports an all-clear at the worst possible moment."""
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
-    await run_tick(tick=1, store=target, now=T0)
+    await run_tick(tick=1, store=target, now=T0, spend=False)
 
     respx.mock.reset()
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0}, broken={"alkali-flat-water"})
-    dark = await run_tick(tick=2, store=target, now=T1)
+    dark = await run_tick(tick=2, store=target, now=T1, spend=False)
 
     assert (dark.sensors_read, dark.sensors_failed) == (2, 1)
     assert dark.findings == (), "a failed read produces no finding; it is not a fault"
@@ -227,7 +233,7 @@ async def test_exactly_one_tick_line_is_written_and_it_carries_the_counts(catalo
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
 
     with structlog.testing.capture_logs() as logs:
-        await run_tick(tick=7, store=target, now=T0)
+        await run_tick(tick=7, store=target, now=T0, spend=False)
 
     lines = [line for line in logs if line["event"] == "tick"]
     assert len(lines) == 1
@@ -250,7 +256,7 @@ async def test_an_empty_catalog_fails_the_tick_at_the_catalog_stage(monkeypatch:
     monkeypatch.setattr("src.agent.executor.fetch_catalog", _empty)
 
     with structlog.testing.capture_logs() as logs:
-        state = await run_tick(tick=1, store=target, now=T0)
+        state = await run_tick(tick=1, store=target, now=T0, spend=False)
 
     assert state.failed_stage == "catalog" and state.error is not None
     assert state.opened == () and state.resolved == ()
@@ -266,7 +272,7 @@ async def test_a_failing_stage_is_reported_not_raised(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr("src.agent.executor.sweep", _boom)
 
-    state = await run_tick(tick=1, store=target, now=T0)
+    state = await run_tick(tick=1, store=target, now=T0, spend=False)
 
     assert state.failed_stage == "sweep"
     assert state.error is not None and "ConnectError" in state.error
@@ -278,7 +284,7 @@ async def test_the_summary_line_names_the_reading_a_human_would_ask_about(catalo
     """`--once` is run by a person watching a console. A summary that says "1 finding" and
     nothing else sends them to the JSON to learn anything at all."""
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
-    state = await run_tick(tick=1, store=target, now=T0)
+    state = await run_tick(tick=1, store=target, now=T0, spend=False)
     text_out = summarize(state)
     assert "3 read" in text_out and "water_feed:1" in text_out
     assert "—" not in text_out
@@ -800,3 +806,337 @@ def test_no_upstream_url_is_hardcoded_outside_config_and_examples() -> None:
         if "execute-api" in p.read_text(encoding="utf-8") or "lambda-url" in p.read_text(encoding="utf-8")
     ]
     assert offenders == [], f"hardcoded upstream URL in {offenders}; read it from config instead"
+
+
+# =========================================================================== #
+# 6. the work order: the rails on what a model is allowed to have said
+# =========================================================================== #
+# Nothing here calls a model. `conftest.no_model_calls` makes sure of it, and the rails that
+# need a response build a `ModelResponse` directly, which is the honest way to test a parser.
+#
+# What they protect, in one sentence each: severity stays triage's, an all-clear can never
+# ship, a cited rule exists, and the prose is graded for grounding rather than trusted
+# because the label happened to match.
+WATER_SOP = (REPO_ROOT / "data" / "knowledge_base" / "water.md").read_text(encoding="utf-8")
+FEED_SOP = (REPO_ROOT / "data" / "knowledge_base" / "feed.md").read_text(encoding="utf-8")
+
+TANK_INCIDENT = Incident(
+    key="alkali-flat-water:water_low",
+    sensor_id="alkali-flat-water",
+    sensor_type="water-level",
+    location="Alkali Flat",
+    category="water_low",
+    severity="critical",
+    status="opened",
+    summary="stock-tank level at Alkali Flat is 1.9 gal, below the critical line of 2 gal",
+    last_value="1.9 gal",
+    unit=" gal",
+    threshold=2.0,
+    first_seen_at=T0,
+    last_seen_at=T0,
+    owner="water_feed",
+)
+
+TANK_PACKET = EvidencePacket(
+    incident=TANK_INCIDENT,
+    history=tuple(HistoryPoint(recorded_at=f"2026-09-10T13:{minute:02d}:00.000Z", value=value) for minute, value in ((10, 0.8), (20, 3.9), (30, 2.1), (40, 1.2))),
+    siblings=(
+        SiblingReading(sensor_id="alkali-flat-battery", sensor_type="battery-level", status="online", value=82.5),
+        SiblingReading(sensor_id="alkali-flat-temp", sensor_type="temperature", status="online", value=71.6),
+        SiblingReading(sensor_id="alkali-flat-water-2", sensor_type="water-level", status="online", value=16.7),
+    ),
+    pasture=PastureContext(pasture_id="alkali-flat", name="Alkali Flat", acreage=2400, fence_type="barbed-wire", status="open", head_count=111),
+    sop_name="water.md",
+    sop_text=WATER_SOP,
+)
+
+#: A real Opus answer to this packet, captured from the first live M2 call on 2026-09-10
+#: (`us.anthropic.claude-opus-5`, `stop_reason=tool_use`, 5,555 in / 1,137 out). Recorded
+#: verbatim rather than invented, so the graded rail below is calibrated against prose a model
+#: actually produced and a future prompt change can be diffed against a known-good answer.
+RECORDED_ANSWER: dict[str, object] = {
+    "severity_echo": "critical",
+    "headline": "Alkali Flat tank dry at 1.9 gal, 111 head: haul water this shift and check the well",
+    "assessment": (
+        "alkali-flat-water reads 1.9 gal against the critical line of 2 gal, so treat that tank as dry with 111 head on 2400 acres behind it. "
+        "The second tank on the same ground, alkali-flat-water-2, reads 16.7 gal in the same sweep, which points at this tank or its supply line "
+        "rather than the whole pasture being off water. The 12-reading series on alkali-flat-water swings between 0.8 and 3.9 gal with no direction "
+        "to it, which reads like a float or level fault. alkali-flat-temp at 71.6 F is not driving heat demand, and alkali-flat-battery at 82.5% "
+        "does not look like a dead solar site."
+    ),
+    "actions": [
+        "Load water and roll to Alkali Flat this shift, 111 head, do not wait to confirm the reading first",
+        "Before leaving the yard, check the well or windmill feeding the Alkali Flat tanks",
+        "Inspect the float, valve, and supply line on the low tank",
+        "Re-read the tank later today and again tomorrow; do not close on one good reading",
+    ],
+    "rules_cited": ["WATER-01", "WATER-05"],
+    "escalate": False,
+    "escalate_reason": "",
+    "unknowns": ["Tank capacity on alkali-flat-water, so no gallons needed or days of water can be figured"],
+}
+
+
+def _answer(**over: object) -> dict[str, object]:
+    return dict(RECORDED_ANSWER) | over
+
+
+def _response(payload: dict[str, object] | None, *, finish_reason: str = "tool_use", error: str = "") -> ModelResponse:
+    return ModelResponse(provider="bedrock", model="us.anthropic.claude-opus-5", finish_reason=finish_reason, payload=payload, input_tokens=5555, output_tokens=1137, latency_ms=15870, error=error)
+
+
+def _order(payload: dict[str, object] | None, **kw: object) -> WorkOrder:
+    return to_work_order(packet=TANK_PACKET, agent="water_feed", response=_response(payload, **kw))  # type: ignore[arg-type]
+
+
+def test_the_citable_rules_are_the_ones_actually_in_the_packet() -> None:
+    assert citable_rules(WATER_SOP) == {"WATER-01", "WATER-02", "WATER-03", "WATER-04", "WATER-05", "WATER-06"}
+    assert citable_rules(FEED_SOP) == {"FEED-01", "FEED-02", "FEED-03", "FEED-04"}
+    assert citable_rules("") == frozenset(), "a packet with no SOP makes every citation invented, which is the point"
+
+
+def test_a_real_recorded_answer_passes_every_rail() -> None:
+    """The calibration rail. If a prompt change makes this fail, the rails did not get
+    stricter, the answer got worse."""
+    order = _order(_answer())
+    assert order.violations == ()
+    assert order.status == "ok" and order.shippable
+
+
+def test_the_stored_severity_is_triages_even_when_the_model_argues_with_it() -> None:
+    """Severity is `triage.py`'s, always. The echo is checked and then thrown away: storing
+    what the model said creates a second answer to a question that already has one."""
+    order = _order(_answer(severity_echo="warning"))
+    assert order.severity == "critical", "the incident's severity, never the echo"
+    assert order.severity_echo == "warning", "and the disagreement is recorded rather than smoothed over"
+    assert "severity_mismatch" in order.violations
+    assert order.status == "rejected"
+
+
+def test_a_work_order_with_no_real_action_in_it_is_an_all_clear_and_cannot_ship() -> None:
+    """Code already flagged this incident, so "monitor and see" is a contradiction rather than
+    a finding. Do not relax this one (`src/agent/CLAUDE.md`)."""
+    order = _order(_answer(actions=["Continue to monitor the tank", "No further action needed at this time"]))
+    assert "all_clear" in order.violations and order.status == "rejected"
+
+
+def test_an_all_clear_headline_cannot_ship_either() -> None:
+    order = _order(_answer(headline="Alkali Flat: no action required, tank is within normal range"))
+    assert "all_clear" in order.violations and order.status == "rejected"
+
+
+def test_an_accurate_sentence_about_a_healthy_sibling_is_not_an_all_clear() -> None:
+    """Why the rail reads the actions list and not the prose. "the second tank is fine" is
+    correct, useful, and the diagnosis; a prose matcher would reject it, and a rail that
+    punishes accurate writing gets switched off inside a week."""
+    order = _order(_answer(assessment="The second tank alkali-flat-water-2 at 16.7 gal is fine, so nothing is wrong with the supply to the pasture as a whole. alkali-flat-water at 1.9 gal is the problem."))
+    assert "all_clear" not in order.violations
+
+
+def test_a_rule_id_that_is_not_in_the_packet_is_rejected() -> None:
+    """`WATER-07` does not exist. An invented id is worse than no citation, because the next
+    person goes looking for it."""
+    with capture_logs() as logs:
+        order = _order(_answer(rules_cited=["WATER-01", "WATER-07"]))
+    assert "invented_rule" in order.violations and order.status == "rejected"
+    assert any(entry["event"] == "invented_rule_ids" for entry in logs)
+
+
+def test_citing_nothing_is_recorded_but_does_not_block() -> None:
+    """A quality signal, not a safety one. A work order that acts correctly and forgets its
+    citation is still a truck going to the right tank."""
+    order = _order(_answer(rules_cited=[]))
+    assert order.violations == ("no_rule_cited",) and order.status == "ok"
+
+
+def test_prose_that_never_names_the_sensor_is_flagged() -> None:
+    order = _order(_answer(headline="Haul water to Alkali Flat", assessment="The tank is nearly empty and 111 head are on it. Send water now."))
+    assert "sensor_not_named" in order.violations
+
+
+def test_a_call_that_never_answered_still_produces_a_work_order() -> None:
+    """A tick that silently drops an incident is one nobody is paged about, which is
+    indistinguishable from a ranch with nothing wrong."""
+    order = _order(None, finish_reason="transport_error", error="ExpiredTokenException: the session credential expired")
+    assert order.status == "no_answer"
+    assert order.violations == ("no_payload", "transport_error")
+    assert order.severity == "critical", "the incident is still critical when the model is unreachable"
+    assert "ExpiredToken" in order.assessment
+
+
+def test_a_truncated_answer_is_a_config_bug_and_says_so() -> None:
+    """`max_tokens` and `tool_use` look identical in the response text. That distinction is
+    worth more than any other field in `agent.jsonl`."""
+    response = _response(None, finish_reason="max_tokens")
+    assert response.truncated and not response.ok
+    order = to_work_order(packet=TANK_PACKET, agent="water_feed", response=response)
+    assert order.status == "no_answer" and "truncated" in order.assessment
+
+
+# --- graded, not asserted --------------------------------------------------- #
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+#: Stripped before the page is tokenized. A timestamp is not a quotable fact, and leaving it
+#: in makes almost any two-digit number look grounded: `13:40:00` grounds "40", which is how
+#: the first version of this grader passed an invented head count.
+_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z?")
+
+
+def ungrounded_numbers(order: WorkOrder, packet: EvidencePacket) -> set[str]:
+    """Every number in the prose that is not a number on the page it was given.
+
+    The grading rail `tests/CLAUDE.md` asks for, and the only check here that reads the reason
+    text rather than a label. A model can echo severity correctly and still write "the tank
+    holds about 300 gallons" about a tank whose capacity is nowhere in the packet, and a
+    label-only assertion passes happily while the product is useless.
+
+    Compared as **number tokens on both sides**, never as substrings. `40` is inside `2400`
+    and inside every `:40:` timestamp, so a substring test grounds an invented number against
+    an unrelated one and grades nothing.
+    """
+    grounded = set(_NUMBER.findall(_TIMESTAMP.sub(" ", packet.render())))
+    prose = f"{order.headline} {order.assessment} {' '.join(order.actions)}"
+    return set(_NUMBER.findall(prose)) - grounded
+
+
+def test_a_real_answer_quotes_only_numbers_that_are_on_the_page() -> None:
+    order = _order(_answer())
+    assert ungrounded_numbers(order, TANK_PACKET) == set()
+    assert TANK_INCIDENT.sensor_id in order.assessment, "name the sensor behind the number"
+    assert "1.9" in order.assessment, "and quote the reading triage actually judged"
+
+
+def test_the_grader_catches_an_invented_number() -> None:
+    """The grader has to be able to fail or it is decoration. 300 and 40 are nowhere in the
+    packet, and both are exactly the kind of number that reads as authority."""
+    order = _order(_answer(assessment="alkali-flat-water at 1.9 gal is roughly 300 gallons short of full and will run 40 head short by dark."))
+    assert ungrounded_numbers(order, TANK_PACKET) == {"300", "40"}
+
+
+# --- the fan-out ------------------------------------------------------------ #
+async def test_no_packets_means_no_calls_at_all() -> None:
+    assert await run_water_feed([]) == ()
+
+
+async def test_one_agent_raising_is_not_an_outage_for_the_other_ten(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`src/agent/CLAUDE.md`: a tick survives one sub-agent raising. Eleven incidents behind
+    one unhandled error is ten pastures nobody hears about."""
+    second = EvidencePacket(incident=TANK_INCIDENT.model_copy(update={"key": "windmill-pasture-water:water_low", "sensor_id": "windmill-pasture-water"}), sop_name="water.md", sop_text=WATER_SOP)
+
+    async def _judge(packet: EvidencePacket, **_kw: object) -> WorkOrder:
+        if packet.incident.sensor_id == "alkali-flat-water":
+            raise RuntimeError("bedrock said no")
+        return to_work_order(packet=packet, agent="water_feed", response=_response(_answer()))
+
+    monkeypatch.setattr("src.agent.workers.judge_packet", _judge)
+    orders = await run_water_feed([TANK_PACKET, second])
+    assert [o.status for o in orders] == ["no_answer", "ok"]
+    assert orders[0].violations == ("worker_raised",)
+
+
+# --- the provider registry and the receipt ---------------------------------- #
+def test_a_key_picks_the_first_party_api_and_no_key_falls_back_to_bedrock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two credentials, one call path. The model id carries Bedrock's region scope while
+    `TIER2_MODEL` stays the first-party spelling, so one setting is right for both."""
+    monkeypatch.setattr("src.models.llm_client.get_settings", lambda: Settings(tier2_model="claude-opus-5", anthropic_api_key="", _env_file=None))
+    assert resolve_provider("sk-ant-test") == ("anthropic", "claude-opus-5")
+    assert resolve_provider() == ("bedrock", "us.anthropic.claude-opus-5")
+
+
+def test_an_already_scoped_model_id_is_not_scoped_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.models.llm_client.get_settings", lambda: Settings(tier2_model="us.anthropic.claude-opus-5", anthropic_api_key="", _env_file=None))
+    assert resolve_provider() == ("bedrock", "us.anthropic.claude-opus-5")
+
+
+async def test_finish_reason_is_logged_before_the_answer_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rail that keeps "too weak" distinguishable from "never answered". A truncated
+    response fails every check below it and the receipt still has to exist: without this line
+    the only trace of a rejected answer is the absence of a good one."""
+
+    class _Messages:
+        @staticmethod
+        async def create(**_kw: object) -> object:
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="tool_use", name="write_work_order", input='{"headline": "Alkali Fl')],
+                stop_reason="max_tokens",
+                usage=SimpleNamespace(input_tokens=5555, output_tokens=2048),
+            )
+
+    monkeypatch.setattr("src.models.llm_client.build_client", lambda *_a, **_k: (SimpleNamespace(messages=_Messages()), "bedrock", "us.anthropic.claude-opus-5"))
+    with capture_logs() as logs:
+        response = await call_tier2(agent="water_feed", system="s", user="u", schema=WORK_ORDER_SCHEMA, schema_name="write_work_order", max_tokens=64)
+
+    receipt = next(entry for entry in logs if entry["event"] == "agent_call")
+    assert receipt["finish_reason"] == "max_tokens" and receipt["tier"] == 2 and receipt["provider"] == "bedrock"
+    assert response.truncated and response.payload is None
+    assert any(entry["event"] == "tier2_truncated" for entry in logs), "and it says out loud that this is a config bug"
+
+
+async def test_an_unknown_reasoning_effort_falls_back_loudly_rather_than_silently(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`reasoning_effort` is an explicit per-call argument (`src/models/CLAUDE.md`). A knob
+    that silently changes verdicts is how a landed fix once failed to reach the rung it was
+    written for."""
+    captured: dict[str, object] = {}
+
+    class _Messages:
+        @staticmethod
+        async def create(**kw: object) -> object:
+            captured.update(kw)
+            return SimpleNamespace(content=[], stop_reason="end_turn", usage=SimpleNamespace(input_tokens=1, output_tokens=1))
+
+    monkeypatch.setattr("src.models.llm_client.build_client", lambda *_a, **_k: (SimpleNamespace(messages=_Messages()), "bedrock", "m"))
+    with capture_logs() as logs:
+        await call_tier2(agent="water_feed", system="s", user="u", reasoning_effort="maximum")
+    assert any(entry["event"] == "unknown_reasoning_effort" for entry in logs)
+    assert "thinking" not in captured, "an unrecognized effort must not quietly enable a thinking budget"
+
+
+def test_thinking_is_off_by_default_and_its_budget_never_shares_the_output_ceiling() -> None:
+    """Turning thinking off is free exactly when the model is not the one classifying, and
+    sizing `max_tokens` at or below `budget_tokens` is the classic way to get a response that
+    is all reasoning and no content."""
+    assert THINKING_BUDGET["none"] == 0
+    assert THINKING_BUDGET["high"] > THINKING_BUDGET["low"] > 0
+
+
+# --- the brief -------------------------------------------------------------- #
+def test_the_brief_carries_the_inherited_rules_and_the_agents_own_patch() -> None:
+    brief = system_prompt("water_feed")
+    assert "SEVERITY IS NOT YOURS" in brief
+    assert "NEVER WRITE AN ALL-CLEAR" in brief
+    assert "QUOTE ONLY WHAT IS ON THE PAGE" in brief
+    assert "CITE THE RULE YOU ACTED ON" in brief
+    assert "YOUR PATCH: water and feed" in brief
+
+
+def test_an_agent_with_no_mandate_is_loud_about_it() -> None:
+    """The inherited rules alone read like a complete brief and ground nothing: the model would
+    know it must cite a rule and not what patch it works. M3 is when the other four stop
+    tripping this."""
+    with capture_logs() as logs:
+        system_prompt("herd_health")
+    assert any(entry["event"] == "no_mandate_for_agent" for entry in logs)
+
+
+def test_nothing_a_model_reads_carries_an_em_dash() -> None:
+    for readable in (system_prompt("water_feed"), WATER_SOP, FEED_SOP, TANK_PACKET.render()):
+        assert "\u2014" not in readable
+
+
+def test_the_schema_forces_every_field_a_lazy_answer_would_leave_out() -> None:
+    """`unknowns` is where a number the packet does not have goes instead of into the
+    assessment, so it cannot be optional."""
+    assert set(WORK_ORDER_SCHEMA["required"]) == set(WORK_ORDER_SCHEMA["properties"])
+    assert {"unknowns", "rules_cited", "severity_echo"} <= set(WORK_ORDER_SCHEMA["required"])
+    assert WORK_ORDER_SCHEMA["properties"]["severity_echo"]["enum"] == ["nominal", "warning", "critical"]
+
+
+@respx.mock
+async def test_a_tick_told_not_to_spend_stops_at_the_end_of_the_free_pass(catalog: RanchMap, target: StoreTarget) -> None:
+    """How every rail above the model layer exercises the whole pipeline for free, and the
+    reason `conftest.no_model_calls` sits behind it. A forgotten flag has to fail, not bill."""
+    serve(respx.mock, {"alkali-flat-water": 1.4, "east-allotment-fence": 6.0, "home-place-bin": 4000})
+    state = await run_tick(tick=1, store=target, now=T0, spend=False)
+    assert state.error is None
+    assert state.opened, "the free pass still opened incidents"
+    assert state.routed.get("water_feed"), "and still routed one to the agent that would have spent"
+    assert state.work_orders == (), "and paid nothing to do it"

@@ -63,8 +63,9 @@ sweetwater/                                lands at
 │   ├── agent/
 │   │   ├── CLAUDE.md               M0    the graph, the tick contract, the escalation tiers
 │   │   ├── agent.py                M1    the routing table; the LangGraph supervisor + the five worker factories (M3)
+│   │   ├── workers.py              M2    what a worker's ANSWER must satisfy: the rails, to_work_order, the fan-out
 │   │   ├── executor.py             M1    THE CONTINUOUS LOOP: the tick body; cadence, backoff, shutdown (M4)
-│   │   ├── state.py                M1    RanchState (LangGraph), Finding, Incident dataclasses
+│   │   ├── state.py                M1    RanchState (LangGraph), Finding, Incident, WorkOrder
 │   │   └── memory.py               M1    sw_ops persistence: incidents; chaos events (M5); checkpointer (M6)
 │   ├── tools/
 │   │   ├── CLAUDE.md               M0    MCP is frozen upstream; allowlist + severity-ownership rules
@@ -123,6 +124,15 @@ docstring-only placeholder naming the milestone that fills it, so an **unbuilt l
 unbuilt rather than as a hole**, which is exactly the ambiguity an empty `prompts/` produced
 once. `--` means it stays a seam in V1. A trailing `(M4)` inside a description marks the part
 of a live file that is still to come. `__init__.py` files are omitted as noise.
+
+**One deliberate revision, at the M2 boundary: `src/agent/workers.py` is new to this tree.**
+The plan had `agent.py` carrying the routing table and the worker factories together. M2 split
+the second half out, because the two answer different questions - `agent.py` says **which agent
+owns a category**, `workers.py` says **what an agent's answer must satisfy** - and folding the
+rails, the checker, and the fan-out into the routing table reproduces exactly the confusion the
+M1 `routing.py` rename existed to remove. Recorded here rather than left to be discovered,
+because the M1 lesson was that silent drift is the defect and no test reads a diagram. The
+supervisor still lands in `agent.py` at M3.
 
 ### Nested CLAUDE.md, and why
 
@@ -314,15 +324,21 @@ Do **not** build the cascade at M2. Build Tier 2 only, log `model`, `tokens`, `l
   "opened": 2,
   "ongoing": 5,
   "resolved": 1,
-  "agents_invoked": ["water_feed", "infrastructure"],
-  "escalations": 1,
-  "escalation_reasons": ["critical"],
-  "tokens_in": 3120,
-  "tokens_out": 812,
+  "agents_routed": ["water_feed", "infrastructure"],
+  "work_orders": 2,
+  "work_orders_shipped": 2,
+  "work_orders_rejected": 0,
+  "escalated": 1,
+  "input_tokens": 3120,
+  "output_tokens": 812,
   "cost_usd": 0.0184,
   "chaos_fired": "storm_front",
 }
 ```
+
+Field names are `input_tokens` / `output_tokens`, matching `agent.jsonl` and the model APIs. This
+block said `tokens_in` / `tokens_out` until the M2 boundary, which is a `jq` that returns `null`
+and reads as a calm ranch. `cost_usd` arrives at M7 with the pricing table, `chaos_fired` at M5.
 
 This is the II.0 gauge promoted from a teaching instrument to a permanent one. One line per tick means the cost curve is a single `jq` away, which is the only way you will notice it stop being flat. **Written at tick end, always, including when the tick failed** (with `error` and `failed_stage`) - a tick that produces no line is indistinguishable from a dead loop.
 
@@ -419,8 +435,8 @@ Named so nothing gets quietly resurrected:
 4. Human gate by hand: let a tick want a care write, watch it block, kill the process, restart, reject, then approve.
 5. Replay determinism: same `CHAOS_SEED`, two runs, identical event sequence.
 6. Read the logs, which is the real test of whether the instrument works:
-   - `jq -r '[.tick,.tokens_in,.tokens_out,.cost_usd,.escalations]|@tsv' logs/tick.jsonl` - cost flat on calm ticks, spikes only where an escalation is logged alongside it.
-   - `jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl` - anything here is a config bug, not a weak model.
+   - `jq -r '[.tick,(.input_tokens//0),(.output_tokens//0),(.work_orders_shipped//0),(.escalated//0)]|@tsv' logs/tick.jsonl` - cost flat on calm ticks, spikes only where an escalation is logged alongside it.
+   - `jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl` - anything here is a config bug, not a weak model. It names the healthy **set** because the providers disagree: Anthropic says `tool_use` and `end_turn`, Ollama says `stop`. The single-value version of this query shipped in four files and reported every healthy Opus call as broken, see cookbook #10.
    - every `audit_id` in `audit.jsonl` appears twice. A single occurrence is a pause nobody answered.
 7. Load the Vercel URL and watch three ticks land without a refresh.
 

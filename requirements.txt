@@ -10,6 +10,13 @@ langchain-anthropic>=0.3.0,<0.4
 langchain-ollama>=0.2.2,<0.4
 langchain-mcp-adapters>=0.1.0,<0.2
 
+# --- Tier 2 (Anthropic direct, or the same SDK against Bedrock) --------------
+# The `[bedrock]` extra pulls boto3/botocore and is what makes `AsyncAnthropicBedrock`
+# importable. Named here rather than left to arrive transitively through
+# langchain-anthropic: `llm_client.py` calls the SDK directly, so this is a first-order
+# dependency, and M2 discovered it missing at import time rather than at install time.
+anthropic[bedrock]>=0.69,<1
+
 # --- MCP client (Streamable HTTP against the deployed Function URL) ----------
 mcp>=1.2.0,<2
 
