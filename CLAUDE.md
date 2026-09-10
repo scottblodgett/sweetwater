@@ -23,7 +23,8 @@ in this order, no exceptions:
    the plan, and every defect the phase caught in itself. `docs/cookbook.md` gets any
    lesson general enough to bite again. Touch `docs/model-routing.md` if a job changed
    tiers, and the relevant nested `CLAUDE.md` if a rule changed.
-3. **Commit** to `main`. No feature branches, no PRs.
+3. **Commit** to `master` (Scott's preferred default branch name, not `main`). No
+   feature branches, no PRs.
 4. **Stop and check in with Scott.** Do not roll into the next phase unprompted.
 
 Docs are updated at the phase boundary rather than at the end of the build, because a
