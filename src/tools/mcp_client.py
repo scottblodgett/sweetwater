@@ -26,6 +26,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import TextContent, TextResourceContents
 
+from src.tools.allowlists import assert_callable
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
 
@@ -100,7 +101,7 @@ async def list_tool_names(session: ClientSession) -> list[str]:
     return [t.name for t in result.tools]
 
 
-async def call_tool(session: ClientSession, name: str, arguments: dict[str, Any]) -> Any:
+async def call_tool(session: ClientSession, name: str, arguments: dict[str, Any], *, agent: str = "") -> Any:
     """Invoke a tool and return its parsed payload.
 
     The upstream returns structured errors as an `isError` result whose text is a
@@ -109,7 +110,14 @@ async def call_tool(session: ClientSession, name: str, arguments: dict[str, Any]
     belong to different layers: the server saw the status line, the caller owns the
     budget. Raising here would take that decision away from the only process that
     has a deadline.
+
+    The one exception is `assert_callable`, which RAISES. Every MCP invocation goes
+    through this function, so it is the one place a write against the live ranch can
+    be refused no matter who wired the call. The human gate arrives in M6; until then
+    a write tool reaching this line means this repo is wired wrong, and that is not a
+    fact a caller gets to weigh against its budget. See `src/tools/allowlists.py`.
     """
+    assert_callable(name, agent=agent)
     result = await session.call_tool(name, arguments)
     # isinstance, not `getattr(c, "text", None)`. A content union that also holds image,
     # audio, and resource-link blocks is not narrowed by a duck-typed attribute probe,

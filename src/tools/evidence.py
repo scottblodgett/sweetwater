@@ -69,14 +69,43 @@ PASTURE_LIMIT = 50  # 18 exist; the ceiling is here so a new pasture does not si
 
 #: Category to SOP file. Explicit rather than derived from the category name, because a
 #: missing SOP must read as "no rule exists for this yet" and not as a filename typo that
-#: silently returns nothing. Every category `water_feed` owns is covered; the rest arrive
-#: with their own agents at M3.
+#: silently returns nothing. All 18 categories are covered as of M3, so a
+#: `packets_without_sop` warning now means a **new** category arrived without a rule.
+#:
+#: **Six files rather than four, and the split is a cost decision as much as an editorial
+#: one.** `src/tools/CLAUDE.md` measured the SOP as the majority of a packet's input tokens,
+#: so every rule in the file a packet carries is billed whether or not it applies. One
+#: `infrastructure.md` covering fences, gates, batteries, fuel, wind, the wells, and sensor
+#: health would be roughly 350 lines, and an open gate would pay for the H2S approach rule
+#: every tick. It also reads worse: the standing orders a person needs for a gate are three
+#: rules, not thirty. So `infrastructure` is one agent reading three files depending on what
+#: broke, which is exactly the "one file per sensing world" shape the canon already
+#: describes - the wells are the safety and regulatory world, and the instruments are their
+#: own maintenance world.
 SOP_FOR_CATEGORY: dict[str, str] = {
+    # production: nobody dies of thirst or hunger
     "water_low": "water.md",
     "freeze_risk": "water.md",
     "heat_stress": "water.md",
     "feed_low": "feed.md",
     "deep_snow": "feed.md",
+    # the plant that holds cattle, powers a remote site, and fuels the trucks
+    "fence_down": "infrastructure.md",
+    "gate_open": "infrastructure.md",
+    "power_low": "infrastructure.md",
+    "fuel_low": "infrastructure.md",
+    "high_wind": "infrastructure.md",
+    # safety and regulatory: no spill, no fault, no fine
+    "wellhead_overpressure": "wellhead.md",
+    "wellhead_underpressure": "wellhead.md",
+    # the instruments themselves. Every sensing world's boxes, worked by one agent
+    "sensor_offline": "sensors.md",
+    "sensor_degraded": "sensors.md",
+    "sensor_fault": "sensors.md",
+    "unknown_sensor_type": "sensors.md",
+    # environmental: keep the payments, prove the stewardship
+    "range_dry": "compliance.md",
+    "stream_flow_low": "compliance.md",
 }
 
 

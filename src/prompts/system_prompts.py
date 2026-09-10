@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.prompts.agent_prompts import MANDATES
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -64,18 +65,6 @@ How to actually read the packet, in this order:
 - The standing orders. They decide what the crew does. The packet decides what is true.
 
 Write the way the crew talks: short, concrete, no hedging, no restating the packet back. Name the place, name the sensor, say what to do first. No em dashes."""
-
-#: The mandate that turns the inherited rules into one agent's brief. `water_feed` is the
-#: only one written at M2; the other four arrive at M3 in `agent_prompts.py`.
-WATER_FEED_MANDATE = """YOUR PATCH: water and feed. Stock tanks, wells and windmills, feed bins, and the two weather readings that change what a tank or a bin means (temperature for freeze and heat, snow depth for access).
-
-Water is not like the other sensing worlds here. A dry tank is not a degradation, it is a countdown: cattle drink 15 to 20 gallons a head a day and closer to double that over 90 degrees, there is no reserve behind a stock tank, and the nearest fix is a human in a truck who may be an hour out. The crew would rather be sent to a full tank by mistake than not sent to an empty one. Write accordingly.
-
-Feed runs on a longer clock and is therefore the half that gets found late. A bin at reserve with weather coming is a today problem and the same bin under a clear week is not, so say which one you think it is and why.
-
-Two things that are not yours, and saying so is part of the job:
-- A sensor you cannot believe (offline, degraded, or reading outside physical possibility) is `infrastructure`'s repair. But the pasture behind it is now unmonitored, and that IS your fact. Say it and get eyes on the tank.
-- Creek and stream flow is `compliance`'s, scored for habitat and conservation payments. It is not stock water and does not substitute for it in either direction."""
 
 #: Forced-tool schema. Every field is required, including the ones a lazy answer would
 #: rather leave out: `unknowns` is where a number the packet does not have is supposed to go
@@ -142,12 +131,16 @@ def system_prompt(agent: str, *, mandate: str = "") -> str:
 
     A missing mandate is loud. The inherited rules alone read like a complete brief and
     ground nothing: the model would know it must cite a rule and not what patch it works.
-    M3 is when the other four stop tripping this.
+    M3 briefed the four responders; `chaos` is the one agent that legitimately still trips
+    this, and the log line is how M5 finds out it needs a brief.
+
+    The `mandate=` override exists for exactly one caller and it is not production: the
+    no-brief experiment in `docs/` passes `mandate=" "` to run a responder with its patch
+    removed and nothing else changed. A whitespace mandate is falsy after `strip()` in the
+    return but truthy here, so the flailing transcript is captured without the log line
+    claiming a brief is missing from the repo.
     """
     patch = mandate or MANDATES.get(agent, "")
     if not patch:
-        log.error("no_mandate_for_agent", agent=agent, known=sorted(MANDATES), hint="add the brief in src/prompts/system_prompts.py; the inherited rules alone are not a brief")
+        log.error("no_mandate_for_agent", agent=agent, known=sorted(MANDATES), hint="add the brief in src/prompts/agent_prompts.py; the inherited rules alone are not a brief")
     return f"{INHERITED_RULES}\n\n{patch}".strip()
-
-
-MANDATES: dict[str, str] = {"water_feed": WATER_FEED_MANDATE}

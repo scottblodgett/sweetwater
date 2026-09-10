@@ -31,6 +31,12 @@ CHAOS = "chaos"
 
 AGENTS = (WATER_FEED, HERD_HEALTH, INFRASTRUCTURE, COMPLIANCE, CHAOS)
 
+#: The four the supervisor fans out to. `chaos` is an agent and not a responder: it breaks
+#: the ranch rather than answering for it, it is never a route target, and it stays out of
+#: the graph until M5. Two names because the distinction is real and collapsing it would
+#: mean either the fan-out invokes the saboteur or the allowlists lose a slice.
+RESPONDERS = (WATER_FEED, HERD_HEALTH, INFRASTRUCTURE, COMPLIANCE)
+
 #: Fallback owner. Never a silent drop: an unrouted incident is one nobody is paged
 #: about, which is indistinguishable from a ranch with nothing wrong.
 DEFAULT_OWNER = INFRASTRUCTURE

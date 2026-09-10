@@ -25,8 +25,23 @@ import pytest
 import respx
 from structlog.testing import capture_logs
 
+from src.agent.agent import AGENTS
 from src.agent.state import Incident
+from src.agent.workers import citable_rules
+from src.tools.allowlists import (
+    DEPLOYED_TOOLS,
+    GATE_LANDED,
+    SLICES,
+    UNASSIGNED_TOOLS,
+    WRITE_TOOLS,
+    WriteGateError,
+    assert_callable,
+    bound_tools_for,
+    is_allowed,
+    tools_for,
+)
 from src.tools.evidence import (
+    KNOWLEDGE_BASE,
     SOP_FOR_CATEGORY,
     EvidencePacket,
     HistoryPoint,
@@ -38,7 +53,7 @@ from src.tools.evidence import (
     siblings_for,
     slugify,
 )
-from src.tools.mcp_client import SensorRef
+from src.tools.mcp_client import SensorRef, call_tool
 from src.tools.sensors import SensorReading, SweepError, parse_sensor_payload, read_sensor, sweep
 from src.tools.triage import (
     ALL_CATEGORIES,
@@ -532,7 +547,7 @@ def test_siblings_are_this_ticks_readings_at_this_location_and_never_the_sensor_
     assert "16.7 gal" in siblings[1].render()
 
 
-def test_every_category_water_feed_owns_has_an_sop_file_that_exists() -> None:
+def test_every_category_has_an_sop_file_that_exists() -> None:
     """The SOPs are derived from `docs/sweetwater-ranch.md` and nothing else may source them.
     A missing file is silent in the packet and turns rule 4 of the brief into an invitation
     to invent a rule id."""
@@ -541,8 +556,38 @@ def test_every_category_water_feed_owns_has_an_sop_file_that_exists() -> None:
         assert name and text.strip(), f"{category} maps to {SOP_FOR_CATEGORY[category]} and it did not load"
 
 
-def test_a_category_with_no_sop_returns_nothing_rather_than_guessing_a_filename() -> None:
-    assert load_sop("fence_down") == ("", "")
+def test_no_triage_category_reaches_a_model_without_a_rule_to_cite() -> None:
+    """All 18 as of M3. Before it, `evidence.py` logged `packets_without_sop` for eleven of
+    them, which made rail 4 of the brief vacuous for two agents of four: an agent told to cite
+    a rule from a packet carrying no rules either invents one or cites nothing, and only one of
+    those is detectable. From here a `packets_without_sop` warning means a NEW category."""
+    assert set(SOP_FOR_CATEGORY) == set(ALL_CATEGORIES), f"no SOP for {sorted(set(ALL_CATEGORIES) - set(SOP_FOR_CATEGORY))}"
+
+
+def test_a_rule_id_belongs_to_exactly_one_sop_file() -> None:
+    """`workers.citable_rules` reads the ids out of the text the packet carried, so a duplicated
+    id would be citable from a file that does not contain the rule the crew then goes looking
+    for. Six files with six prefixes is what keeps that impossible."""
+    seen: dict[str, str] = {}
+    for filename in sorted(set(SOP_FOR_CATEGORY.values())):
+        for rule in citable_rules((KNOWLEDGE_BASE / filename).read_text(encoding="utf-8")):
+            assert rule not in seen, f"{rule} appears in both {seen.get(rule)} and {filename}"
+            seen[rule] = filename
+    assert len(seen) >= 18, f"only {len(seen)} citable rules across six files, which is thinner than the categories they cover"
+
+
+def test_every_sop_says_where_its_rules_came_from_and_carries_no_em_dash() -> None:
+    """Two conventions that only exist in prose and so have no other way to be enforced. The
+    provenance line is the anti-invention rule pointed at the file itself, and the house style
+    reaches the SOPs because a model reads them verbatim."""
+    for filename in sorted(set(SOP_FOR_CATEGORY.values())):
+        text = (KNOWLEDGE_BASE / filename).read_text(encoding="utf-8")
+        assert "docs/sweetwater-ranch.md" in text, f"{filename} does not say what sourced it"
+        assert "—" not in text, f"{filename} carries an em dash"
+
+
+def test_a_category_that_does_not_exist_returns_nothing_rather_than_guessing_a_filename() -> None:
+    assert load_sop("stampede") == ("", "")
 
 
 def test_the_packet_warns_that_the_history_series_is_not_the_current_reading() -> None:
@@ -570,3 +615,118 @@ async def test_assembling_nothing_costs_nothing() -> None:
     with respx.mock(assert_all_called=False) as mock:
         assert await assemble([]) == ()
         assert not mock.calls
+
+
+# =========================================================================== #
+# 4. the tool slices
+# =========================================================================== #
+#: Spelled out here rather than imported from `allowlists._SENSOR_READS`, so the rails
+#: assert the fact (three agents share the sensor reads) instead of agreeing with whatever
+#: the implementation happens to have grouped into a constant.
+SENSOR_READS = frozenset({"list_sensors", "read_sensor", "get_sensor_readings"})
+
+
+
+# What these rails protect: isolation enforced in CODE, not requested in a prompt. The
+# counts are the spec, so a slice cannot grow by one tool without a deliberate edit to a
+# number a human reads. The write rails protect the M3-to-M6 seam: the writes are declared
+# so the counts are real, and withheld so nothing reaches the deployed Care API before
+# `interrupt()` exists. Loosening any of these to make something else pass is the exact
+# failure mode `tests/CLAUDE.md` is written against.
+def test_every_agent_has_exactly_the_tools_it_should() -> None:
+    """The counts are the spec. 7 / 6 / 5 / 5 / 0, writes included."""
+    assert {agent: len(tools_for(agent)) for agent in SLICES} == {"water_feed": 7, "herd_health": 6, "infrastructure": 5, "compliance": 5, "chaos": 0}
+
+
+def test_no_agent_names_a_tool_outside_its_set() -> None:
+    """The same rail from the other direction: nothing invented, nothing undeclared."""
+    for agent, slice_ in SLICES.items():
+        assert slice_ <= DEPLOYED_TOOLS, f"{agent} names a tool the deployed server does not have: {sorted(slice_ - DEPLOYED_TOOLS)}"
+    assert not is_allowed("herd_health", "read_sensor"), "herd_health cannot read a sensor; that is the line worth defending"
+    assert not is_allowed("infrastructure", "consume_feed"), "nothing but water_feed touches feed"
+    assert not is_allowed("compliance", "list_shelters")
+    assert not is_allowed("chaos", "read_sensor"), "chaos has its own hands in tools/chaos.py, not a slice of the 19"
+
+
+def test_the_slices_cover_exactly_the_five_agents() -> None:
+    """`allowlists` cannot import `agent.py` without a cycle, so this rail is the sync."""
+    assert set(SLICES) == set(AGENTS)
+
+
+def test_an_unknown_agent_gets_nothing_and_says_so() -> None:
+    """A permissive default is how a typo becomes a model holding all 19 tools."""
+    with capture_logs() as logs:
+        assert tools_for("water-feed") == frozenset()
+    assert [entry["event"] for entry in logs] == ["no_slice_for_agent"]
+
+
+def test_herd_health_owns_the_care_api_and_only_the_care_api() -> None:
+    """Its idleness at M3 is a routing fact, not a missing slice. The slice is real."""
+    assert tools_for("herd_health") & SENSOR_READS == frozenset()
+    assert "create_observation" in tools_for("herd_health")
+
+
+def test_three_agents_share_the_sensor_reads_on_purpose() -> None:
+    """Not a leak. Carving this up would mean editing a frozen server."""
+    sharing = {agent for agent, slice_ in SLICES.items() if SENSOR_READS <= slice_}
+    assert sharing == {"water_feed", "infrastructure", "compliance"}
+
+
+# --- the M3-to-M6 seam: declared, and withheld -------------------------------------- #
+def test_every_write_tool_is_declared_in_exactly_one_slice_or_none() -> None:
+    """Without this the withhold is vacuous: a write nobody declares is a write nobody withholds."""
+    for tool in WRITE_TOOLS:
+        owners = [agent for agent, slice_ in SLICES.items() if tool in slice_]
+        assert len(owners) <= 1, f"{tool} is a write declared in more than one slice: {owners}"
+    assert {tool for tool in WRITE_TOOLS if any(tool in s for s in SLICES.values())} == {"consume_feed", "restock_feed", "create_observation", "update_care_task"}
+
+
+def test_the_four_placement_tools_belong_to_nobody() -> None:
+    """Deployed, write-capable, and in no slice. Moving one in has to be deliberate."""
+    assert UNASSIGNED_TOOLS == {"assign_to_pasture", "assign_to_shelter", "remove_from_pasture", "remove_from_shelter"}
+    assert UNASSIGNED_TOOLS <= WRITE_TOOLS, "an unassigned tool that is not covered by the write guard is the one a future edit gets wrong"
+
+
+def test_no_write_tool_is_ever_handed_to_a_model_before_m6() -> None:
+    """The seam. If this fails, either the gate landed or somebody reached for tools_for."""
+    assert not GATE_LANDED, "GATE_LANDED is M6's to flip, with interrupt() and the checkpointer actually in place"
+    for agent in SLICES:
+        assert bound_tools_for(agent) & WRITE_TOOLS == frozenset(), f"{agent} would be handed an ungated write tool; the gate arrives in M6"
+    assert len(bound_tools_for("water_feed")) == 5
+    assert len(bound_tools_for("herd_health")) == 4
+
+
+def test_withholding_a_write_says_so_out_loud() -> None:
+    """A silent subtraction is indistinguishable from a slice that was never right."""
+    with capture_logs() as logs:
+        bound_tools_for("water_feed")
+    assert [entry["event"] for entry in logs] == ["write_tools_withheld"]
+    assert logs[0]["arrives_in"] == "M6"
+
+
+def test_a_read_only_slice_is_withheld_from_nothing() -> None:
+    assert bound_tools_for("infrastructure") == tools_for("infrastructure")
+
+
+def test_calling_a_write_tool_raises_rather_than_returning_an_error_envelope() -> None:
+    """The belt behind the filtered list. Every MCP call goes through `assert_callable`."""
+    for tool in sorted(WRITE_TOOLS):
+        with pytest.raises(WriteGateError, match="M6"):
+            assert_callable(tool)
+
+
+def test_a_read_tool_the_agent_does_not_own_is_refused_too() -> None:
+    assert_callable("read_sensor", agent="infrastructure")  # owns it, no raise
+    with pytest.raises(WriteGateError, match="no read_sensor in its slice"):
+        assert_callable("read_sensor", agent="herd_health")
+
+
+async def test_call_tool_refuses_a_write_before_it_reaches_the_wire() -> None:
+    """The guard has to fire before the session is touched, or it is not a guard."""
+
+    class ExplodingSession:
+        async def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+            raise AssertionError("call_tool reached the deployed ranch with a write tool")
+
+    with pytest.raises(WriteGateError):
+        await call_tool(ExplodingSession(), "create_observation", {"animalId": "cow-0777"})  # type: ignore[arg-type]

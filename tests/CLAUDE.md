@@ -7,9 +7,16 @@ suite that drops and recreates a schema against the same database the demo reads
 is how three answer keys got invalidated in a previous life of this project. There is a
 local Postgres 16 on this machine; no Docker is required.
 
-A test that needs the live ranch is marked and skipped by default. `pytest` must pass on
-a plane. The store tests skip rather than fail when no local Postgres answers, for the
-same reason.
+**No test in this repo touches the live ranch, and none is marked to.** `pytest` must pass
+on a plane, so every upstream is a respx route against a fake host. Live verification is a
+**documented command**, not a test: `--handshake` proves the deployed contract (and fails on
+tool-surface drift against `allowlists.DEPLOYED_TOOLS`), and `--once` is the per-phase live
+run. That split is deliberate. A suite that is green only on a good network stops being a
+gate, and a check that has to reach the wire belongs in the thing whose whole job is
+reaching the wire.
+
+The store tests skip rather than fail when no local Postgres answers, for the same
+plane-must-pass reason. That is the one conditional skip here.
 
 ## And never point a test at a model
 

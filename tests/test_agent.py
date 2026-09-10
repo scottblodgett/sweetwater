@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
 from src.agent import agent
-from src.agent.agent import AGENTS, DEFAULT_OWNER, HERD_HEALTH, ROUTES, owner_for, owners_for, route, unrouted_categories
+from src.agent.agent import AGENTS, DEFAULT_OWNER, HERD_HEALTH, RESPONDERS, ROUTES, owner_for, owners_for, route, unrouted_categories
 from src.agent.executor import run_tick, summarize
 from src.agent.memory import (
     ALLOWED_SCHEMAS,
@@ -60,7 +60,9 @@ from src.agent.memory import (
 from src.agent.state import Finding, Incident, WorkOrder
 from src.agent.workers import citable_rules, run_water_feed, to_work_order
 from src.models.llm_client import THINKING_BUDGET, ModelResponse, call_tier2, resolve_provider
+from src.prompts.agent_prompts import MANDATES
 from src.prompts.system_prompts import WORK_ORDER_SCHEMA, system_prompt
+from src.tools.allowlists import DEPLOYED_TOOLS
 from src.tools.evidence import EvidencePacket, HistoryPoint, PastureContext, SiblingReading
 from src.tools.mcp_client import RanchMap, SensorRef, flatten_exception, parse_ranch_map
 from src.tools.triage import ALL_CATEGORIES
@@ -1110,16 +1112,51 @@ def test_the_brief_carries_the_inherited_rules_and_the_agents_own_patch() -> Non
 
 def test_an_agent_with_no_mandate_is_loud_about_it() -> None:
     """The inherited rules alone read like a complete brief and ground nothing: the model would
-    know it must cite a rule and not what patch it works. M3 is when the other four stop
-    tripping this."""
+    know it must cite a rule and not what patch it works. After M3 briefed the four responders,
+    `chaos` is the one agent that legitimately still trips this, and it arrives at M5."""
     with capture_logs() as logs:
-        system_prompt("herd_health")
+        system_prompt("chaos")
     assert any(entry["event"] == "no_mandate_for_agent" for entry in logs)
 
 
+def test_every_responder_has_a_brief_and_chaos_deliberately_does_not() -> None:
+    """`docs/Plan.md` says "the five briefs" and this is four on purpose: `chaos` stays out of
+    the graph until M5 and authors nothing a human reads before it has real animal events. The
+    absence is asserted rather than assumed, so M5 adding one is a deliberate edit here."""
+    assert set(MANDATES) == set(RESPONDERS)
+    assert "chaos" not in MANDATES
+    assert set(RESPONDERS) | {"chaos"} == set(AGENTS), "the responders plus chaos are the five agents; a sixth needs a brief and a slice"
+
+
+@pytest.mark.parametrize("agent", RESPONDERS)
+def test_every_brief_names_its_patch_and_what_is_not_its_patch(agent: str) -> None:
+    """The third part is the load-bearing one. Four agents read one shared sweep, so a brief
+    that only says what an agent owns gets four work orders about the same broken sensor. Each
+    brief has to name at least two neighbours by the name the router uses for them."""
+    brief = MANDATES[agent]
+    assert brief.startswith("YOUR PATCH:")
+    neighbours = {other for other in RESPONDERS if other != agent and f"`{other}`" in brief}
+    assert len(neighbours) >= 2, f"{agent}'s brief hands work to {neighbours or 'nobody'}; it needs to name at least two neighbours it does not own"
+
+
+@pytest.mark.parametrize("agent", RESPONDERS)
+def test_no_brief_ranks_severity_or_promises_a_tool(agent: str) -> None:
+    """Two ways a brief silently undoes the architecture. Telling an agent something is
+    "critical" makes severity negotiable when `triage.py` already owns it, and naming a tool
+    invites a model with none bound to describe calling one. `herd_health` is allowed to say
+    it CANNOT read a sensor, which is why the check is on the tool names, not the word."""
+    brief = MANDATES[agent]
+    for forbidden in ("critical", "severity", "nominal"):
+        assert forbidden not in brief.lower(), f"{agent}'s brief touches severity, which belongs to triage.py"
+    for tool in DEPLOYED_TOOLS:
+        assert tool not in brief, f"{agent}'s brief names the tool {tool}; a worker has no tools bound and nothing to navigate"
+
+
 def test_nothing_a_model_reads_carries_an_em_dash() -> None:
-    for readable in (system_prompt("water_feed"), WATER_SOP, FEED_SOP, TANK_PACKET.render()):
-        assert "\u2014" not in readable
+    readable = [system_prompt(agent) for agent in RESPONDERS]
+    readable += [WATER_SOP, FEED_SOP, TANK_PACKET.render()]
+    for page in readable:
+        assert "\u2014" not in page
 
 
 def test_the_schema_forces_every_field_a_lazy_answer_would_leave_out() -> None:

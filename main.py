@@ -16,10 +16,15 @@ import argparse
 import asyncio
 import sys
 
+from src.tools.allowlists import DEPLOYED_TOOLS
 from src.utils.config import get_settings
 from src.utils.logger import Stopwatch, bind_tick, configure_logging, get_logger, log_tick
 
-EXPECTED_TOOL_COUNT = 19
+#: The count is the headline, but the NAMES are what the allowlists are built out of, so
+#: the handshake checks the set and not the size. Nineteen tools with one renamed passes a
+#: count check and silently empties whichever slice named the old spelling, which would
+#: surface much later as an agent that mysteriously cannot do its job.
+EXPECTED_TOOL_COUNT = len(DEPLOYED_TOOLS)
 
 
 async def handshake() -> int:
@@ -82,8 +87,19 @@ async def handshake() -> int:
 
     if error:
         return 1
-    if len(tools) != EXPECTED_TOOL_COUNT:
-        log.error("unexpected_tool_count", expected=EXPECTED_TOOL_COUNT, found=len(tools), tools=tools)
+    drifted = frozenset(tools) ^ DEPLOYED_TOOLS
+    if drifted:
+        # Named both ways round, because the two directions mean different things. A tool
+        # the server no longer has empties a slice; a tool this repo has never heard of is
+        # a scoped change over there and a conversation, per the boundary rule.
+        log.error(
+            "tool_surface_drifted",
+            expected=EXPECTED_TOOL_COUNT,
+            found=len(tools),
+            gone_from_upstream=sorted(DEPLOYED_TOOLS - frozenset(tools)),
+            new_upstream=sorted(frozenset(tools) - DEPLOYED_TOOLS),
+            hint="update DEPLOYED_TOOLS in src/tools/allowlists.py and re-check every slice that named a changed tool",
+        )
         return 1
     if sensors == 0:
         log.error("empty_ranch_map", hint="an empty map and a calm ranch are indistinguishable downstream; treating as failure")
