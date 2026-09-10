@@ -1,0 +1,17 @@
+# PLACEHOLDER until M10. Not needed to build or run this.
+#
+# Deliberately empty for now. The upstream APIs are already deployed on Lambda and
+# agent state lives in Supabase, so there is nothing local to stand up: `python
+# main.py` in a venv talks to the real ranch. Dockerizing a moving target is how you
+# end up debugging a container when the bug is in your prompt.
+#
+# At M10 this gains:
+#   orchestrator  the tick loop           (Dockerfile)
+#   api           the read API            (Dockerfile.api)
+#   postgres      OPTIONAL, offline work + store tests only
+#
+# The orchestrator image is also what a Lambda container or a small always-on box
+# would run, so this is simultaneously the last step of the build and the first step
+# of whatever hosting gets picked.
+
+services: {}

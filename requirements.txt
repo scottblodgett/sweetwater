@@ -1,0 +1,37 @@
+# Runtime dependencies. Python 3.11.
+# Pinned exactly: this is a learning repo and a silent minor-version bump in an
+# agent framework is indistinguishable from "the model got worse."
+
+# --- Agent graph -------------------------------------------------------------
+langgraph>=0.2.60,<0.3
+langgraph-checkpoint-postgres>=2.0.0,<3
+langchain-core>=0.3.30,<0.4
+langchain-anthropic>=0.3.0,<0.4
+langchain-ollama>=0.2.2,<0.4
+langchain-mcp-adapters>=0.1.0,<0.2
+
+# --- MCP client (Streamable HTTP against the deployed Function URL) ----------
+mcp>=1.2.0,<2
+
+# --- HTTP --------------------------------------------------------------------
+httpx>=0.27,<0.29
+
+# --- Models / validation -----------------------------------------------------
+pydantic>=2.9,<3
+pydantic-settings>=2.6,<3
+
+# --- Persistence (sw_ops schema) ---------------------------------------------
+sqlalchemy[asyncio]>=2.0.36,<3
+asyncpg>=0.30,<0.31
+alembic>=1.14,<2
+
+# --- Read API ----------------------------------------------------------------
+fastapi>=0.115,<0.200
+uvicorn[standard]>=0.32,<0.40
+sse-starlette>=2.1,<3
+
+# --- Observability -----------------------------------------------------------
+structlog>=24.4,<26
+
+# --- Config ------------------------------------------------------------------
+python-dotenv>=1.0,<2

@@ -1,0 +1,30 @@
+[project]
+name = "sweetwater"
+version = "0.1.0"
+description = "The agentic layer for Sweetwater Land & Cattle Co. One orchestrator, five sub-agents, running continuously against the deployed ranch APIs."
+requires-python = ">=3.11"
+
+[tool.ruff]
+# Wide on purpose. Vertical fragmentation of a line that reads fine horizontally
+# costs more comprehension than it saves.
+line-length = 140
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["mcp.*", "langchain_mcp_adapters.*", "langgraph.*", "sse_starlette.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:src.*"]

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets
+.env
+.env.local
+
+# Logs: the directory is tracked, the streams are not.
+logs/*.jsonl
+logs/*.jsonl.*
+logs/transcripts/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
