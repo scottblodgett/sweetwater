@@ -93,6 +93,37 @@ async def handshake() -> int:
     return 0
 
 
+async def once() -> int:
+    """Exactly one tick, then exit. The free pass end to end, no model involved.
+
+    `SW_OPS_TARGET=test` sends the ledger to the local `sw_ops_test` schema instead of
+    Supabase, through the same resolver `alembic` uses. Prod is the default: a default
+    that quietly writes somewhere harmless is a default that ships.
+    """
+    from src.agent.memory import SchemaGuardError, resolve_store
+    from src.agent.tick import run_tick, summarize
+
+    log = get_logger("sweetwater.once")
+    settings = get_settings()
+
+    missing = settings.missing_upstreams()
+    if missing:
+        log.error("config_incomplete", missing=missing, hint="copy .env.example to .env and fill it in")
+        return 2
+
+    try:
+        store = resolve_store()
+    except SchemaGuardError as exc:
+        # A guard refusal is a config error, not a tick failure, and it writes no tick
+        # line: nothing was attempted against the ranch.
+        log.error("store_unavailable", error=str(exc))
+        return 2
+
+    state = await run_tick(tick=1, store=store)
+    log.info("once_done", store=store.name, summary=summarize(state))
+    return 1 if state.error else 0
+
+
 async def not_yet(name: str, milestone: str) -> int:
     get_logger("sweetwater").error("not_implemented", command=name, arrives_in=milestone)
     return 3
@@ -112,7 +143,7 @@ def main() -> int:
     if args.handshake:
         return asyncio.run(handshake())
     if args.once:
-        return asyncio.run(not_yet("--once", "M1"))
+        return asyncio.run(once())
     if args.api:
         return asyncio.run(not_yet("--api", "M8"))
     return asyncio.run(not_yet("the tick loop", "M4"))

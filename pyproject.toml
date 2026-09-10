@@ -14,6 +14,12 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 ignore = ["E501"]
 
+[tool.ruff.lint.isort]
+# The migration directory is named `alembic/`, so isort infers the installed `alembic`
+# package is first-party and sorts it beside `src`. It is not ours, and an import block
+# that says otherwise misleads the next reader about what this repo owns.
+known-third-party = ["alembic"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true

@@ -37,6 +37,21 @@ def test_missing_upstreams_reports_all_of_them_at_once() -> None:
     assert Settings(mcp_url="a", farm_api="b", feed_api="c", sensor_api="d", care_api="e", _env_file=None).missing_upstreams() == []
 
 
+def test_bare_postgres_urls_are_upgraded_to_the_asyncpg_driver() -> None:
+    """SQLAlchemy picks its DBAPI from the scheme. Bare `postgresql://` means psycopg2,
+    which is not installed, and the failure reads like a missing dependency rather than a
+    URL that needed six characters added to it."""
+    s = Settings(database_url="postgresql://u:p@supabase.example:5432/postgres", database_url_test="postgres://postgres@localhost:5432/farm_systems_test", _env_file=None)
+    assert s.database_url.startswith("postgresql+asyncpg://u:p@")
+    assert s.database_url_test.startswith("postgresql+asyncpg://postgres@localhost")
+
+
+def test_an_explicit_driver_is_left_alone_and_a_blank_stays_blank() -> None:
+    s = Settings(database_url="postgresql+asyncpg://u@h/db", database_url_test="", _env_file=None)
+    assert s.database_url == "postgresql+asyncpg://u@h/db"
+    assert s.database_url_test == ""
+
+
 def test_chaos_cohort_parses_and_tolerates_whitespace() -> None:
     s = Settings(chaos_animal_cohort=" cow-0901, cow-0902 ,, cow-0903 ", _env_file=None)
     assert s.chaos_cohort == ("cow-0901", "cow-0902", "cow-0903")
@@ -70,6 +85,32 @@ def test_transcripts_flag_lets_bulk_bodies_through(monkeypatch: pytest.MonkeyPat
     out = _redact(None, "info", {"prompt": "the real prompt", "anthropic_api_key": "sk-ant-real"})
     assert out["prompt"] == "the real prompt"
     assert out["anthropic_api_key"] == "[redacted]", "a secret is redacted even with transcripts on"
+
+
+def test_a_stdlib_log_record_renders_like_every_other_line() -> None:
+    """The M1-caught M0 defect. httpx, sqlalchemy, and alembic log through the stdlib, and
+    without a `foreign_pre_chain` their records skip the processors: the message lands
+    under `event` while both renderers look for `msg`, and the line prints with no level,
+    no timestamp, and no `run_id` to join on. Found by reading the output of a migration
+    this repo had just documented as working."""
+    import logging
+
+    import structlog
+
+    from src.utils.logger import _foreign_chain
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, structlog.processors.JSONRenderer()],
+        foreign_pre_chain=_foreign_chain(),
+    )
+    record = logging.LogRecord("alembic.runtime.migration", logging.INFO, __file__, 1, "Running upgrade -> 0001", None, None)
+
+    payload = json.loads(formatter.format(record))
+
+    assert payload["msg"] == "Running upgrade -> 0001"
+    assert "event" not in payload, "a foreign record under `event` is invisible to both renderers"
+    assert payload["level"] == "info"
+    assert payload["ts"].endswith("Z")
 
 
 def test_timestamp_has_millisecond_precision_and_z_suffix() -> None:

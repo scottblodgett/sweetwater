@@ -63,6 +63,20 @@ class Settings(BaseSettings):
         # a missing route rather than a formatting mistake.
         return v.rstrip("/")
 
+    @field_validator("database_url", "database_url_test")
+    @classmethod
+    def _force_asyncpg_driver(cls, v: str) -> str:
+        # SQLAlchemy picks its DBAPI from the URL scheme, and bare `postgresql://`
+        # means psycopg2, which is not installed and never will be. The failure is a
+        # ModuleNotFoundError at engine-creation time that reads like a missing
+        # dependency rather than a URL typo. Both `.env` values arrive bare from every
+        # tool that hands out a connection string (Supabase's dashboard included), so
+        # the upgrade happens here once instead of at each `create_async_engine`.
+        for scheme in ("postgresql://", "postgres://"):
+            if v.startswith(scheme):
+                return "postgresql+asyncpg://" + v[len(scheme) :]
+        return v
+
     @property
     def upstream_timeout_s(self) -> float:
         return self.upstream_timeout_ms / 1000.0

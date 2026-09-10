@@ -82,6 +82,18 @@ def _rename_event(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[
 # --------------------------------------------------------------------------- #
 # setup
 # --------------------------------------------------------------------------- #
+def _foreign_chain() -> list[Any]:
+    """The same processors, applied to log records that did NOT come from structlog.
+
+    httpx, sqlalchemy, langchain, and alembic all log through the stdlib. Without this
+    chain their records skip `_rename_event`, so the message lands under `event` while
+    every renderer here is looking for `msg`, and the line prints as
+    `event='Running upgrade -> 0001'` with no level, no timestamp, and no `run_id`.
+    Caught in M1 by reading the output of a migration this repo had just documented.
+    """
+    return [structlog.contextvars.merge_contextvars, structlog.stdlib.add_log_level, structlog.stdlib.ExtraAdder(), _utc_ms_timestamp, _redact, _rename_event]
+
+
 def _file_handler(path: Path, *, daily: bool) -> logging.Handler:
     """Rotation differs by stream, and the difference is the point.
 
@@ -97,6 +109,7 @@ def _file_handler(path: Path, *, daily: bool) -> logging.Handler:
     handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, structlog.processors.JSONRenderer()],
+            foreign_pre_chain=_foreign_chain(),
         )
     )
     return handler
@@ -136,6 +149,7 @@ def configure_logging(run_id: str | None = None) -> str:
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
                 structlog.dev.ConsoleRenderer(colors=False, event_key="msg") if settings.log_console_pretty else structlog.processors.JSONRenderer(),
             ],
+            foreign_pre_chain=_foreign_chain(),
         )
     )
 
