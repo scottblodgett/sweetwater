@@ -155,6 +155,72 @@ class WorkOrder(BaseModel):
         return "\n".join(lines)
 
 
+class ShiftReport(BaseModel):
+    """One page for the person coming on shift. The supervisor's own output, arriving at M3.
+
+    A `WorkOrder` answers "what is wrong at this sensor." This answers "what is going on at
+    this ranch," and the difference is the reason a supervisor exists rather than four
+    independent scripts. Four agents each writing a correct page about their own world still
+    leaves somebody at 5am reading four pages and doing the fusion themselves.
+
+    Same ownership split as `WorkOrder`, for the same reason: `headline` through `escalations`
+    is prose, everything from `source` down is code's record of how the page was produced.
+
+    `source` is the field to read first when this looks wrong. **`code` is not a degraded
+    mode.** A tick where one world opened incidents needs no fusion, so the report is
+    assembled deterministically and no model is called at all; a tick where the model was
+    called and failed lands here too, and `violations` is what tells those apart.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    headline: str = ""
+    #: The fused narrative. Two to five sentences, and the only place a causal claim across
+    #: two worlds may be made.
+    situation: str = ""
+    #: What the shift does, in order. First item is what happens now.
+    priorities: tuple[str, ...] = ()
+    #: The incident keys this report claims are one event rather than several. The fusion
+    #: claim, stated as data so it can be checked: every key here must be one that was
+    #: handed to the report, exactly as `rules_cited` must exist in the packet's SOP.
+    linked: tuple[str, ...] = ()
+    #: What a human above the crew needs to know, one line each.
+    escalations: tuple[str, ...] = ()
+
+    source: Literal["model", "code"] = "code"
+    #: Which sensing worlds opened incidents this tick. Two or more is the storm front, and
+    #: it is both the reason to call a model here and an escalation trigger in its own right
+    #: (`src/agent/CLAUDE.md`).
+    worlds: tuple[str, ...] = ()
+    work_orders: int = 0
+    violations: tuple[str, ...] = ()
+
+    provider: str = ""
+    model: str = ""
+    finish_reason: str = ""
+    latency_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    def render(self) -> str:
+        """The page as the person coming on shift reads it."""
+        lines = [self.headline or "(no headline)", ""]
+        if self.situation:
+            lines.extend([self.situation, ""])
+        lines.append("Priorities:")
+        lines.extend(f"  {i}. {p}" for i, p in enumerate(self.priorities, start=1))
+        if not self.priorities:
+            lines.append("  (none listed)")
+        if self.linked:
+            lines.extend(["", f"Read together as one event: {', '.join(self.linked)}"])
+        if self.escalations:
+            lines.extend(["", "Escalate:", *(f"  - {e}" for e in self.escalations)])
+        lines.extend(["", f"Worlds: {', '.join(self.worlds) or 'none'} | {self.work_orders} work orders | assembled by {self.source}"])
+        if self.violations:
+            lines.append(f"VIOLATIONS: {', '.join(self.violations)}")
+        return "\n".join(lines)
+
+
 class RanchState(BaseModel):
     """What one tick knows, carried between stages.
 
@@ -176,9 +242,16 @@ class RanchState(BaseModel):
     ongoing: tuple[Incident, ...] = ()
     resolved: tuple[Incident, ...] = ()
     routed: dict[str, tuple[str, ...]] = Field(default_factory=dict)
-    #: The first stage that spends money. One per newly-opened incident whose owner has a
-    #: worker built; at M2 that is `water_feed` alone and the other four route to nobody.
+    #: The first stage that spends money. One per newly-opened incident, across all four
+    #: responders as of M3.
     work_orders: tuple[WorkOrder, ...] = ()
+    #: The sensing worlds that actually produced work orders this tick, in `RESPONDERS`
+    #: order. Two or more is the storm front: it is what makes the shift report a fusion
+    #: rather than a concatenation, and it is an escalation trigger in its own right.
+    worlds: tuple[str, ...] = ()
+    #: The supervisor's own page, assembled last. `None` on a tick that spent nothing,
+    #: because a tick with no work orders has no shift to report on.
+    shift_report: ShiftReport | None = None
 
     # Set BEFORE a stage is attempted, never after. A line reading `failed_stage: null`
     # next to an error says a tick died without saying where, which is the one question

@@ -68,6 +68,14 @@ pass is the failure mode this file exists to prevent.
 | an invented rule id is rejected | a citation points at something that exists | the SOP text stopped reaching the checker |
 | a call that never answered still produces a work order | an incident is never silently dropped | an exception path returns `None` instead of a `no_answer` order |
 | one agent raising is not an outage for the other ten | a tick survives one sub-agent failing | `gather_bounded` lost its per-task guard |
+| one **agent** raising is not an outage for the other three | a tick survives a whole slice failing, not just one packet | `fan_out` stopped catching per-agent exceptions, or dropped the packets it was carrying |
+| the concurrency ceiling is global across four agents | `AGENT_CONCURRENCY = 4` means four Opus calls in flight, not sixteen | the shared semaphore stopped being passed down and each agent bounds only itself |
+| every routed incident produces a work order | nothing that reached the fan-out is silently dropped | a grouping step lost a key, or an error path returned fewer orders than packets |
+| `herd_health` returns empty and logs nothing | the routing table working, not a gap (`docs/STATE.md` decision 5) | an idle agent started warning once per tick, which trains everyone to ignore the log |
+| one world reporting costs zero tokens | the supervisor's cost lever is the `if`, not the model | the `FUSION_THRESHOLD` check moved below the call |
+| a shift report linking an incident nobody handed over is thrown away | the fusion claim is checkable data rather than prose | `linked` stopped being compared against the keys the page carried |
+| a rejected shift report is replaced, never retried | the rail stays a rail instead of becoming a sampler | somebody added a second attempt to get a cleaner page |
+| a supervisor that never answered still produces a page | the person coming on shift is briefed whatever failed upstream | the fallback stopped carrying the work orders or the receipt |
 | a tick told not to spend produces zero work orders | the free pass is genuinely free | a spend stage ran above the `spend` check |
 | nothing a model reads carries an em dash | the house convention reaches the prompt too | a rewrite of the brief or an SOP |
 

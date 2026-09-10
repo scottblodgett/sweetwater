@@ -20,6 +20,7 @@ Never Supabase. The upstream is respx against a fake host and the ledger is the 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
@@ -37,7 +38,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
 from src.agent import agent
-from src.agent.agent import AGENTS, DEFAULT_OWNER, HERD_HEALTH, RESPONDERS, ROUTES, owner_for, owners_for, route, unrouted_categories
+from src.agent.agent import (
+    AGENTS,
+    DEFAULT_OWNER,
+    FUSION_THRESHOLD,
+    HERD_HEALTH,
+    RESPONDERS,
+    ROUTES,
+    SHIFT_REPORT_MAX_TOKENS,
+    assemble_shift_report,
+    check_shift_report,
+    owner_for,
+    owners_for,
+    render_shift_page,
+    route,
+    synthesize,
+    unrouted_categories,
+)
 from src.agent.executor import run_tick, summarize
 from src.agent.memory import (
     ALLOWED_SCHEMAS,
@@ -57,11 +74,11 @@ from src.agent.memory import (
     open_incidents,
     reconcile,
 )
-from src.agent.state import Finding, Incident, WorkOrder
-from src.agent.workers import citable_rules, run_water_feed, to_work_order
+from src.agent.state import Finding, Incident, RanchState, WorkOrder
+from src.agent.workers import AGENT_CONCURRENCY, citable_rules, fan_out, run_agent, run_water_feed, to_work_order
 from src.models.llm_client import THINKING_BUDGET, ModelResponse, call_tier2, resolve_provider
-from src.prompts.agent_prompts import MANDATES
-from src.prompts.system_prompts import WORK_ORDER_SCHEMA, system_prompt
+from src.prompts.agent_prompts import MANDATES, SUPERVISOR_MANDATE
+from src.prompts.system_prompts import SHIFT_REPORT_SCHEMA, WORK_ORDER_SCHEMA, system_prompt
 from src.tools.allowlists import DEPLOYED_TOOLS
 from src.tools.evidence import EvidencePacket, HistoryPoint, PastureContext, SiblingReading
 from src.tools.mcp_client import RanchMap, SensorRef, flatten_exception, parse_ranch_map
@@ -1177,3 +1194,288 @@ async def test_a_tick_told_not_to_spend_stops_at_the_end_of_the_free_pass(catalo
     assert state.opened, "the free pass still opened incidents"
     assert state.routed.get("water_feed"), "and still routed one to the agent that would have spent"
     assert state.work_orders == (), "and paid nothing to do it"
+    assert state.shift_report is not None and state.shift_report.source == "code", "the free pass still ends with a page, assembled in code"
+    assert state.shift_report.input_tokens == 0
+
+
+# --- the bounded fan-out ---------------------------------------------------- #
+def _packet(sensor_id: str, *, key: str = "", severity: str = "critical") -> EvidencePacket:
+    """One packet per sensor, cheap. The SOP text is real because the citation rail reads it."""
+    return EvidencePacket(
+        incident=TANK_INCIDENT.model_copy(update={"key": key or f"{sensor_id}:water_low", "sensor_id": sensor_id, "severity": severity}),
+        sop_name="water.md",
+        sop_text=WATER_SOP,
+    )
+
+
+def _fan(**by_agent: int) -> dict[str, tuple[EvidencePacket, ...]]:
+    return {agent: tuple(_packet(f"{agent}-sensor-{i}") for i in range(count)) for agent, count in by_agent.items()}
+
+
+async def _judged(packet: EvidencePacket, **_kw: object) -> WorkOrder:
+    """A finished work order without a model call. The recorded answer, one per packet."""
+    return to_work_order(packet=packet, agent="water_feed", response=_response(_answer()))
+
+
+async def test_the_concurrency_ceiling_is_global_and_not_one_per_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reason `fan_out` builds the semaphore instead of letting `run_agent` do it.
+
+    `AGENT_CONCURRENCY = 4` is a statement about how many Opus calls this repo will have in
+    flight. Four agents each bounding themselves at four is sixteen, which is the version of
+    this bug that passes every other test in this file and shows up as a 429 on a busy tick.
+    """
+    live = 0
+    peak = 0
+
+    async def _judge(packet: EvidencePacket, **_kw: object) -> WorkOrder:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.01)  # long enough that everything admitted piles up together
+        live -= 1
+        return await _judged(packet)
+
+    monkeypatch.setattr("src.agent.workers.judge_packet", _judge)
+    orders = await fan_out(_fan(water_feed=4, infrastructure=4, compliance=4, herd_health=4))
+
+    assert peak <= AGENT_CONCURRENCY, f"{peak} concurrent model calls against a ceiling of {AGENT_CONCURRENCY}"
+    assert sum(len(group) for group in orders.values()) == 16, "and all sixteen still got answered"
+
+
+async def test_one_agent_raising_is_not_an_outage_for_the_other_three(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run_agent` already survives a raising packet. This is the other failure: the call to
+    `run_agent` itself blowing up before any packet does, which without this takes three other
+    agents' finished work down with it."""
+    real = run_agent
+
+    async def _run(agent: str, packets: object, **kw: object) -> tuple[WorkOrder, ...]:
+        if agent == "infrastructure":
+            raise RuntimeError("the infrastructure slice is misconfigured")
+        return await real(agent, packets, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("src.agent.workers.judge_packet", _judged)
+    monkeypatch.setattr("src.agent.workers.run_agent", _run)
+    with capture_logs() as logs:
+        orders = await fan_out(_fan(water_feed=2, infrastructure=2, compliance=1))
+
+    assert [o.status for o in orders["water_feed"]] == ["ok", "ok"], "the other agents finished"
+    assert [o.status for o in orders["compliance"]] == ["ok"]
+    assert [o.status for o in orders["infrastructure"]] == ["no_answer", "no_answer"], "and the failed one produced a work order per packet rather than nothing"
+    assert all(o.violations == ("agent_raised",) for o in orders["infrastructure"])
+    assert all("misconfigured" in o.assessment for o in orders["infrastructure"]), "with the reason kept, because somebody has to fix the slice"
+    assert any(entry["event"] == "agent_raised" for entry in logs)
+
+
+async def test_every_routed_incident_produces_a_work_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The invariant the fan-out exists to hold. An incident nobody was handed is an incident
+    nobody is paged about, which is indistinguishable from a ranch with nothing wrong."""
+    monkeypatch.setattr("src.agent.workers.judge_packet", _judged)
+    packets = _fan(water_feed=3, infrastructure=5, compliance=1)
+    orders = await fan_out(packets)
+
+    for name, group in packets.items():
+        assert {o.incident_key for o in orders[name]} == {p.incident.key for p in group}
+
+
+async def test_herd_health_is_handed_nothing_and_nobody_logs_a_fault_about_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`docs/STATE.md` decision 5 working correctly rather than a gap. `herd_health` cannot read
+    a sensor and nothing writes animal events until chaos does at M5, so it is handed nothing on
+    every tick. A warning per tick per idle agent trains everyone to ignore the log."""
+    monkeypatch.setattr("src.agent.workers.judge_packet", _judged)
+    with capture_logs() as logs:
+        orders = await fan_out(_fan(water_feed=1, herd_health=0, infrastructure=1, compliance=0))
+
+    assert orders["herd_health"] == () and orders["compliance"] == ()
+    assert set(orders) == set(RESPONDERS), "asked-and-found-nothing has to stay distinguishable from never-asked"
+    assert not [entry for entry in logs if entry.get("agent") == "herd_health"], "an idle agent produces no line at all, not even an info one"
+    assert next(entry for entry in logs if entry["event"] == "fan_out_start")["worlds"] == 2, "and an idle agent is not a world"
+
+
+async def test_a_fan_out_with_nothing_in_it_calls_nobody() -> None:
+    """A calm tick reaches this stage with four empty lists. `conftest.no_model_calls` is what
+    makes a regression here bill instead of pass."""
+    assert await fan_out({agent: () for agent in RESPONDERS}) == {agent: () for agent in RESPONDERS}
+
+
+# --- the shift report ------------------------------------------------------- #
+def _wo(agent: str, key: str, *, severity: str = "warning", headline: str = "", status: str = "ok", escalate: bool = False, **kw: object) -> WorkOrder:
+    return WorkOrder(
+        incident_key=key,
+        agent=agent,
+        severity=severity,  # type: ignore[arg-type]
+        headline=headline or f"something is wrong at {key}",
+        assessment="Two sentences of prose a supervisor is going to read and fuse with somebody else's.",
+        actions=("Roll a truck",),
+        status=status,  # type: ignore[arg-type]
+        escalate=escalate,
+        escalate_reason="the standing orders say the general manager hears about this" if escalate else "",
+        **kw,  # type: ignore[arg-type]
+    )
+
+
+#: Two worlds, one location. The shape the free pass already produces most ticks on this ranch,
+#: which is why cross-domain fusion is testable at M3 without `chaos`.
+STORM = (
+    _wo("water_feed", "alkali-flat-water:water_low", severity="critical", headline="Alkali Flat tank dry at 1.9 gal, 111 head"),
+    _wo("infrastructure", "alkali-flat-battery:power_low", headline="Alkali Flat solar battery at 11%"),
+)
+
+
+def _report_payload(**over: object) -> dict[str, object]:
+    return {
+        "headline": "Alkali Flat is failing as one site: dead battery, blind tank, 111 head",
+        "situation": "The battery at 11% and the tank reading 1.9 gal are one failure seen twice. The pump and the telemetry radio run off the same panel, so the tank has probably been low longer than the sweep can show.",
+        "priorities": [
+            "Haul water to Alkali Flat now, 111 head and no reserve behind the tank",
+            "Swap the panel or the battery on the same trip, because a blind tank is why this was found late",
+        ],
+        "linked": ["alkali-flat-water:water_low", "alkali-flat-battery:power_low"],
+        "escalations": [],
+    } | over
+
+
+def _supervisor(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object] | None, *, finish_reason: str = "tool_use") -> list[dict[str, object]]:
+    """Stand in for the one Opus call this stage may make, and record that it happened."""
+    calls: list[dict[str, object]] = []
+
+    async def _call(**kw: object) -> ModelResponse:
+        calls.append(kw)
+        return _response(payload, finish_reason=finish_reason)
+
+    monkeypatch.setattr("src.models.llm_client.call_tier2", _call)
+    return calls
+
+
+def _state(orders: tuple[WorkOrder, ...]) -> RanchState:
+    return RanchState(run_id="test", tick=1, work_orders=orders, worlds=tuple(agent for agent in RESPONDERS if any(o.agent == agent for o in orders)))
+
+
+async def test_one_world_reporting_is_assembled_in_code_and_costs_nothing() -> None:
+    """The whole cost decision in this stage is one `if`. One world is a concatenation of length
+    one, and paying Opus to reformat a single agent's work orders buys a header.
+    `conftest.no_model_calls` is what makes this test fail loudly rather than bill."""
+    report = await synthesize(_state(STORM[:1]))
+    assert report.source == "code" and report.input_tokens == 0 and report.output_tokens == 0
+    assert report.worlds == ("water_feed",)
+    assert report.linked == (), "code claims nothing about causation, ever"
+    assert "Alkali Flat tank dry at 1.9 gal" in report.render(), "and the work order's own headline is what the priority line says"
+
+
+async def test_two_worlds_is_the_storm_front_and_the_one_shape_worth_paying_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The condition `src/agent/CLAUDE.md` already names as an escalation trigger, reused as the
+    spend gate. It is the first tick where an incident in one world can explain an incident in
+    another, which is the only thing a model is being bought for here."""
+    assert FUSION_THRESHOLD == 2
+    calls = _supervisor(monkeypatch, _report_payload())
+    report = await synthesize(_state(STORM))
+
+    assert len(calls) == 1, "one call per tick, never one per work order"
+    assert report.source == "model" and report.violations == ()
+    assert report.linked == ("alkali-flat-water:water_low", "alkali-flat-battery:power_low")
+    assert report.input_tokens == 5555, "and the receipt is kept, because this is the tick's second-largest bill"
+    assert calls[0]["agent"] == "supervisor" and calls[0]["max_tokens"] == SHIFT_REPORT_MAX_TOKENS
+
+
+async def test_the_supervisor_does_not_inherit_the_workers_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`INHERITED_RULES` describes judging one evidence packet and writing a work order, which is
+    not this job. A brief whose first paragraph is somebody else's task is worse than no brief."""
+    calls = _supervisor(monkeypatch, _report_payload())
+    await synthesize(_state(STORM))
+
+    assert calls[0]["system"] == SUPERVISOR_MANDATE
+    assert "SEVERITY IS NOT YOURS" not in SUPERVISOR_MANDATE, "the workers' rule 1 tells you to echo a field this job does not have"
+    assert "DO NOT RE-RANK SEVERITY" in SUPERVISOR_MANDATE, "the supervisor's version, which is about ordering rather than echoing"
+    assert "—" not in SUPERVISOR_MANDATE
+    assert "supervisor" not in MANDATES, "the supervisor is not a responder: no slice, no packet, no route"
+
+
+async def test_a_report_linking_an_incident_nobody_handed_over_is_thrown_away(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`invented_rule` pointed at a different output. `linked` is the report's causal claim and
+    code knows exactly which keys it handed over, so a fabricated one is cheap to catch and
+    sends somebody looking for an incident that does not exist."""
+    calls = _supervisor(monkeypatch, _report_payload(linked=["alkali-flat-water:water_low", "windmill-pasture-fence:fence_down"]))
+    with capture_logs() as logs:
+        report = await synthesize(_state(STORM))
+
+    assert len(calls) == 1, "replaced, never retried: a retry loop turns the rail into a sampler"
+    assert report.source == "code" and "invented_incident" in report.violations
+    assert report.provider == "bedrock" and report.model, "the receipt survives the rejection, because the call was still billed"
+    assert any(entry["event"] == "shift_report_invented_incident" for entry in logs)
+
+
+async def test_a_report_that_tells_nobody_to_do_anything_is_an_all_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Code found every one of these before the supervisor was called, so a quiet page is a
+    contradiction rather than a finding."""
+    _supervisor(monkeypatch, _report_payload(priorities=["Continue to monitor Alkali Flat", "No further action this shift"]))
+    report = await synthesize(_state(STORM))
+    assert "all_clear" in report.violations and report.source == "code"
+
+
+async def test_an_accurate_situation_sentence_is_not_an_all_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Why the rail reads the priorities and the headline and never the `situation` prose. "The
+    only real problem tonight is the tank" is the correct summary of a thin tick, and a rail that
+    punishes accurate writing gets switched off inside a week."""
+    _supervisor(monkeypatch, _report_payload(situation="Nothing else on the ranch is wrong tonight. The tank at Alkali Flat is the only real problem, and the battery is why it was found late."))
+    report = await synthesize(_state(STORM))
+    assert report.violations == () and report.source == "model"
+
+
+async def test_a_supervisor_that_never_answered_still_produces_a_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The person coming on shift needs a page whatever happened upstream. The fallback is the
+    same function that writes every calm tick's report, which is why it is the best-tested path
+    in the stage rather than one nobody has read."""
+    _supervisor(monkeypatch, None, finish_reason="transport_error")
+    report = await synthesize(_state(STORM))
+
+    assert report.source == "code"
+    assert report.violations == ("no_payload", "transport_error")
+    assert report.finish_reason == "transport_error", "and the receipt says which failure it was"
+    assert "Alkali Flat tank dry" in report.render(), "the work orders are still on the page"
+
+
+def test_the_code_page_never_writes_an_all_clear_even_with_nothing_to_report() -> None:
+    """No work orders and a healthy ranch are different claims, and only one of them is true.
+    The empty tick is the case where a template most wants to say the wrong one."""
+    report = assemble_shift_report((), worlds=())
+    violations, _ = check_shift_report({"headline": report.headline, "situation": report.situation, "priorities": list(report.priorities), "linked": [], "escalations": []}, keys=frozenset())
+
+    assert "all_clear" in violations, "the rail agrees there is no instruction on this page"
+    assert "nothing here reports on the shift" in report.headline
+    assert "not a statement about the ranch" in report.situation
+
+
+def test_the_code_page_ranks_by_triage_severity_and_names_the_storm_front() -> None:
+    orders = (_wo("compliance", "east-creek-flow:stream_flow_low"), *STORM)
+    report = assemble_shift_report(orders, worlds=("water_feed", "infrastructure", "compliance"))
+
+    assert report.priorities[0].startswith("critical:"), "triage's ranking, not a model's"
+    assert "3 worlds" in report.headline and "1 critical" in report.headline
+    assert "storm-front trigger" in report.escalations[0], "two or more worlds in one tick is an escalation in its own right"
+    assert "nothing here claims a connection between them" in report.situation, "and code says out loud that it fused nothing"
+
+
+def test_an_incident_nobody_could_judge_is_on_the_page_rather_than_dropped() -> None:
+    """The one thing the supervisor can say that no responder could: somebody has to go look at
+    this, because the system could not."""
+    orders = (STORM[0], _wo("infrastructure", "windmill-pasture-fence:fence_down", status="no_answer", violations=("no_payload", "transport_error")))
+    page = render_shift_page(orders)
+    report = assemble_shift_report(orders, worlds=("water_feed", "infrastructure"))
+
+    assert "NO USABLE WORK ORDER" in page and "windmill-pasture-fence:fence_down" in page
+    assert "Alkali Flat tank dry" in page, "and the one that did get judged is rendered in full"
+    assert "should be treated as unworked" in report.situation
+    assert any("was not judged" in p for p in report.priorities)
+
+
+def test_a_work_order_asking_to_escalate_reaches_the_page_once() -> None:
+    report = assemble_shift_report((_wo("water_feed", "alkali-flat-water:water_low", escalate=True),), worlds=("water_feed",))
+    assert len(report.escalations) == 1 and "general manager" in report.escalations[0]
+
+
+def test_the_shift_report_schema_makes_the_fusion_claim_checkable() -> None:
+    """`linked` has to be a list of keys rather than prose, because "the battery and the tank are
+    one problem" in a sentence is a claim no rail can verify."""
+    assert set(SHIFT_REPORT_SCHEMA["required"]) == set(SHIFT_REPORT_SCHEMA["properties"])
+    assert SHIFT_REPORT_SCHEMA["properties"]["linked"]["items"] == {"type": "string"}
+    assert SHIFT_REPORT_SCHEMA["properties"]["priorities"]["minItems"] == 1, "a report with no priorities is an all-clear in a different shape"
+    assert SHIFT_REPORT_SCHEMA["additionalProperties"] is False

@@ -1,9 +1,18 @@
-"""The sub-agents that spend money. M2 builds exactly one of them: `water_feed`.
+"""The sub-agents that spend money. Four responders as of M3, and Tier 2 for all of them.
 
-One agent, not five, and Tier 2 only. The point of M2 is a work order that reads well at
-the sharpest finding on the ranch ("the tank at Alkali Flat is dry"), and one agent proves
-the shape end to end. The other four arrive at M3 with their briefs, and the tier cascade
-arrives at M7 with a rail and a ledger row per job moved.
+M2 built one, `water_feed`, to prove the shape end to end against the sharpest finding on the
+ranch ("the tank at Alkali Flat is dry"). M3 generalizes it: `run_agent` is that function with
+the agent name as an argument, and `fan_out` runs the four of them under one ceiling. The
+tier cascade still arrives at M7, with a rail and a ledger row per job moved.
+
+**Four agents, one function.** What differs between them is their brief, their SOP set, and
+which sensor types reach them, and all three are data rather than behaviour: the brief comes
+from `agent_prompts.MANDATES`, the SOP from the packet, and the routing from `agent.ROUTES`.
+Four near-identical bodies would be four places for a rail to be applied in three of them.
+
+`herd_health` is handed nothing on every tick and returns empty, because it cannot read a
+sensor and nothing writes animal events until chaos does at M5. That is the routing table
+working correctly rather than a gap, so it is not logged as one.
 
 ## There is no tool loop here, and that is the architecture
 
@@ -44,6 +53,7 @@ passes turns the rail into a sampler and destroys the only measurement M7 will h
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -52,7 +62,7 @@ from src.agent.state import Incident, Severity, WorkOrder
 from src.models.llm_client import ModelResponse, call_tier2
 from src.prompts.system_prompts import WORK_ORDER_SCHEMA, WORK_ORDER_TOOL, WORK_ORDER_TOOL_DESCRIPTION, system_prompt
 from src.tools.evidence import EvidencePacket
-from src.utils.helpers import gather_bounded
+from src.utils.helpers import as_strings, gather_bounded, has_no_real_instruction
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -77,10 +87,6 @@ MAX_OUTPUT_TOKENS = 2_048
 #: true by definition instead of by luck.
 _RULE_HEADING = re.compile(r"^#+\s*([A-Z][A-Z-]*-\d+)\b", re.MULTILINE)
 
-#: An action that is not an action. Anchored at the start so "check the float and monitor
-#: the level after the haul" survives, because that one has a person doing something first.
-_NO_OP_ACTION = re.compile(r"^\W*(no action|none|nothing|no further|monitor|continue to monitor|keep monitoring|observe|await|wait and see|take no)\b", re.IGNORECASE)
-
 #: Only in a headline, where an all-clear is stated rather than implied. Deliberately not
 #: run over `assessment`.
 _ALL_CLEAR_HEADLINE = re.compile(r"\b(all clear|no action (required|needed)|nothing to do|no issue|no problem|false alarm|within normal)\b", re.IGNORECASE)
@@ -93,19 +99,6 @@ def citable_rules(sop_text: str) -> frozenset[str]:
     return frozenset(_RULE_HEADING.findall(sop_text))
 
 
-def _no_real_action(actions: tuple[str, ...]) -> bool:
-    return not actions or all(_NO_OP_ACTION.match(a) for a in actions)
-
-
-def _strings(raw: Any) -> tuple[str, ...]:
-    """A list of non-empty strings, tolerantly. A forced tool call is not a guarantee."""
-    if isinstance(raw, str):
-        return (raw.strip(),) if raw.strip() else ()
-    if isinstance(raw, list):
-        return tuple(str(item).strip() for item in raw if str(item).strip())
-    return ()
-
-
 def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket) -> tuple[list[str], dict[str, Any]]:
     """`(violations, cleaned)`. The only place a model's answer is judged.
 
@@ -115,11 +108,11 @@ def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket
     cleaned: dict[str, Any] = {
         "headline": str(payload.get("headline") or "").strip(),
         "assessment": str(payload.get("assessment") or "").strip(),
-        "actions": _strings(payload.get("actions")),
-        "rules_cited": _strings(payload.get("rules_cited")),
+        "actions": as_strings(payload.get("actions")),
+        "rules_cited": as_strings(payload.get("rules_cited")),
         "escalate": bool(payload.get("escalate")),
         "escalate_reason": str(payload.get("escalate_reason") or "").strip(),
-        "unknowns": _strings(payload.get("unknowns")),
+        "unknowns": as_strings(payload.get("unknowns")),
         "severity_echo": str(payload.get("severity_echo") or "").strip().lower(),
     }
 
@@ -128,7 +121,7 @@ def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket
         violations.append("schema_invalid")
     if cleaned["severity_echo"] != incident.severity:
         violations.append("severity_mismatch")
-    if _no_real_action(cleaned["actions"]) or _ALL_CLEAR_HEADLINE.search(cleaned["headline"]):
+    if has_no_real_instruction(cleaned["actions"]) or _ALL_CLEAR_HEADLINE.search(cleaned["headline"]):
         violations.append("all_clear")
 
     citable = citable_rules(packet.sop_text)
@@ -206,18 +199,37 @@ async def judge_packet(packet: EvidencePacket, *, agent: str = WATER_FEED, reaso
     return to_work_order(packet=packet, agent=agent, response=response)
 
 
-async def run_water_feed(packets: tuple[EvidencePacket, ...] | list[EvidencePacket], *, reasoning_effort: str = "none", limit: int = AGENT_CONCURRENCY) -> tuple[WorkOrder, ...]:
-    """Every water_feed packet this tick, bounded. One raising agent is not an outage.
+async def run_agent(
+    agent: str,
+    packets: tuple[EvidencePacket, ...] | list[EvidencePacket],
+    *,
+    reasoning_effort: str = "none",
+    limit: int = AGENT_CONCURRENCY,
+    sem: asyncio.Semaphore | None = None,
+) -> tuple[WorkOrder, ...]:
+    """Every packet this agent was routed this tick, bounded. One raising packet is not an outage.
 
-    `gather_bounded` returns exceptions as values, and one packet blowing up has to leave
-    the other ten alone: `src/agent/CLAUDE.md` requires a tick to survive one sub-agent
-    raising, and eleven incidents behind one unhandled error is ten pastures nobody hears
-    about.
+    `gather_bounded` returns exceptions as values, and one packet blowing up has to leave the
+    other ten alone: `src/agent/CLAUDE.md` requires a tick to survive one sub-agent raising,
+    and eleven incidents behind one unhandled error is ten pastures nobody hears about.
+
+    **One function for four agents, not four functions.** The agents differ in their brief,
+    their SOP set, and which sensor types reach them - all three of which are data this
+    function is handed rather than behaviour it contains. Four near-identical bodies would be
+    four places for a rail to be applied in three of them.
+
+    **An empty list returns empty and does not log.** `herd_health` cannot read a sensor, so
+    no sensor incident routes to it and it is handed nothing on every tick until chaos writes
+    real animal events at M5. That is the routing table working, not a fault, and a warning
+    line per tick per idle agent trains everyone to ignore the log.
+
+    `sem` is the fan-out's shared ceiling. Absent, this bounds itself, which is right for a
+    single agent called directly.
     """
     if not packets:
         return ()
 
-    results = await gather_bounded([judge_packet(p, reasoning_effort=reasoning_effort) for p in packets], limit=limit)
+    results = await gather_bounded([judge_packet(p, agent=agent, reasoning_effort=reasoning_effort) for p in packets], limit=limit, sem=sem)
 
     orders: list[WorkOrder] = []
     for packet, outcome in zip(packets, results, strict=True):
@@ -225,21 +237,93 @@ async def run_water_feed(packets: tuple[EvidencePacket, ...] | list[EvidencePack
             orders.append(outcome)
             continue
         detail = f"{type(outcome).__name__}: {outcome}"
-        log.error("worker_raised", incident=packet.incident.key, agent=WATER_FEED, error=detail)
-        orders.append(WorkOrder(incident_key=packet.incident.key, agent=WATER_FEED, severity=packet.incident.severity, status="no_answer", violations=("worker_raised",), assessment=detail))
+        log.error("worker_raised", incident=packet.incident.key, agent=agent, error=detail)
+        orders.append(WorkOrder(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, status="no_answer", violations=("worker_raised",), assessment=detail))
 
-    shipped = sum(1 for o in orders if o.shippable)
     log.info(
-        "water_feed_complete",
+        "agent_complete",
+        agent=agent,
         packets=len(orders),
-        shipped=shipped,
+        shipped=sum(1 for o in orders if o.shippable),
         rejected=sum(1 for o in orders if o.status == "rejected"),
         no_answer=sum(1 for o in orders if o.status == "no_answer"),
         escalated=sum(1 for o in orders if o.escalate),
+        sops=sorted({p.sop_name for p in packets if p.sop_name}),
         input_tokens=sum(o.input_tokens for o in orders),
         output_tokens=sum(o.output_tokens for o in orders),
     )
     return tuple(orders)
 
 
-__all__ = ["AGENT_CONCURRENCY", "BLOCKING_VIOLATIONS", "MAX_OUTPUT_TOKENS", "check", "citable_rules", "judge_packet", "run_water_feed", "to_work_order"]
+async def run_water_feed(packets: tuple[EvidencePacket, ...] | list[EvidencePacket], *, reasoning_effort: str = "none", limit: int = AGENT_CONCURRENCY) -> tuple[WorkOrder, ...]:
+    """M2's entry point, kept as one line over `run_agent`.
+
+    Not deleted, because `water_feed` is the only agent whose output has been measured against
+    a real ranch (19 orders, 19 shipped, 0 rejected) and the calibration fixture in
+    `tests/test_agent.py` is a recording of this call. A wrapper costs nothing and keeps the
+    named thing those measurements refer to.
+    """
+    return await run_agent(WATER_FEED, packets, reasoning_effort=reasoning_effort, limit=limit)
+
+
+async def fan_out(
+    packets_by_agent: dict[str, tuple[EvidencePacket, ...]],
+    *,
+    reasoning_effort: str = "none",
+    limit: int = AGENT_CONCURRENCY,
+) -> dict[str, tuple[WorkOrder, ...]]:
+    """All four responders at once, under **one** ceiling. The bounded fan-out.
+
+    Two things this function exists to get right, both of which a plain
+    `asyncio.gather(*[run_agent(a, p) for ...])` gets wrong:
+
+      * **The ceiling is global.** `AGENT_CONCURRENCY = 4` is a statement about how many Opus
+        calls this repo will have in flight, and four agents each bounding themselves at four
+        is sixteen. The semaphore is built here, once, and handed down. This is the only place
+        that number means what it says.
+      * **An agent failing is not the tick failing.** `run_agent` already contains a raising
+        *packet*, but the call to `run_agent` itself can fail before any packet does - an
+        agent with no brief, a bad slice, an import-time error in a new worker - and that
+        would take the other three agents' work orders down with it. So each agent is a task
+        whose exception becomes a `no_answer` order per packet it was carrying, which keeps
+        the invariant that matters: **every routed incident produces a work order, always.**
+
+    Returns a dict keyed by agent, including agents that returned nothing, so the shift report
+    can tell "asked, found nothing" apart from "never asked."
+    """
+    live = {agent: tuple(packets) for agent, packets in packets_by_agent.items() if packets}
+    if not live:
+        return {agent: () for agent in packets_by_agent}
+
+    sem = asyncio.Semaphore(limit)
+    agents = sorted(live)
+    log.info("fan_out_start", agents=agents, packets={a: len(live[a]) for a in agents}, ceiling=limit, worlds=len(agents))
+
+    results = await asyncio.gather(*(run_agent(agent, live[agent], reasoning_effort=reasoning_effort, sem=sem) for agent in agents), return_exceptions=True)
+
+    orders: dict[str, tuple[WorkOrder, ...]] = {agent: () for agent in packets_by_agent}
+    for agent, outcome in zip(agents, results, strict=True):
+        if isinstance(outcome, BaseException):
+            detail = f"{type(outcome).__name__}: {outcome}"
+            log.error("agent_raised", agent=agent, packets=len(live[agent]), error=detail)
+            orders[agent] = tuple(
+                WorkOrder(incident_key=p.incident.key, agent=agent, severity=p.incident.severity, status="no_answer", violations=("agent_raised",), assessment=detail) for p in live[agent]
+            )
+            continue
+        orders[agent] = outcome
+
+    flat = [o for group in orders.values() for o in group]
+    log.info(
+        "fan_out_complete",
+        agents=agents,
+        work_orders=len(flat),
+        shipped=sum(1 for o in flat if o.shippable),
+        rejected=sum(1 for o in flat if o.status == "rejected"),
+        no_answer=sum(1 for o in flat if o.status == "no_answer"),
+        input_tokens=sum(o.input_tokens for o in flat),
+        output_tokens=sum(o.output_tokens for o in flat),
+    )
+    return orders
+
+
+__all__ = ["AGENT_CONCURRENCY", "BLOCKING_VIOLATIONS", "MAX_OUTPUT_TOKENS", "check", "citable_rules", "fan_out", "judge_packet", "run_agent", "run_water_feed", "to_work_order"]

@@ -120,6 +120,50 @@ WORK_ORDER_SCHEMA: dict[str, Any] = {
 WORK_ORDER_TOOL = "write_work_order"
 WORK_ORDER_TOOL_DESCRIPTION = "Record the work order for this one incident. The only way to answer; do not reply in prose."
 
+#: The supervisor's schema, arriving at M3. Forced tool call for the same reason: `linked` has
+#: to be a list of keys code can check against the keys it handed over, and a model asked for
+#: prose writes "the battery and the tank at Alkali Flat are one problem" in a sentence that
+#: no rail can verify.
+#:
+#: `situation` is the only field whose description says what NOT to write. It is the field the
+#: whole page lives or dies on and the one a model most wants to turn into a list.
+SHIFT_REPORT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "headline": {
+            "type": "string",
+            "description": "The one line the person coming on shift reads first. What is happening to this ranch right now, not how many work orders there are. Under 120 characters, no trailing period.",
+        },
+        "situation": {
+            "type": "string",
+            "description": "Two to five sentences fusing the work orders into one picture: what is going on, what is causing what, and where two problems are actually one. Do NOT summarize each agent in turn. If this reads as one sentence per world, it is wrong.",
+        },
+        "priorities": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": 6,
+            "description": "What the shift does, in the order it does it, across every world. First item is what happens now. Say why the first one is first. At most six: a ranked list nobody can hold in their head is an unranked list.",
+        },
+        "linked": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Incident keys you are claiming belong to one event, spelled exactly as printed on the page. Checked in code against the keys you were given. Empty when nothing genuinely connects, which is an honest answer and a common one.",
+        },
+        "escalations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 4,
+            "description": "One line each for what a human above the crew needs to know. A work order that already asked to escalate belongs here, said once, in the supervisor's words rather than copied.",
+        },
+    },
+    "required": ["headline", "situation", "priorities", "linked", "escalations"],
+    "additionalProperties": False,
+}
+
+SHIFT_REPORT_TOOL = "write_shift_report"
+SHIFT_REPORT_TOOL_DESCRIPTION = "Record the one shift report for this tick. The only way to answer; do not reply in prose."
+
 
 def system_prompt(agent: str, *, mandate: str = "") -> str:
     """The full brief for one sub-agent: inherited rules, then its patch.

@@ -1,10 +1,17 @@
-"""The continuous loop. In M1 that is one tick, and the tick is the free pass.
+"""The continuous loop. In M3 that is one tick, all nine stages of it.
 
-    catalog -> sweep -> triage -> reconcile -> route
+    catalog -> sweep -> triage -> reconcile -> route      free
+      -> evidence -> fan_out -> synthesize                spends
 
-Five stages, zero tokens. The fan-out and the synthesis that cost money arrive at M2 and
-hang off `state.routed`, which is why this returns a `RanchState` rather than an exit
-code: the graph at M4 needs exactly this object, and `main.py` needs one integer.
+Five stages, zero tokens, and they are what narrows 160 sensors down to what is actually
+wrong. Only what comes out of `route` reaches a model. This returns a `RanchState` rather
+than an exit code because the graph at M4 needs exactly this object, and `main.py` needs
+one integer.
+
+**`synthesize` sits outside the spend guard.** It is the one stage that decides for itself
+whether it costs anything: one world reporting has nothing to fuse and is assembled in
+code, so a calm tick and the whole `spend=False` pass still end with a shift report and
+still pay nothing for it.
 
 Cadence, backoff, and graceful shutdown wrap `run_tick` here at M4. They belong in this
 module rather than in `main.py`, which owns argument parsing and an exit code and nothing
@@ -23,11 +30,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src.agent.agent import WATER_FEED, owners_for, route
+from src.agent.agent import RESPONDERS, owners_for, route, synthesize
 from src.agent.memory import StoreTarget, counts_by_status, reconcile, resolve_store, store_session
 from src.agent.state import RanchState
-from src.agent.workers import run_water_feed
-from src.tools.evidence import assemble
+from src.agent.workers import fan_out
+from src.tools.evidence import EvidencePacket, assemble
 from src.tools.sensors import fetch_catalog, sweep
 from src.tools.triage import triage_sweep
 from src.utils.logger import Stopwatch, bind_tick, get_logger, get_run_id, log_tick
@@ -97,16 +104,34 @@ async def run_tick(*, tick: int = 1, store: StoreTarget | None = None, now: date
         state.routed = route(result.opened)
 
         # --- from here on the tick costs money ---------------------------------
-        # Skipped entirely, both stages, when nothing new opened. A calm tick must not pay
-        # for a roster call it has no packet to put in.
-        water_feed_keys = frozenset(state.routed.get(WATER_FEED, ()))
-        newly_opened = tuple(inc for inc in result.opened if inc.key in water_feed_keys)
+        # Skipped entirely, all three stages, when nothing new opened. A calm tick must not
+        # pay for a roster call it has no packet to put in.
+        #
+        # Every routed incident, not just water_feed's. M2 filtered to one agent here; M3's
+        # whole point is that the four of them are worked in the same pass, because an
+        # incident nobody was handed is an incident nobody is paged about.
+        routed_keys = {key: agent for agent, keys in state.routed.items() for key in keys}
+        newly_opened = tuple(inc for inc in result.opened if inc.key in routed_keys)
         if newly_opened and spend:
             state.failed_stage = "evidence"
+            # One assemble call for all four agents. The roster is fetched once per tick, so
+            # four agents' packets cost the same HTTP as one agent's did.
             packets = await assemble(newly_opened, readings=swept.readings, ranch_map=ranch_map)
 
-            state.failed_stage = "water_feed"
-            state.work_orders = await run_water_feed(packets)
+            state.failed_stage = "fan_out"
+            by_agent: dict[str, list[EvidencePacket]] = {agent: [] for agent in RESPONDERS}
+            for packet in packets:
+                by_agent[routed_keys[packet.incident.key]].append(packet)
+            orders = await fan_out({agent: tuple(group) for agent, group in by_agent.items()})
+            state.work_orders = tuple(o for agent in RESPONDERS for o in orders[agent])
+            state.worlds = tuple(agent for agent in RESPONDERS if orders[agent])
+
+        # Outside the spend block, and on every tick, because it is free unless it has
+        # something to fuse. `synthesize` calls a model only when two or more worlds opened
+        # incidents; a calm tick and the whole free pass get the code-assembled page for
+        # nothing. A tick that ends with no page at all is a shift nobody was briefed on.
+        state.failed_stage = "synthesize"
+        state.shift_report = await synthesize(state, spend=spend)
 
         state.failed_stage = None
     # Broad on purpose: a tick reports its own failure and never propagates one, because
@@ -134,8 +159,14 @@ async def run_tick(*, tick: int = 1, store: StoreTarget | None = None, now: date
         escalated=sum(1 for o in state.work_orders if o.escalate),
         # The M2 verification lives on this pair: token cost stays flat across sweeps while
         # incident count moves, because only newly-opened incidents reach a model.
-        input_tokens=sum(o.input_tokens for o in state.work_orders),
-        output_tokens=sum(o.output_tokens for o in state.work_orders),
+        input_tokens=sum(o.input_tokens for o in state.work_orders) + (state.shift_report.input_tokens if state.shift_report else 0),
+        output_tokens=sum(o.output_tokens for o in state.work_orders) + (state.shift_report.output_tokens if state.shift_report else 0),
+        # Which worlds reported, and whether the supervisor paid to fuse them. `worlds` is the
+        # storm-front count and `shift_report` is what it cost, so the two together are the
+        # only way to read a tick's synthesis spend off one line.
+        worlds=list(state.worlds),
+        shift_report=state.shift_report.source if state.shift_report else None,
+        shift_report_violations=list(state.shift_report.violations) if state.shift_report else [],
         ledger=ledger,
         error=state.error,
         failed_stage=state.failed_stage,
@@ -152,7 +183,8 @@ def summarize(state: RanchState) -> str:
     if state.work_orders:
         tokens = sum(o.input_tokens + o.output_tokens for o in state.work_orders)
         spend = f", {sum(1 for o in state.work_orders if o.shippable)}/{len(state.work_orders)} work orders shipped on {tokens} tokens"
+    report = f", shift report {state.shift_report.source}" if state.shift_report else ""
     return (
         f"tick {state.tick} ok - {state.sensors_read} read ({state.sensors_failed} failed) via {state.catalog_source}, "
-        f"{len(state.findings)} findings, opened {len(state.opened)} / ongoing {len(state.ongoing)} / resolved {len(state.resolved)}, routed to {fan}{spend}"
+        f"{len(state.findings)} findings, opened {len(state.opened)} / ongoing {len(state.ongoing)} / resolved {len(state.resolved)}, routed to {fan}{spend}{report}"
     )
