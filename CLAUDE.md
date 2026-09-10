@@ -22,7 +22,10 @@ in this order, no exceptions:
 2. **Update the docs.** `docs/JOURNEY.md` gets what actually happened, what diverged from
    the plan, and every defect the phase caught in itself. `docs/cookbook.md` gets any
    lesson general enough to bite again. Touch `docs/model-routing.md` if a job changed
-   tiers, and the relevant nested `CLAUDE.md` if a rule changed.
+   tiers, and the relevant nested `CLAUDE.md` if a rule changed. Then **run every command
+   the docs claim works**, including the Commands block below: M0 shipped a documented
+   command the repo's own config could never satisfy, and no test caught it because tests
+   do not read markdown.
 3. **Commit** to `master` (Scott's preferred default branch name, not `main`). No
    feature branches, no PRs.
 4. **Stop and check in with Scott.** Do not roll into the next phase unprompted.
@@ -75,23 +78,28 @@ only way to reach ranch data is over HTTP through the deployed APIs.
 
 ```bash
 python main.py --handshake   # prove the deployed ranch is reachable, then exit
-python main.py --once        # exactly one tick
-python main.py               # the continuous loop
-python main.py --api         # read API only
+python main.py --once        # exactly one tick        (stub until M1, exits 3)
+python main.py               # the continuous loop     (stub until M4, exits 3)
+python main.py --api         # read API only           (stub until M8, exits 3)
 
 pytest
-ruff check . && ruff format --check .
+ruff check .                 # the whole lint gate; `ruff format` is not used, see below
 mypy src main.py
 ```
 
-Windows venv: `.venv/Scripts/python.exe`. No Docker until M9 - the upstreams are
+An unbuilt mode exits **3** with a `not_implemented` line naming the milestone that
+brings it, rather than failing as if it were broken.
+
+Windows venv: `.venv/Scripts/python.exe`. No Docker until M10 - the upstreams are
 already deployed and `sw_ops` is in Supabase, so there is nothing local to stand up.
 
 ## Conventions
 
 - **No em dashes.** Single dash or comma.
-- Wide lines are fine (ruff `line-length = 140`). Do not fragment a line vertically
-  that reads fine horizontally.
+- Wide lines are fine. `E501` is ignored on purpose, so `ruff check` permits a long line
+  that reads better than its wrapped form. **`ruff format` is deliberately not in the
+  gate:** it hard-wraps at `line-length = 140` with no per-line escape hatch, so it would
+  fragment exactly the lines this convention exists to protect. The linter is the gate.
 - Timestamps: UTC ISO 8601 with **milliseconds** (`2026-09-10T14:30:00.000Z`), matching
   the upstream services exactly, because lexicographic ordering is relied upon.
 - Never log `ANTHROPIC_API_KEY`, `DATABASE_URL`, or a full prompt or response body.

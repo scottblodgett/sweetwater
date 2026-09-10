@@ -22,7 +22,7 @@ thinks.
 
 ```bash
 py -3.11 -m venv .venv
-.venv/Scripts/activate
+.\.venv\Scripts\Activate.ps1   # PowerShell; bash on Windows: source .venv/Scripts/activate
 pip install -r requirements-dev.txt
 cp .env.example .env          # fill in ANTHROPIC_API_KEY and DATABASE_URL
 python main.py --handshake    # proves the deployed ranch is reachable
@@ -31,12 +31,15 @@ python main.py --handshake    # proves the deployed ranch is reachable
 A good handshake reports **19 tools, 160 sensors, 32 locations** in about two seconds.
 
 ```bash
-python main.py --once   # exactly one tick
-python main.py          # the continuous loop
-python main.py --api    # read API only
+python main.py --once   # exactly one tick        (stub until M1, exits 3)
+python main.py          # the continuous loop     (stub until M4, exits 3)
+python main.py --api    # read API only           (stub until M8, exits 3)
 ```
 
-No Docker is needed until M9: the upstreams are already deployed and agent state lives in
+An unbuilt mode exits **3** and names the milestone that brings it, so "not written yet"
+never looks like "broken."
+
+No Docker is needed until M10: the upstreams are already deployed and agent state lives in
 Supabase, so there is nothing local to stand up. A local Postgres is needed only to run
 the store tests, which must never point at Supabase.
 

@@ -74,6 +74,29 @@ the failure path appended a bogus path to `MCP_URL` and the handshake **succeede
 MCP server answers at any path. Failure paths have to be tested against an unreachable
 host. Filed here because the invalid test looked exactly like a passing test.
 
+### Doc audit after the gate closed, and a fourth defect
+
+Scott asked whether `CLAUDE.md` was current. It was not, in three places:
+
+| Claim | Reality |
+| --- | --- |
+| "No Docker until M9" (also in `README.md`) | M9 is the window, **M10** is dockerize. `docker-compose.yml` had it right; the two docs that a reader hits first had it wrong. |
+| `ruff format --check .` listed as a command | **It fails on 5 files, and always will.** See below. |
+| `--once`, `--api`, and the bare loop listed as commands | All three are stubs that exit `3`. Nothing said so. |
+
+**The formatter defect is the interesting one, because the config guarantees it.**
+`[tool.ruff.lint] ignore = ["E501"]` deliberately permits a long line, and the convention
+says not to fragment a line that reads fine horizontally. But `ruff format` hard-wraps at
+`line-length = 140` with no per-line escape hatch, so the linter's permission and the
+formatter's mandate are in direct contradiction. A documented command that the repo's own
+settings can never satisfy is worse than an absent one, so **`ruff format` is out of the
+gate and out of the docs.** `ruff check` is the lint gate.
+
+The general shape: **a doc defect and a code defect have the same cause, and only the code
+one gets caught by a test.** M0's gate was genuinely green while the file describing how to
+run the gate was wrong. Worth a habit rather than a one-time fix, so from M1 the doc step at
+each boundary re-runs every command the docs claim works.
+
 ---
 
 ## M1 - The free pass
