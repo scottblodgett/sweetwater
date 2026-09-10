@@ -272,6 +272,14 @@ looking green.
 
 **Found:** M2.
 
+**Reopened at M3, from the other side.** Stripping timestamps from the page and not from the
+prose fails in the strict direction: `compliance` is briefed to write for an auditor eight months
+out, so it quotes the date it was handed, and `2026-09-10T20:08:41Z` in an assessment graded as
+five invented numbers. Times and dates now come off **both** sides. The cost is that a fabricated
+timestamp goes ungraded, which is accepted and written down rather than discovered later: nothing
+in the prose is anchored to a time. A normalization applied to one side of a comparison is a bug
+waiting for the other side to start using the thing you normalized away.
+
 ---
 
 ## 12. Two honest numbers that disagree, handed to a model with no note
@@ -520,5 +528,106 @@ be re-run when the decision changes. Same family as #10.
 
 ---
 
-_More entries arrive with M3 onward. Candidates already known from the design: the `num_ctx`
-shim trap, and why a gate must outlive its process._
+## 22. Every rail was local, so the one thing they could not see was scope
+
+**Pain.** None yet, which is the point. M3 ran the same Opus call on the same evidence packet
+twice, once with `COMPLIANCE_MANDATE` in the brief and once with it removed. The expectation was
+an obviously worse answer. **Both answers passed every rail with zero violations and would have
+shipped.** The unbriefed one echoed severity correctly, named its sensor, quoted only numbers on
+the page, cited three real rule ids, and asked for a real action.
+
+**Why.** Read the rails as a set and the hole is obvious in hindsight. `severity_mismatch`,
+`all_clear`, `invented_rule`, `sensor_not_named`, `schema_invalid` - **every one of them is a
+question about one incident, answerable from inside one work order.** An unbriefed model answers
+all of them correctly, because none of them asks the question the brief exists to answer: which of
+four agents are you, what belongs to your neighbours, and who is reading this in a year.
+
+What the unbriefed answer did instead was invisible to code. One action instead of five, and that
+action was filing a note. The two stock tanks it correctly identified as somebody else's got
+"belong to a separate water work order" with no name attached. The gauge it could not believe went
+into `unknowns`, which is where facts go to be nobody's problem, rather than being handed to the
+agent that repairs instruments. Its headline promised a GM escalation its actions list never
+contained.
+
+**Fix.** There isn't one, and reaching for one is the trap. A rail that counts actions gets
+satisfied by padding; a rail that greps for neighbour names teaches the model to name neighbours.
+What went in instead: both answers pinned as fixtures next to the packet they were given, and the
+recorded-answer calibration test that catches a brief regressing **by diff rather than by rule**.
+The transcripts are committed in `docs/`, because the claim "a sub-agent inherits nothing" is worth
+less as an assertion in a doc than as two files a person can read side by side.
+
+**Also worth its own sentence:** the whole of `compliance.md` was on the page in both runs,
+including the two rules that name the owner of a bad instrument and of a stock tank in as many
+words. **The SOP did not rescue it.** Standing orders describe the domain; the brief says which
+part of the domain is yours. They are not substitutes and one does not imply the other.
+
+**Lesson.** When you have a set of validators, ask what they have in common rather than what each
+one covers, because the shared assumption is the shape of the hole. Here every rail took one
+incident as its unit, so no rail could see a cross-incident property, and the failure mode that
+survived is the one that only shows up between work orders. **A clean suite is evidence about the
+questions you asked.**
+
+**Found:** M3, by an experiment set up expecting a different result. The experiment was worth
+running precisely because it disagreed with its own hypothesis.
+
+---
+
+## 23. A budget bug that arrives wearing the model's clothes
+
+**Pain.** The first live M3 tick logged `shift_report_violations=['all_clear']`. Read literally:
+the supervisor looked at a ranch with ten critical incidents on it and reported that everything
+was fine. That is the single worst output this system can produce and the rail it has the loudest
+opinion about.
+
+**It had not done that.** `SHIFT_REPORT_MAX_TOKENS` was 1,024 and the answer needed 1,646, so the
+tool call was cut off inside the priorities list.
+
+**Why the label was wrong.** A tool call truncated at `max_tokens` still arrives with an `input`
+dict on it, **partially filled**. `synthesize` checked `payload is None`, which was False, so a
+half-written answer went through the rails, where empty priorities read as an all-clear. Both
+things then happened at once: the correct fallback fired and the page shipped, and the log blamed
+the model for a number in a config file.
+
+**Fix.** `if response.payload is None or response.truncated`, in both `synthesize` and
+`to_work_order`, which is what `ModelResponse.ok` already said and neither caller was asking.
+Budget raised to 3,072, sized off the 1,646 measurement with the schema's own caps reasoned about
+in the comment, rather than picked again.
+
+**Lesson.** Two of them, and the second is the general one. First: #13 all over again, so the
+version of that lesson that actually sticks is **print the page, then size the budget, then check
+that a budget failure still says budget.** Second, and bigger: this repo is careful to make every
+failure produce output - a `no_answer` work order, a code-assembled shift report, a tick line even
+when the tick dies. A fallback that fires correctly while **attributing the failure to the wrong
+component** is worse than a crash, because it is quiet and it accuses. When you write a fallback,
+test what it says the cause was, not only that it ran.
+
+**Found:** M3, on the first live `--once` after the stage was wired, by reading the log line
+instead of trusting the exit code.
+
+---
+
+## 24. A concurrency ceiling that got multiplied by the number of workers
+
+**Pain.** Caught while writing the fan-out, before it ran. `AGENT_CONCURRENCY = 4` had one
+meaning at M2, when there was one agent: at most four Opus calls in flight. Fanning out to four
+responders, each calling `gather_bounded(..., limit=AGENT_CONCURRENCY)`, means each agent politely
+bounds **itself** at four. The ceiling is sixteen, and nothing in the code says sixteen anywhere.
+
+**Fix.** `gather_bounded` takes an optional `sem`, and `fan_out` builds **one** semaphore and
+passes the same object into every agent. The rail measures peak in-flight calls across a 16-packet
+fan-out and asserts it never exceeds the constant, rather than asserting the constant equals 4,
+which would have passed happily on the broken version.
+
+**Lesson.** A limit expressed per-worker is not a limit on the resource; it is a limit times the
+number of workers, and the multiplier is invisible at the call site that looks correct. Any
+constant whose name is about a shared external resource - an API's rate limit, a connection pool,
+a spend rate - belongs to **one object that everybody shares**, not to a value everybody reads.
+And test the property, not the constant: a test that asserts a config value is a test that a
+config value exists.
+
+**Found:** M3, in design, by asking what the constant was a statement about.
+
+---
+
+_Candidates still known from the design and not yet paid for: the `num_ctx` shim trap, and why a
+gate must outlive its process._
