@@ -27,6 +27,45 @@ flat tool names**, no namespaces. Consequences that are easy to get wrong:
   bogus path to `MCP_URL` does not produce a failure. Test failure paths with an
   unreachable host instead.
 
+## allowlists.py, and the gate that does not exist yet
+
+The counts are the spec: **7 / 6 / 5 / 5 / 0**, and a test asserts each one exactly, so a
+slice cannot grow by one tool without a deliberate edit to a number a human reads. If a
+number here needs changing, change the number, not the test.
+
+**Three agents share the three sensor read tools, and that is not carved up.** The isolation
+that matters is the brief, the SOP set, and which sensor types reach each agent; tool-name
+exclusivity would mean editing a frozen server. `herd_health` has no sensor reads at all,
+which is design and not omission: it cannot see a sensor, so no sensor incident can route to
+it (`src/agent/agent.py`).
+
+**No write tool reaches a model before M6.** Three functions, and none of them is redundant:
+
+- `tools_for(agent)` is the **declaration**. It includes the writes, so the counts the tests
+  assert are the real counts. A declared-but-withheld tool is a documented seam.
+- `bound_tools_for(agent)` is what a model may be handed, and it subtracts `WRITE_TOOLS`
+  while `GATE_LANDED` is False. It logs `write_tools_withheld` when it removes something.
+- `assert_callable(tool)` is the belt behind that filter, raising `WriteGateError` from inside
+  `mcp_client.call_tool`. **This one covers us, not the model.** The next person to write a
+  helper that calls `consume_feed` directly is not a model.
+
+`WRITE_TOOLS` names all **eight** deployed writes, not the four that appear in a slice. The
+four placement tools are in no slice and belong in none: moving an animal between places is a
+crew decision, not an inference from a sensor. They are named anyway, because the unassigned
+ones are exactly what somebody reaches for later while chasing one read out of the same API.
+
+**`GATE_LANDED` is a boolean in one module, and M6 is the only thing that may flip it.** Not a
+config value: an env var is something somebody sets on a laptop at 11pm to make a demo work.
+The gate is `interrupt()` plus the LangGraph Postgres checkpointer, so a pause outlives the
+process.
+
+`DEPLOYED_TOOLS` is all 19, **read off the wire and never copied out of the upstream's
+source.** `--handshake` compares the live list against it and fails on drift in either
+direction. That check lives in the handshake rather than in `pytest` because `pytest` has to
+pass on a plane. Agent names here are literals rather than imported from `src/agent/agent.py`,
+because `mcp_client` imports this module and the cycle back is real; a test asserts `SLICES`
+covers exactly `agent.AGENTS`, so the rail is the sync mechanism.
+
 ## Severity belongs to triage.py
 
 `triage.py` decides severity, in code, from per-type thresholds. No model, at any

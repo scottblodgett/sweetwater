@@ -35,19 +35,34 @@ container). Files are **always** JSON regardless of environment.
   "agents_routed":["water_feed","infrastructure"],
   "work_orders":9,"work_orders_shipped":9,"work_orders_rejected":0,"escalated":1,
   "input_tokens":50385,"output_tokens":7954,
+  "worlds":["infrastructure","water_feed"],"shift_report":"model","shift_report_violations":[],
   "ledger":{"opened":9,"ongoing":8,"resolved":4} }
 ```
 
-The M2 shape. `cost_usd` joins at M7 with the pricing table; a field is added to this line
+The M3 shape. `cost_usd` joins at M7 with the pricing table; a field is added to this line
 when the stage that produces it exists, not before, so a `null` here always means the stage
 ran and had nothing to say.
 
-**`chaos_fired` was planned for M5 and is not here yet, on purpose.** M5 built the overlay
-and applies it inside `sensors.sweep()`, which returns the count as `SweepResult.overlay_events`,
-but it did not wire chaos injection into `run_tick`. That wiring lands with M3's executor
-work, and the field arrives with it. Stated here rather than left as an absence, because
-this file's own rule is that a missing field means the stage had nothing to say, and in this
-one case it means the stage is not called yet.
+**`worlds` and `shift_report` are read as a pair, and that is the only reason both are here.**
+`worlds` is the storm-front count, `shift_report` is `"model"` or `"code"`, and together they
+say whether the supervisor paid to fuse the tick or assembled it for free. One world is always
+`"code"` by construction (`FUSION_THRESHOLD`), so a two-world tick reading `"code"` is either a
+free pass or a rail that fired, which is what `shift_report_violations` disambiguates. **A
+non-empty violations list beside `"code"` is the fallback having shipped**, and it is how a
+truncated supervisor was found at the M3 boundary.
+
+**`input_tokens` and `output_tokens` include the supervisor's call from M3 onward**, not just
+the responders'. The M2 flat-cost query below still reads correctly - the supervisor bills only
+on a tick that already fanned out - but a per-work-order average taken off this line is now
+slightly high, and `logs/agent.jsonl` is where to go for the split.
+
+**`chaos_fired` was planned for M5 and is still not here.** M5 built the overlay and applies it
+inside `sensors.sweep()`, which returns the count as `SweepResult.overlay_events`, but nothing
+calls `inject_for_tick` from `run_tick` yet. That was expected to land with M3's executor work
+and did not: M3 touched the executor only to add the synthesize stage, and wiring an injector
+into a tick is cadence work. **It is M4's, with the loop.** Stated here rather than left as an
+absence, because this file's own rule is that a missing field means the stage had nothing to
+say, and in this one case it means the stage is not called yet.
 
 **Written at tick end, always, including when the tick failed** (with `error` and
 `failed_stage`). A tick that produces no line is indistinguishable from a dead loop, and
