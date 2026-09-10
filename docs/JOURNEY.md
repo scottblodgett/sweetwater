@@ -521,6 +521,43 @@ a sensor, so no sensor incident can route to it, and it stays idle until chaos w
 events. That is `docs/STATE.md` decision 5 working, so it is not warned about: a line per tick per
 idle agent trains everyone to ignore the log.
 
+### The gate
+
+**281 tests**, `ruff check .` clean, `mypy` clean on 29 source files, one alembic head. Live
+verification, in five parts:
+
+| Check | Result |
+| --- | --- |
+| `--handshake` | 19 tools, 160 sensors, 32 locations, 13 types, and the deployed list matches `DEPLOYED_TOOLS` exactly |
+| `--once`, tick A | 15 packets across 3 worlds, 16/16 shipped, and the truncated supervisor found |
+| `--once`, tick B after both fixes | 14 packets, 15/15 shipped, `shift_report=model`, `shift_report_violations=[]` |
+| the cross-domain fusion the phase was supposed to prove | 3 worlds in one tick, both runs, so the storm front arrived for free exactly as `docs/STATE.md` predicted and the supervisor fused it rather than concatenating two unrelated pages |
+| bare `python main.py` and `--api` | exit 3, naming M4 and M8 |
+
+The chaos CLI's read-only commands (`status`, `plan --ticks 3`) were re-run too, since they are
+in `docs/STATE.md` and this repo's rule is that a documented command is a command that gets run.
+
+### Step 2 found two doc defects, and one of them is the interesting kind
+
+**`docs/logging.md` still printed the M2 tick line.** `worlds`, `shift_report`, and
+`shift_report_violations` were being written and documented nowhere, in the one file whose whole
+job is saying what a line contains. Worse, that file's own stated rule is "a missing field means
+the stage had nothing to say," so three undocumented fields were actively lying by that rule.
+Fixed, with the pair-reading explained: a two-world tick reading `shift_report=code` is either a
+free pass or a rail that fired, and the violations list is what tells them apart.
+
+**`src/tools/CLAUDE.md` had one line about allowlists and nothing about the write gate.** The
+root doc table points at it for exactly that subject. `docs/architecture.md` carried the
+three-function explanation and the nested file, which is what a session reads before touching
+`src/tools/`, did not. That is the drift this ritual exists to catch: the detail was written down
+in the place a reader arrives at second.
+
+**And the documented `jq` query is what would have caught defect 2 unaided.** Query two in
+`docs/logging.md` selects any `finish_reason` outside the healthy set, and running it at the
+boundary returns exactly one line: the supervisor at `max_tokens` with `output_tokens: 1024` and
+`max_tokens: 1024`. The instrument worked and nobody had asked it. Reading the logs really is
+the test of whether the logging works.
+
 ### Work not asked for, and why each one is here
 
 | Added | Why it was not optional |
