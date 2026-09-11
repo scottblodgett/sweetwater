@@ -64,6 +64,33 @@ Empty is healthy. `max_tokens` or `length` in there is a config bug, not a weak 
 `ModelResponse.ok` and `.truncated` in `llm_client.py` hold the same two sets, and they
 are the definition; if a third provider arrives, widen both together.
 
+## Tier 1 exists from M7, and it is `call_tier1`
+
+Same shape as `call_tier2`: one call, one receipt, no retry, no decision. Three things differ and
+each is deliberate:
+
+- **The schema goes in `format=`**, Ollama's grammar-constrained decoding, not a tool call. That
+  is the native equivalent of the forced tool call: the shape is enforced, and `done_reason`
+  (`stop` / `length`) stays honest independent of whether the text parsed. `content_types` is
+  `["json"]` when it parsed and `["text"]` when it did not.
+- **`reasoning_effort` becomes Ollama's `think` boolean.** `"none"` is off; anything else is on
+  with the server's budget. Still an explicit argument at the call site.
+- **`keep_alive` is `30m`.** Ollama's default is five minutes, which is exactly the tick cadence,
+  so the weights would unload and reload on every tick (22s cold against 4s warm).
+
+**Which tier a job gets is `routing.py`'s, never this module's.** `workers.judge_packet` asks
+`tier_for`, calls one tier, runs the rails, asks `escalation_reason`, and rewrites at Tier 2 when
+told. The two tiers see the identical `packet.render()` string, which is what makes an escalation a
+fair rewrite and a `TIER_COMPARE` pair a fair comparison.
+
+**Measured at M7, `gemma4:e4b` on this box**: 3,000 to 4,200 tokens in per packet against
+`num_ctx` 16,384, so the SOP is never truncated and `tier1_context_full` never fired; 4 to 13s a
+call warm. The model copied whole SOP headings into `rules_cited` on four of five answers
+(`"FEED-02 - A bin at the warning line…"`), id right every time, so `workers.check` trims a citation
+to the id at its front and records `rule_citation_trimmed` before `invented_rule` runs. It set
+`insufficient_information` on 5 of 6 candidates, honestly, where the SOP asks for a fact the page
+lacks. **The cascade ships off** (`TIER1_ENABLED=0`); the row in `docs/model-routing.md` says why.
+
 ## Two credentials, one call path
 
 `resolve_provider()` picks first-party Anthropic when a key exists and **Bedrock**
@@ -88,6 +115,11 @@ API rejects. Two traps beyond that: `temperature` may not be set at all while th
 on, so the knob is only offered when it is off; and `max_tokens` has to be raised **above**
 `budget_tokens`, or the answer is all reasoning and no content. `call_tier2` adds the
 budget to `max_tokens` rather than sharing it.
+
+**A third trap, found at M7 and not yet fixed:** Claude Opus 5 rejects `budget_tokens` with a 400 and
+wants `{"type": "adaptive"}` plus `output_config.effort`. Nothing here sends anything but `"none"`, which
+omits the block, so every measured call was unaffected; the first job that wants thinking on fixes
+this function first (`docs/issues.md` #13).
 
 ## embeddings.py is a seam, not a feature
 

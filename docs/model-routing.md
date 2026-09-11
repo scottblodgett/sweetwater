@@ -44,20 +44,36 @@ Three wins from one decision, which is usually the sign a decision is right.
 
 | Tier | Model | Jobs | Why it is safe |
 | --- | --- | --- | --- |
-| **1, default** | local, `gemma4:e4b` via Ollama | judge an assembled evidence packet; write the work order; chaos observation prose; shift-report assembly | Nothing here classifies. Code already ranked severity. A human reads and judges the output. |
-| **2, escalation** | Opus | genuine tool-driving investigation; cross-domain fusion when 2+ sensing worlds are hit in one tick; anything proposing a write | These decide what is *true*, or they mutate a real ranch. Both are classification in the sense that matters. |
+| **1, default** | local, `gemma4:e4b` via Ollama | **the per-incident work order**: judge one assembled evidence packet and write what to do, in one call, for every incident the predicate below does not claim | Nothing here classifies. Code already ranked severity, code assembled the page, code checks the answer, and a human reads it. |
+| **2, escalation** | Opus | **the fused shift report** when two or more sensing worlds opened incidents in one tick; the work order for a **critical** incident; the rewrite of any work order Tier 1 got **rejected** on, said **`insufficient_information`** on, or **proposed a write** in | These decide what is *true* across worlds, or they are the write-up on the worst incident, or they would mutate a real ranch. |
+
+**Corrected at M7, before anything moved.** The table used to list four Tier-1 jobs. Two of them
+do not exist: *chaos observation prose* (M5 made chaos pure code, no model anywhere in it) and
+*shift-report assembly* (`assemble_shift_report` is the code path a calm tick already runs for
+free). Packet judging and the work-order write were listed as two jobs and are one call, and have
+been since M2. There are exactly **two model jobs in this repo**: the per-incident work order and
+the fused shift report. The ledger's pending rows below were rewritten to name them.
 
 ## The escalation predicate
 
-Fires when **any** holds. The reason is logged in `tick.jsonl` as `escalation_reasons`.
+Per incident. Fires when **any** holds, and the reason is logged on the work order and summed
+into `tick.jsonl` as `escalation_reasons`.
 
-1. the Tier-1 judge returned `insufficient_information`
-2. `triage.py` marked the incident **critical**
-3. two or more sensing worlds opened incidents in the same tick
-4. a `Finding` proposes a write
+1. `triage.py` marked the incident **critical** (known before the call; Tier 1 is never asked)
+2. the Tier-1 answer failed a **blocking rail** (`all_clear`, `severity_mismatch`, `invented_rule`, `no_payload`, `schema_invalid`)
+3. the Tier-1 judge returned **`insufficient_information`** (a field it may set on purpose; a model allowed to say "I do not know" says it instead of inventing)
+4. the Tier-1 answer **proposed a write** (only a Tier-2 proposal may reach the gate)
 
-Condition 3 is the storm front, and it is the whole reason a supervisor exists rather
-than four independent scripts.
+Conditions 2 to 4 are known only after the cheap call, so escalation is a **rewrite**: Opus gets
+the identical page and writes its own work order; the Tier-1 answer is kept in `agent.jsonl` as
+the receipt and the Tier-2 order is the one stored. Nothing is retried at the same tier.
+
+**"Two or more sensing worlds opened incidents" is not a per-incident trigger.** The plan had it as
+one, and it was dropped at M7 on Scott's reasoning: the world count says nothing about what one
+packet contains, and applying it per incident would send every work order on every storm tick to
+Opus, which is precisely the bill M7 exists to cut. What the world count actually decides is whether
+the tick needs someone reading *across* the ranch, and that is the fused shift report, already gated
+at `FUSION_THRESHOLD = 2` and already Tier 2. One constant, one meaning.
 
 **Cost shape that falls out:** a calm ranch costs approximately nothing and a storm costs
 real money. That is "cost scales with change, not wall-clock" arriving as a side effect
@@ -67,7 +83,9 @@ of the architecture rather than as a tuning exercise later.
 
 **A Tier-1 model may never produce an all-clear.** `triage.py` already flagged the
 incident in code, so "nothing is wrong here" from the cheap judge is a contradiction, not
-a finding. `validate.py` rejects it and escalates rather than trusting it.
+a finding. `workers.check` rejects it (the `all_clear` rail reads the actions list, not the prose,
+and it has existed since M2), and from M7 a Tier-1 rejection **escalates** the same packet to Tier 2
+with the reason logged. A Tier-2 rejection is stored as rejected and never retried.
 
 That turns the measured false-all-clear failure mode into a check instead of a footnote.
 **The rail goes in before the first job moves down, not after.** Do not relax it to make
@@ -130,6 +148,14 @@ Fan-out does not change the per-call cost, it changes how many calls a tick make
 at M7 and `cost_usd` joins the tick line with it (`docs/logging.md`), so until then any figure below
 is a rate times a token count and the rate is an assumption, stated so it can be corrected in one
 place. At **$15/M in and $75/M out**, tick A is **$2.72** and tick B **$2.54**.
+
+**The assumption was wrong by 3x, found at M7.** Claude Opus 5 lists at **$5/M in and $25/M out**
+on the first-party API. Every dollar figure from M2 through M6 in this file, `STATE.md`, and
+`JOURNEY.md` is three times the real bill: the "$0.16 per work order" is about **$0.05**, and the
+"$28 an hour" storm was about **$9**. The rows are left as written because the tokens in them are
+the measurement and the rate was one line. From M7 `cost_usd` is computed from
+`llm_client.PRICE_TABLE` per model; Bedrock's public pricing page did not render an Opus 5 row, so
+the Bedrock entry is set at first-party parity and marked unverified in the table.
 
 **The supervisor is 14% of the input, 11% of the output, and about 13% of the bill** - one call
 against fourteen. Per unit of value it is the cheapest thing in the tick, because it is the only
@@ -215,12 +241,64 @@ One row per job that moved tiers. No row, no move.
 | 2026-09-10 | the whole tick, in the loop, unattended | - | Tier 2 | 2 paid ticks on the prod ledger at 120s cadence: 12 then 14 newly-opened, $2.16 then $2.54, 26/26 shipped, fused both times, halted at the $3 ceiling with exit 4. 30 free ticks at 60s cadence opened 10 to 24 each. Steady state on this ranch is a storm every tick, not a handful | **no move.** The bill is now measured; the lever is a debounce or M7, not a cheaper tick |
 | 2026-09-10 | shift-report synthesis, the supervisor | - | Tier 2 | 1 call per tick, gated at `FUSION_THRESHOLD = 2` worlds, so most ticks make none. 14,093 in / 1,646 out on a 14-order page, `tool_use`, 0 violations. The design table above puts "shift-report assembly" in Tier 1; that is still the intent, and it is not this job. Assembly in code is what a calm tick already does for free | **not moved, and the table's Tier-1 row is about `assemble_shift_report`, not about fusion** |
 | 2026-09-11 | the work-order write **with the `proposed_write` field** (M6) | Tier 2 | Tier 2 | 2 paid ticks on the prod ledger after the debounce: 1 then 2 newly-opened, 3/3 shipped, 0 violations, $0.17 then $0.32, so roughly **$0.16 per work order**, unchanged from M3 with the field and the brief paragraph added. `water_feed` proposed nothing on two feed-low packets | **no move.** The gate added a field, not a tier. This is M7's row to beat |
-| _(M7)_ | chaos observation prose | Tier 2 | Tier 1 | pending | pending |
-| _(M7)_ | work-order write | Tier 2 | Tier 1 | pending | pending |
-| _(M7)_ | evidence-packet judging | Tier 2 | Tier 1 | pending | pending |
+| 2026-09-11 | **the per-incident work order** (packet judging plus the write, one call), `gemma4:e4b` on Ollama for every incident the predicate does not claim | Tier 2 | Tier 1, **measured and not adopted** | 3 ticks on `SW_OPS_TARGET=test` after a warm-up, cascade on, every local order shadowed by Opus on the identical page (`docs/m7-compare-transcript.md`). 12 opened, 12/12 shipped, 0 rejected, **0 all-clears, 0 invented rules**, sensor named and reading quoted 12/12. 6 were critical and went straight to Opus. Of the 6 Tier-1 candidates, **5 escalated on `insufficient_information`** and 1 stayed local, so the cascade saved 1 call in 12. On the 6 pairs, local named the flagged neighbour on 1 of 3 pages that had one (Opus 3 of 3), the head count on 1 of 4 (Opus 4 of 4), cited the more specific rule less often (SENSOR-01 alone where Opus added SENSOR-05; SENSOR-05 where Opus led with SENSOR-02), and padded actions with echoes of its own brief on 3 of 6 ("In the work order, name Calving Pasture and 111 head"). 3,024 to 4,207 tokens in against `num_ctx` 16,384; 5.6 to 13.3s a call warm, 22s cold; $0.74 for the three ticks at Opus's real rate, shadows excluded | **no move. `TIER1_ENABLED` ships off.** Not because the local model was unsafe (the rails never fired on it) but because it was thin about exactly the two things on the page that matter, and because it escalated 5 of 6 on its own, which leaves nothing to save. The row is the bar for the next attempt |
+| 2026-09-11 | **the fused shift report** | Tier 2 | Tier 2 | not measured at Tier 1 on purpose: it is the one call that decides what is true across worlds, and the design table's Tier-1 note was about `assemble_shift_report`, which is code. Fused twice in the three ticks, 0 violations | **stays.** By decision rather than by measurement |
 
 The first three rows are what the M7 rows are measured against, which is why they exist at all
 in a table that says "one row per job that moved tiers." Nothing moved; a floor was
-established. The falling token count is the architecture's central claim landing: **cost
+established, and at M7 the floor held.
+
+## What M7 measured, and why the cascade ships off
+
+Everything in the design above is built: `routing.tier_for`, the predicate as a post-call rewrite,
+the price table, `call_tier1` on `ChatOllama`, `TIER_COMPARE` for the side-by-side, and the tick
+line's `tier` / `escalations` / `escalation_reasons`. Three measured ticks with the cascade on, on
+the test ledger, so nothing a demo reads from was touched:
+
+| | tick A | tick B | tick C |
+| --- | --- | --- | --- |
+| opened (critical) | 9 (4) | 1 (0) | 2 (2) |
+| Tier-1 candidates -> stayed local | 5 -> 1 | 1 -> 0 | 0 -> 0 |
+| `escalation_reasons` | critical x4, insufficient_information x4 | insufficient_information | critical x2 |
+| shipped / rejected | 9 / 0 | 1 / 0 | 2 / 0 |
+| shift report | fused | code | fused |
+| wall clock | 77s | 23s | 36s |
+| `cost_usd` | $0.52 | $0.05 | $0.16 |
+
+**Three things the run settled.**
+
+1. **The safety rails held on the local model.** Zero all-clears, zero invented rules (after the
+   citation trim below), zero severity disagreements, every order named its sensor and quoted its
+   reading. The escalation-on-rejection path never fired live because nothing was rejected; its
+   proof is the planted test, which stands.
+2. **`insufficient_information` was the whole story.** The local model set it on 5 of 6 candidates.
+   Read charitably, it was right every time: FEED-02 asks for the forecast and the page has none;
+   SENSOR-01 asks how long the sensor has been dark and the history is empty. Opus, on the same
+   pages, wrote around the gap and listed it under `unknowns`, which is what the field's description
+   asks for. One tightening of the wording moved the water packet from 5/5 to 2/5 and the feed
+   packet from 5/5 to 4/5. The field is doing what it was designed to do; the model reaches for it
+   where the SOP names a fact the packet does not carry, and on this ranch that is most packets.
+3. **Where the local prose was thinner, it was thinner about the neighbour and the herd.** Both
+   are on the page, both are what a rancher reads the order for, and the rails cannot see either
+   (`docs/STATE.md`, the no-brief finding). Opus named the degraded tank probe beside the open gate,
+   the empty bin beside the low one, and 111 head on every page that had them. The local model
+   named the bin and not the other two, and the head count once in four.
+
+**The move that would have earned the row** is the one Scott named in the design conversation:
+put the forecast on the feed page (the ranch has wind, temperature, and snow-depth sensors and the
+packet does not carry them), so FEED-02 can be answered from the page and `insufficient_information`
+stops being the honest answer. That is `evidence.py`'s change, its own item (`docs/issues.md` #12),
+and the next attempt at this row runs after it.
+
+**The close-out tick agreed.** Re-running the documented `TIER1_ENABLED=1 TIER_COMPARE=1` command at
+the phase close opened 9 more (5 critical): 4 Tier-1 candidates, 2 stayed local, 2 escalated on
+`insufficient_information`, 9/9 shipped, $0.48. Across all four measured ticks: 10 candidates, 3
+stayed local, so the cascade as built saves about a quarter of the non-critical calls and none of
+the critical ones. Same verdict.
+
+**The bill, restated at the real rate.** Tick A above, 9 orders and a fused report, was $0.52. The
+M6 row's "$0.16 per work order" is about $0.05. At the debounced steady state of one to three new
+incidents a tick, the loop costs roughly **$0.05 to $0.20 a tick, $0.60 to $2.40 an hour**, all of
+it Opus, and the ceiling still halts it. The falling token count is the architecture's central claim landing: **cost
 tracks newly-opened incidents, not open ones.** Tick 3 cost 41% of tick 1 while watching
 more of the ranch.

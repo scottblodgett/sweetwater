@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     tier1_model: str = "gemma4:e4b"
     ollama_num_ctx: int = 16_384
+    # M7. The cascade switch. Off means every work order is Tier 2, which is the M2 to M6 shape
+    # and the baseline every ledger row is graded against. It ships off until the row in
+    # `docs/model-routing.md` says the local model earned the job, and it is a config value
+    # rather than a module constant because it is a cost and quality knob, not a safety one:
+    # the rails and the gate do not read it. `routing.tier_for` is the only reader.
+    tier1_enabled: bool = False
+    # M7's measurement mode. When on, every packet Tier 1 judges is also judged by Tier 2 on
+    # the identical page, and the pair lands in `logs/compare.jsonl` (`docs/logging.md`). The
+    # stored work order is still the one the cascade would have shipped; the shadow is a
+    # receipt for grading. It SPENDS, at Tier-2 prices, on every Tier-1 packet. Off by default.
+    tier_compare: bool = False
 
     # --- The ledger -------------------------------------------------------------
     # How many consecutive sweeps have to flag a sensor before it is an incident. The
@@ -56,7 +67,7 @@ class Settings(BaseSettings):
     # time, so changing it rescales every scenario's lifetime with it: the two are one
     # decision, made here. See `executor.run_loop`.
     tick_interval_seconds: int = 300
-    # The hard per-run spend ceiling, in dollars at `llm_client.ASSUMED_RATE`. The loop HALTS
+    # The hard per-run spend ceiling, in dollars at `routing.PRICE_TABLE`. The loop HALTS
     # when the run's summed `cost_usd` reaches it and exits 4; it does not skip a tick and
     # carry on. Must be positive, and there is no value that means unlimited: 0 refuses to
     # start a spending loop. Ten dollars is roughly four storm ticks at M3's worst measured

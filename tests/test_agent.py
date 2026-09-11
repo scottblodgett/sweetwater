@@ -106,7 +106,8 @@ from src.agent.workers import (
     run_water_feed,
     to_work_order,
 )
-from src.models.llm_client import ASSUMED_RATE_USD_PER_M, THINKING_BUDGET, ModelResponse, call_tier2, cost_usd, resolve_provider
+from src.models.llm_client import THINKING_BUDGET, ModelResponse, call_tier2, cost_usd, resolve_provider
+from src.models.routing import PRICE_TABLE
 from src.prompts.agent_prompts import MANDATES, SUPERVISOR_MANDATE
 from src.prompts.system_prompts import SHIFT_REPORT_SCHEMA, WORK_ORDER_SCHEMA, system_prompt
 from src.tools.allowlists import DEPLOYED_TOOLS, GATE_LANDED, WRITE_TOOL_ARGS, WRITE_TOOLS, Approval
@@ -1957,8 +1958,14 @@ async def test_cost_usd_rides_on_the_tick_line_and_a_calm_tick_is_exactly_zero(c
         state = await run_tick(tick=1, store=target, now=T0, spend=False)
     line = next(entry for entry in logs if entry["event"] == "tick")
     assert line["cost_usd"] == 0.0 and state.cost_usd == 0.0
-    assert cost_usd(1_000_000, 0) == ASSUMED_RATE_USD_PER_M[0] and cost_usd(0, 1_000_000) == ASSUMED_RATE_USD_PER_M[1]
-    assert cost_usd(91_468, 15_545) == pytest.approx(2.54, abs=0.01), "tick B in docs/model-routing.md, so the constant and the ledger agree"
+    assert line["tier"] is None and line["escalations"] == 0 and line["escalation_reasons"] == [] and line["tier1_orders"] == 0, "M7: no model was called, so no tier, rather than the cheap one"
+    assert cost_usd(1_000_000, 0, model="claude-opus-5") == PRICE_TABLE["claude-opus-5"][0] and cost_usd(0, 1_000_000, model="claude-opus-5") == PRICE_TABLE["claude-opus-5"][1]
+    # Tick B in docs/model-routing.md was $2.54 at the M4 assumption of $15/$75; at the Opus 5 list
+    # price it is $0.85, and the correction is written beside the row. An unknown paid model bills at
+    # the fallback rate rather than at zero, and Tier 1 is zero by tier, whatever the model is called.
+    assert cost_usd(91_468, 15_545, model="us.anthropic.claude-opus-5") == pytest.approx(0.85, abs=0.01), "tick B at the real rate; the ledger row carries the correction"
+    assert cost_usd(91_468, 15_545, model="some-new-paid-model") == cost_usd(91_468, 15_545, model="claude-opus-5"), "unknown paid model: over-count, never under"
+    assert cost_usd(91_468, 15_545, model="gemma4:e4b", tier=1) == 0.0
 
 
 # --- the backoff registry --------------------------------------------------------------- #
@@ -2749,3 +2756,240 @@ async def test_the_suite_never_points_a_file_handler_at_the_real_logs(store: Asy
     for handler in logging.getLogger(AUDIT_STREAM).handlers:
         filename = str(getattr(handler, "baseFilename", "") or "")
         assert not filename.lower().startswith(real), f"a test process would write receipts into {filename}"
+
+
+# --- M7: the cascade, the price table, and the rail that escalates ------------------------- #
+from dataclasses import replace as _dc_replace  # noqa: E402
+
+from src.agent.workers import judge_packet  # noqa: E402
+from src.models.routing import (  # noqa: E402
+    ESCALATE_CRITICAL,
+    ESCALATE_INSUFFICIENT,
+    ESCALATE_NO_ANSWER,
+    ESCALATE_PROPOSED_WRITE,
+    ESCALATE_REJECTED,
+    FALLBACK_RATE,
+    TIER1,
+    TIER2,
+    escalation_reason,
+    rate_for,
+    tier_for,
+)
+
+#: The tank at warning rather than critical, because critical never reaches Tier 1 by design and
+#: the cascade tests need a packet that does. Same page otherwise: the siblings, the 111 head, the SOP.
+WARN_INCIDENT = TANK_INCIDENT.model_copy(update={"severity": "warning", "summary": "stock-tank level at Alkali Flat is 4.1 gal, below the warning line of 5 gal", "last_value": "4.1 gal", "threshold": 5.0})
+WARN_PACKET = _dc_replace(TANK_PACKET, incident=WARN_INCIDENT)
+
+
+def _local(payload: dict[str, object] | None, *, finish_reason: str = "stop", error: str = "") -> ModelResponse:
+    """What `call_tier1` returns: Ollama's vocabulary (`stop` / `length`), tier 1, free."""
+    return ModelResponse(provider="ollama", model="gemma4:e4b", finish_reason=finish_reason, tier=TIER1, payload=payload, input_tokens=5_900, output_tokens=640, latency_ms=9_100, error=error)
+
+
+def _cascade(monkeypatch: pytest.MonkeyPatch, settings: Settings, *, local: ModelResponse, opus: ModelResponse | None = None, enabled: bool = True) -> dict[str, list[dict[str, object]]]:
+    """Both tiers faked at the seam `judge_packet` calls them through. Records every call's kwargs,
+    so a test can assert the page Opus rewrote from is byte-for-byte the page Tier 1 saw."""
+    settings.tier1_enabled = enabled
+    calls: dict[str, list[dict[str, object]]] = {"tier1": [], "tier2": []}
+
+    async def _t1(**kw: object) -> ModelResponse:
+        calls["tier1"].append(kw)
+        return local
+
+    async def _t2(**kw: object) -> ModelResponse:
+        calls["tier2"].append(kw)
+        return opus or _response(_answer(severity_echo="warning"))
+
+    monkeypatch.setattr("src.agent.workers.call_tier1", _t1)
+    monkeypatch.setattr("src.agent.workers.call_tier2", _t2)
+    return calls
+
+
+def test_the_price_table_has_both_spellings_and_tier_one_is_free_by_tier() -> None:
+    """`cost_usd` keeps its name and its meaning; what changed is the rate under it. Both provider
+    spellings of Opus 5 are rows because both appear on real `agent.jsonl` lines, and they agree.
+    Tier 1 is zero by tier rather than by model name, so a renamed local model cannot bill."""
+    assert PRICE_TABLE["claude-opus-5"] == PRICE_TABLE["us.anthropic.claude-opus-5"] == (5.0, 25.0)
+    assert rate_for("anything-at-all", tier=TIER1) == (0.0, 0.0)
+    assert rate_for("gemma4:e4b", tier=TIER1) == (0.0, 0.0)
+    assert rate_for("claude-opus-5") == (5.0, 25.0)
+
+
+def test_an_unknown_paid_model_bills_at_the_fallback_and_warns_once() -> None:
+    """A model missing from the table is a bookkeeping gap. The honest failure over-counts toward
+    the ceiling rather than letting the loop run past it at $0.00, and it says so once, not per call."""
+    with capture_logs() as logs:
+        assert rate_for("claude-newer-9") == FALLBACK_RATE
+        assert rate_for("claude-newer-9") == FALLBACK_RATE
+    assert [e["model"] for e in logs if e["event"] == "price_unknown"] == ["claude-newer-9"]
+
+
+def test_tier_for_asks_tier_one_unless_critical_or_the_cascade_is_off(settings: Settings) -> None:
+    settings.tier1_enabled = True
+    assert tier_for(WARN_INCIDENT) == TIER1
+    assert tier_for(TANK_INCIDENT) == TIER2, "critical is the one pre-call condition"
+    settings.tier1_enabled = False
+    assert tier_for(WARN_INCIDENT) == TIER2 and tier_for(TANK_INCIDENT) == TIER2, "off is the M2 to M6 shape: Opus for everything"
+
+
+def test_the_escalation_predicate_reads_the_order_not_the_prose() -> None:
+    """Every condition is a code already computed by the rails or a field the schema carries.
+    `no_answer` first because there is nothing else to read on such an order."""
+    ok = _order(_answer())
+    assert escalation_reason(ok) == ""
+    assert escalation_reason(_order(_answer(actions=["No action needed"]))) == ESCALATE_REJECTED
+    assert escalation_reason(_order(_answer(severity_echo="warning"))) == ESCALATE_REJECTED, "severity_mismatch is a blocking rail too"
+    assert escalation_reason(_order(_answer(rules_cited=["WATER-99"]))) == ESCALATE_REJECTED
+    assert escalation_reason(_order(_answer(insufficient_information=True))) == ESCALATE_INSUFFICIENT
+    assert escalation_reason(ok.model_copy(update={"proposed_write": {"tool": "restock_feed", "args": {"sku": "x", "quantity": 1}}})) == ESCALATE_PROPOSED_WRITE
+    assert escalation_reason(_order(None, finish_reason="length")) == ESCALATE_NO_ANSWER
+    assert escalation_reason(_order(None, finish_reason="transport_error", error="ConnectError")) == ESCALATE_NO_ANSWER
+
+
+def test_insufficient_information_is_a_schema_field_both_tiers_must_fill() -> None:
+    assert "insufficient_information" in WORK_ORDER_SCHEMA["properties"] and "insufficient_information" in WORK_ORDER_SCHEMA["required"]
+    assert _order(_answer(insufficient_information=True)).insufficient_information is True
+    assert _order(_answer()).insufficient_information is False, "absent reads as false, never as a violation"
+
+
+async def test_a_planted_local_all_clear_is_rejected_and_escalated_not_believed_and_not_replaced(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """THE rail, and M7's consequence for it. Code confirmed this tank twice; the cheap judge says
+    there is nothing to do. That is a contradiction and not a finding, so it is rejected in code
+    (`all_clear`, reading the actions list) and the identical page goes to Opus, whose order is the
+    one stored. The Tier-1 attempt survives on the stored order as its receipt."""
+    calls = _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning", actions=["No action needed, the reading will recover on its own"])))
+    with capture_logs() as logs:
+        order = await judge_packet(WARN_PACKET, agent="water_feed")
+
+    assert order.tier == TIER2 and order.escalation == ESCALATE_REJECTED
+    assert order.status == "ok" and order.shippable, "Opus's order shipped; the local one never did"
+    assert "all_clear" in order.tier1_violations and order.tier1_finish_reason == "stop"
+    assert order.tier1_input_tokens == 5_900 and order.input_tokens == 5555, "both receipts, distinguishable"
+    assert len(calls["tier1"]) == 1 and len(calls["tier2"]) == 1, "one call each, no retry at either tier"
+    assert calls["tier1"][0]["user"] == calls["tier2"][0]["user"] == WARN_PACKET.render(), "the rewrite is from the identical page"
+    assert calls["tier1"][0]["reasoning_effort"] == "none", "explicit per call, per src/models/CLAUDE.md"
+    escalated = next(e for e in logs if e["event"] == "tier1_escalated")
+    assert escalated["reason"] == ESCALATE_REJECTED and "all_clear" in escalated["tier1_violations"]
+
+
+async def test_a_clean_local_order_is_stored_at_tier_one_and_opus_is_never_called(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning")))
+    order = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert order.tier == TIER1 and order.escalation == "" and order.shippable
+    assert order.model == "gemma4:e4b" and order.finish_reason == "stop" and order.tier1_input_tokens == 0, "no receipt for a rewrite that never happened"
+    assert calls["tier2"] == [], "and the bill for this incident is exactly nothing"
+    assert cost_usd(order.input_tokens, order.output_tokens, model=order.model, tier=order.tier) == 0.0
+
+
+async def test_insufficient_information_a_write_proposal_and_a_no_answer_each_escalate_with_their_own_reason(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three more ways a Tier-1 order does not stand. Each is its own code on the line, because
+    "the local model says it does not know" and "the local model wanted to change the ranch" and
+    "Ollama was down" are three different things to read at 2am."""
+    _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning", insufficient_information=True)))
+    assert (await judge_packet(WARN_PACKET, agent="water_feed")).escalation == ESCALATE_INSUFFICIENT
+
+    _cascade(monkeypatch, settings, local=_local(None, finish_reason="length"))
+    no_answer = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert no_answer.escalation == ESCALATE_NO_ANSWER and no_answer.tier == TIER2 and no_answer.shippable, "an unjudged packet is not held while Opus is standing right there"
+    assert no_answer.tier1_finish_reason == "length" and "no_payload" in no_answer.tier1_violations
+
+    _cascade(monkeypatch, settings, local=_local(None, finish_reason="transport_error", error="ConnectError: ollama is down"))
+    assert (await judge_packet(WARN_PACKET, agent="water_feed")).escalation == ESCALATE_NO_ANSWER
+
+
+async def test_a_local_write_proposal_escalates_and_only_the_opus_proposal_survives(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Condition 4 of the predicate. Only a Tier-2 proposal may reach the gate, so a Tier-1 order
+    that proposes anything is rewritten, and what is stored carries Opus's proposal (here: none)."""
+    proposal = {"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 16.7}}
+    monkeypatch.setattr("src.agent.workers.check_write_proposal", lambda raw, **_kw: ([], raw if raw and raw.get("tool") else None))
+    calls = _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning", proposed_write=proposal)))
+    order = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert order.escalation == ESCALATE_PROPOSED_WRITE and order.tier == TIER2
+    assert order.proposed_write is None, "Opus proposed nothing, so nothing pauses; the local proposal is gone"
+    assert len(calls["tier2"]) == 1
+
+
+async def test_a_critical_incident_never_reaches_tier_one(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _cascade(monkeypatch, settings, local=_local(_answer()), opus=_response(_answer()))
+    order = await judge_packet(TANK_PACKET, agent="water_feed")
+    assert calls["tier1"] == [] and len(calls["tier2"]) == 1
+    assert order.tier == TIER2 and order.escalation == ESCALATE_CRITICAL, "logged as an escalation so the tick line can count why Opus was paid"
+
+
+async def test_with_the_cascade_off_every_order_is_tier_two_with_no_escalation(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The M2 to M6 shape, and the default until the ledger row says otherwise. `escalation=""` on a
+    Tier-2 order is how "the cascade was off" reads differently from "critical"."""
+    calls = _cascade(monkeypatch, settings, local=_local(_answer()), opus=_response(_answer(severity_echo="warning")), enabled=False)
+    order = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert calls["tier1"] == [] and order.tier == TIER2 and order.escalation == ""
+
+
+async def test_an_opus_rejection_after_an_escalation_is_stored_as_rejected_and_never_retried(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cascade has one rung. Opus failing the same rail is the M2 rule unchanged: stored as
+    rejected, carrying its violations, and nobody asks a third time."""
+    calls = _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning", actions=["Nothing to do"])), opus=_response(_answer(severity_echo="warning", actions=["Nothing to do"])))
+    order = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert order.status == "rejected" and order.tier == TIER2 and order.escalation == ESCALATE_REJECTED and "all_clear" in order.violations
+    assert len(calls["tier1"]) == 1 and len(calls["tier2"]) == 1
+
+
+async def test_compare_mode_shadows_a_clean_local_order_with_opus_and_writes_the_pair_but_stores_the_local_one(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The measurement M7's row is graded on. Same page to both, the pair on `compare.jsonl` with
+    the facts code put on the page (which neighbours triage would flag, the head count, the citable
+    rules), and the STORED order is still the one the cascade would have shipped."""
+    settings.tier_compare = True
+    calls = _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning")))
+    with capture_logs() as logs:
+        order = await judge_packet(WARN_PACKET, agent="water_feed")
+
+    assert order.tier == TIER1 and order.escalation == "", "stored: the local order"
+    assert len(calls["tier2"]) == 1 and calls["tier2"][0]["user"] == calls["tier1"][0]["user"], "shadowed: Opus, same page"
+    pair = next(e for e in logs if e["event"] == "compare")
+    assert pair["tier1"]["tier"] == TIER1 and pair["tier2"]["tier"] == TIER2 and pair["escalation"] == ""
+    assert pair["page"]["head_count"] == 111 and "alkali-flat-water-2" not in pair["page"]["siblings_flagged"] and "WATER-05" in pair["page"]["citable_rules"], "the healthy second tank is not a flagged neighbour"
+    assert pair["tier1"]["actions"] and pair["tier2"]["rules_cited"] == ["WATER-01", "WATER-05"]
+
+
+async def test_compare_mode_does_not_shadow_an_escalation_because_the_rewrite_is_the_pair(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings.tier_compare = True
+    calls = _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning", actions=["No action needed"])))
+    with capture_logs() as logs:
+        order = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert order.escalation == ESCALATE_REJECTED and len(calls["tier2"]) == 1, "one Opus call, not two"
+    pair = next(e for e in logs if e["event"] == "compare")
+    assert pair["escalation"] == ESCALATE_REJECTED and "all_clear" in pair["tier1"]["violations"]
+
+
+@respx.mock
+async def test_the_tick_line_carries_tier_escalations_and_reasons_and_bills_each_order_at_its_own_model(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """`docs/logging.md`'s M7 fields. One local order and one escalated critical on the same tick:
+    `tier` is the highest tier used, `escalation_reasons` is one code per escalated order, and
+    `cost_usd` is the Tier-2 half only, since the Tier-1 tokens were free and are still counted."""
+    serve(respx.mock, LOW | {"east-allotment-fence": 0.5})  # two incidents: the tank and a dead fence
+    local = _order(_answer()).model_copy(update={"tier": TIER1, "model": "gemma4:e4b", "provider": "ollama", "input_tokens": 5_900, "output_tokens": 640})
+    escalated = _order(_answer()).model_copy(update={"escalation": ESCALATE_CRITICAL})
+    orders = iter([local, escalated])
+    _stub_spend(monkeypatch, lambda key: next(orders).model_copy(update={"incident_key": key}))
+    with capture_logs() as logs:
+        state = await run_tick(tick=1, store=target, now=T0, spend=True)
+
+    line = next(e for e in logs if e["event"] == "tick")
+    assert line["tier"] == TIER2 and line["tier1_orders"] == 1 and line["escalations"] == 1 and line["escalation_reasons"] == [ESCALATE_CRITICAL]
+    assert line["input_tokens"] == 5_900 + 5555 and line["output_tokens"] == 640 + 1137, "both tiers' tokens are on the counters"
+    assert line["cost_usd"] == state.cost_usd == cost_usd(5555, 1137, model="us.anthropic.claude-opus-5"), "and only the Opus half is billed"
+    assert state.cost_usd == pytest.approx(0.0562, abs=0.0005), "about five cents, not sixteen: the 3x rate correction"
+
+
+def test_a_citation_carrying_the_heading_title_is_trimmed_to_its_id_and_recorded_not_rejected() -> None:
+    """Found on the first Tier-1 measurement: `"FEED-02 - A bin at the warning line is a delivery to
+    schedule, not a fire"` on four of five local answers, id right every time. The trim is a parse
+    step the rail runs after, so a wrong id still fails and a right one is not escalated over format."""
+    order = _order(_answer(rules_cited=["WATER-01 - A dry tank is a today problem", "WATER-05"]))
+    assert order.rules_cited == ("WATER-01", "WATER-05") and order.shippable
+    assert "rule_citation_trimmed" in order.violations and "invented_rule" not in order.violations
+    assert "rule_citation_trimmed" not in BLOCKING_VIOLATIONS
+    assert escalation_reason(order) == "", "a Tier-1 order with a verbose but real citation stands"
+    wrong = _order(_answer(rules_cited=["WATER-09 - a rule that does not exist"]))
+    assert "invented_rule" in wrong.violations and wrong.status == "rejected", "the trim does not launder an invented id"
+    assert _order(_answer()).violations == () or "rule_citation_trimmed" not in _order(_answer()).violations, "bare ids are not flagged"

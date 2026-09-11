@@ -79,7 +79,7 @@ sweetwater/                                lands at
 │   ├── models/
 │   │   ├── CLAUDE.md               M0    the Ollama gotchas; when thinking may be turned off
 │   │   ├── llm_client.py          (M2)   provider registry + per-call reasoning_effort + usage receipts
-│   │   ├── routing.py             (M7)   job -> tier -> model, and the escalation predicate
+│   │   ├── routing.py              M7    job -> tier -> model, the price table, the escalation predicate (measured; the cascade ships off)
 │   │   └── embeddings.py           --    SOP retrieval seam; stays a seam in V1, see the note below
 │   ├── prompts/
 │   │   ├── system_prompts.py      (M2)   shared rules: severity is not yours, cite your SOP, no invented premises
@@ -95,7 +95,7 @@ sweetwater/                                lands at
 ├── tests/
 │   ├── CLAUDE.md                   M0    never Supabase; sw_ops_test schema; what each rail proves
 │   ├── conftest.py                 M1    the sw_ops_test fixtures, and the skip when no local Postgres answers
-│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), the no-brief pair (M3, and it did not flail: see docs/no-brief-transcript.md), gate resume (M6)
+│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), the no-brief pair (M3, and it did not flail: see docs/no-brief-transcript.md), gate resume (M6), the cascade and the planted local all-clear that must escalate (M7)
 │   ├── test_tools.py               M1    triage truth table, sweep concurrency; chaos determinism (M5)
 │   └── test_api.py                (M8)   envelope shape, gate endpoints
 ├── data/

@@ -1,4 +1,4 @@
-"""The provider registry, and the receipts. Arrives at M2, Tier 2 only.
+"""The provider registry, and the receipts. Arrives at M2 with Tier 2; Tier 1 lands at M7.
 
 Four things this module exists to get right, all of them paid for once already and all of
 them written up in `src/models/CLAUDE.md`:
@@ -13,9 +13,11 @@ them written up in `src/models/CLAUDE.md`:
     the model never got to answer and `"stop"` means it answered badly. They present
     identically in the output text and one is a config bug.
 
-Tier 1 is not here yet, and that is deliberate: M7 moves jobs down one at a time with a
-rail and a ledger row behind each one. A cascade built now is a cost optimization nobody
-measured, and a local fallback built now hides the Tier-2 failures M2 exists to observe.
+Tier 1 arrived at M7, after four phases of Tier-2 baseline, and it is `call_tier1` below:
+`ChatOllama` on the native endpoint, `num_ctx` explicit, `reasoning=False` passed per call,
+`format=` carrying the JSON schema so the output is grammar-constrained rather than promised,
+and `done_reason` logged as `finish_reason` before anything parses the text. Which tier a job
+gets, and what escalates, is `src/models/routing.py`'s; this module only knows how to call.
 
 ## Two credentials, one call path
 
@@ -59,12 +61,12 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
+from src.models.routing import TIER1, TIER2  # re-exported: M4 call sites and tests import it from here
+from src.models.routing import cost_usd as cost_usd
 from src.utils.config import get_settings
 from src.utils.logger import Stopwatch, get_logger, log_agent_call
 
 log = get_logger(__name__)
-
-TIER2 = 2
 
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_BEDROCK = "bedrock"
@@ -86,22 +88,22 @@ THINKING_BUDGET: dict[str, int] = {"none": 0, "low": 2_048, "medium": 6_144, "hi
 
 DEFAULT_MAX_TOKENS = 2_048
 
-#: Dollars per million tokens, (input, output), for the Tier 2 model. **An assumption, stated
-#: once so it can be corrected once.** `docs/model-routing.md` carried this rate as prose from
-#: M2; M4 moves it into code because the loop's spend ceiling is denominated in dollars and a
-#: ceiling in tokens is a multiplication somebody does wrong at 2am. M7's pricing table
-#: replaces this constant, not the `cost_usd` field it feeds.
-ASSUMED_RATE_USD_PER_M: tuple[float, float] = (15.0, 75.0)
+#: How long Ollama keeps the Tier-1 weights resident after a call. The default is five
+#: minutes, which is exactly the tick cadence, so the model would unload and reload on every
+#: tick. Explicit and per call, like everything else that changes what a call costs.
+OLLAMA_KEEP_ALIVE = "30m"
 
-
-def cost_usd(input_tokens: int, output_tokens: int) -> float:
-    """Dollars for one call or one tick at `ASSUMED_RATE_USD_PER_M`. Exact zero for zero tokens."""
-    rate_in, rate_out = ASSUMED_RATE_USD_PER_M
-    return round((input_tokens * rate_in + output_tokens * rate_out) / 1_000_000, 6)
+# M4 priced every call at one assumed rate, `ASSUMED_RATE_USD_PER_M`. M7 replaced it with
+# `routing.PRICE_TABLE`, per model, and `cost_usd` is re-exported from here so the M4 call
+# sites and their tests keep one import path.
 
 
 class Tier2Unavailable(RuntimeError):
     """No usable credential. Raised at construction, never mid-tick from a call site."""
+
+
+class Tier1Unavailable(RuntimeError):
+    """`langchain-ollama` is missing or the base URL is empty. Raised at construction, never mid-tick."""
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,7 @@ class ModelResponse:
     provider: str
     model: str
     finish_reason: str
+    tier: int = TIER2
     text: str = ""
     payload: dict[str, Any] | None = None
     input_tokens: int = 0
@@ -134,6 +137,10 @@ class ModelResponse:
     @property
     def truncated(self) -> bool:
         return self.finish_reason in {"length", "max_tokens"}
+
+    @property
+    def cost_usd(self) -> float:
+        return cost_usd(self.input_tokens, self.output_tokens, model=self.model, tier=self.tier)
 
 
 # --------------------------------------------------------------------------- #
@@ -330,4 +337,159 @@ async def call_tier2(
     )
     if response.truncated:
         log.error("tier2_truncated", agent=agent, model=model, max_tokens=kwargs["max_tokens"], hint="raise max_tokens; this is a config bug, not a weak model")
+    return response
+
+
+# --------------------------------------------------------------------------- #
+# Tier 1: the local model, M7
+# --------------------------------------------------------------------------- #
+PROVIDER_OLLAMA = "ollama"
+
+
+def build_tier1_client(*, model: str = "", num_ctx: int | None = None, max_tokens: int = DEFAULT_MAX_TOKENS, schema: dict[str, Any] | None = None, reasoning: bool = False, temperature: float | None = None) -> Any:
+    """The single place a Tier-1 actor is constructed. Every trap from `src/models/CLAUDE.md`, in one constructor.
+
+    `ChatOllama`, never `ChatOpenAI` at the compatibility shim: the shim silently drops
+    `num_ctx`, which once produced an entire investigation that looked like "small models are
+    too weak" and was a 4,096-token default. `num_ctx` is always passed, from `OLLAMA_NUM_CTX`,
+    never left to the server. `reasoning` is an explicit argument here and an explicit argument
+    at the call site above it, never read from the environment. `format=` carries the JSON
+    schema so the server constrains decoding to it, which is the Ollama-side equivalent of the
+    forced tool call: the shape is enforced rather than requested, and `done_reason` stays
+    honest (`stop` answered, `length` ran out) independent of whether the text parses.
+
+    Imported inside the function so a machine without `langchain-ollama` still loads this
+    module for the Tier-2 path it is using.
+    """
+    settings = get_settings()
+    if not settings.ollama_base_url:
+        raise Tier1Unavailable("OLLAMA_BASE_URL is empty")
+    try:
+        from langchain_ollama import ChatOllama
+    except ImportError as exc:  # pragma: no cover - dependency, not logic
+        raise Tier1Unavailable("Tier 1 needs `langchain-ollama`; `pip install langchain-ollama`") from exc
+
+    kwargs: dict[str, Any] = {
+        "model": model or settings.tier1_model,
+        "base_url": settings.ollama_base_url,
+        "num_ctx": int(num_ctx or settings.ollama_num_ctx),
+        "num_predict": max_tokens,
+        "reasoning": reasoning,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+    }
+    if schema is not None:
+        kwargs["format"] = schema
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    return ChatOllama(**kwargs)
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    """The constrained output as a dict, or `None`. A grammar-constrained answer that still fails
+    to parse is a truncation in practice, and `finish_reason` says so separately."""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def call_tier1(
+    *,
+    agent: str,
+    system: str,
+    user: str,
+    schema: dict[str, Any] | None = None,
+    reasoning_effort: str = "none",
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float | None = None,
+    incident_key: str | None = None,
+) -> ModelResponse:
+    """One Tier-1 call against Ollama. No retry, no fallback here, one log line, always.
+
+    The escalation to Tier 2 is the caller's (`workers.judge_packet`), on the reasons in
+    `routing.escalation_reason`, so this function stays the same shape as `call_tier2`: it
+    reports what came back and never decides what to do about it.
+
+    `reasoning_effort` is honoured as a boolean here: Ollama's `think` is on or off, so anything
+    other than `"none"` turns thinking on and the budget is the server's. The rule from the top
+    of `src/models/CLAUDE.md` says it stays `"none"` for the work order, and the argument is
+    explicit so that a different job can say otherwise at its own call site.
+
+    **The one config bug this function can catch itself is the context window.** Ollama does not
+    fail a prompt longer than `num_ctx`; it truncates from the front and answers about the rest,
+    which for this repo's packets means the model sees a page whose SOP is missing and cites
+    rules it never read. `prompt_eval_count` comes back on every answer, so it is compared to
+    `num_ctx` and logged as `tier1_context_full` when it is within a hundred tokens of the ceiling.
+    """
+    settings = get_settings()
+    model = settings.tier1_model
+    num_ctx = int(settings.ollama_num_ctx)
+    think = reasoning_effort != "none"
+
+    try:
+        client = build_tier1_client(model=model, num_ctx=num_ctx, max_tokens=max_tokens, schema=schema, reasoning=think, temperature=temperature)
+    except Tier1Unavailable as exc:
+        response = ModelResponse(provider=PROVIDER_OLLAMA, model=model, finish_reason="transport_error", tier=TIER1, error=f"{type(exc).__name__}: {exc}")
+        log_agent_call(agent=agent, tier=TIER1, provider=PROVIDER_OLLAMA, model=model, finish_reason=response.finish_reason, latency_ms=0, error=response.error, reasoning_effort=reasoning_effort, num_ctx=num_ctx, incident_key=incident_key)
+        return response
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    watch = Stopwatch()
+    try:
+        message = await client.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
+    except Exception as exc:
+        # Same breadth as Tier 2, same reason: a dead Ollama, a missing model, and a socket
+        # timeout are all "no answer, say so in one line" to this layer.
+        detail = f"{type(exc).__name__}: {exc}"
+        response = ModelResponse(provider=PROVIDER_OLLAMA, model=model, finish_reason="transport_error", tier=TIER1, latency_ms=watch.ms, error=detail)
+        log_agent_call(agent=agent, tier=TIER1, provider=PROVIDER_OLLAMA, model=model, finish_reason=response.finish_reason, latency_ms=response.latency_ms, error=detail, reasoning_effort=reasoning_effort, num_ctx=num_ctx, incident_key=incident_key)
+        return response
+
+    latency_ms = watch.ms
+    meta: dict[str, Any] = dict(getattr(message, "response_metadata", None) or {})
+    usage: dict[str, Any] = dict(getattr(message, "usage_metadata", None) or {})
+    text = message.content if isinstance(message.content, str) else "".join(str(part) for part in message.content)
+    finish_reason = str(meta.get("done_reason") or "unknown")
+    payload = _parse_json_object(text) if schema is not None else None
+    input_tokens = int(usage.get("input_tokens") or meta.get("prompt_eval_count") or 0)
+    output_tokens = int(usage.get("output_tokens") or meta.get("eval_count") or 0)
+    thinking = str((getattr(message, "additional_kwargs", None) or {}).get("reasoning_content") or "")
+
+    response = ModelResponse(
+        provider=PROVIDER_OLLAMA,
+        model=str(meta.get("model") or model),
+        finish_reason=finish_reason,
+        tier=TIER1,
+        text=text,
+        payload=payload,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        latency_ms=latency_ms,
+        thinking=thinking,
+        raw_content_types=("json",) if payload is not None else ("text",),
+    )
+    # Before validation, same as Tier 2: the receipt of what came back exists whether or not
+    # the rails like it.
+    log_agent_call(
+        agent=agent,
+        tier=TIER1,
+        provider=PROVIDER_OLLAMA,
+        model=response.model,
+        finish_reason=finish_reason,
+        latency_ms=latency_ms,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        tool_calls=1 if payload is not None else 0,
+        reasoning_effort=reasoning_effort,
+        max_tokens=max_tokens,
+        num_ctx=num_ctx,
+        content_types=list(response.raw_content_types),
+        incident_key=incident_key,
+    )
+    if response.truncated:
+        log.error("tier1_truncated", agent=agent, model=response.model, max_tokens=max_tokens, hint="raise max_tokens; this is a config bug, not a weak model")
+    if input_tokens and input_tokens >= num_ctx - 100:
+        log.error("tier1_context_full", agent=agent, model=response.model, input_tokens=input_tokens, num_ctx=num_ctx, hint="the page is at or over num_ctx; Ollama truncates from the front and the model never saw the whole SOP. Raise OLLAMA_NUM_CTX; do not trim the SOP")
     return response

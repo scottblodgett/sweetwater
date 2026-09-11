@@ -28,7 +28,9 @@ points outside the repo's `logs/`.
 
 ## And never point a test at a model
 
-Same rule, other expensive mistake. `conftest.no_model_calls` is **autouse** and replaces
+Same rule, other expensive mistake (and from M7 the same fixture refuses `build_tier1_client` too:
+free is not the same as allowed, and a test that reaches Ollama is a test that needs Ollama running).
+`conftest.no_model_calls` is **autouse** and replaces
 `llm_client.build_client` with something that raises, so a test that reaches a real model
 fails instead of billing. From M2 the tick's last two stages spend money, so `run_tick`
 takes `spend=False` and every rail passes it; the fixture is what happens when somebody

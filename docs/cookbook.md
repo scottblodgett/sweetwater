@@ -851,4 +851,83 @@ spike is the evidence.
 
 ---
 
-_Candidates still known from the design and not yet paid for: the `num_ctx` shim trap._
+## 35. Count the page in the target model's tokenizer before the first local call
+
+**Pain.** `num_ctx` was set to 16,384 on the strength of "the Opus count is 5,500, that fits." Two
+tokenizers, two counts, and Ollama does not fail a prompt longer than `num_ctx`: it truncates from
+the front and answers about the rest, which for this repo means a model that never saw the SOP and
+cites rules it did not read. That presents as a weak model and is a config bug.
+
+**Fix.** One real assembled packet through `call_tier1` before any tick, reading
+`prompt_eval_count` back: 3,024 (feed) and 3,586 (water) tokens against 16,384, so the SOP was never
+at risk. `call_tier1` now logs `tier1_context_full` when the count is within a hundred of the
+ceiling, so the day a packet grows the log says so before the citation rail does.
+
+**Lesson.** "It fits" is a number in the tokenizer that will read it. Measure once in that
+tokenizer, then make the code say when the measurement stops holding.
+
+**Found:** M7, by measuring first. The trap the design warned about since M2 was paid for without
+tripping it.
+
+---
+
+## 36. A model allowed to say "I do not know" will say it wherever the rulebook asks for a fact the page lacks
+
+**Pain.** `insufficient_information` was added so the local model could decline instead of
+inventing. It declined on 5 of 6 candidates. Reading the pairs, it was right each time: FEED-02
+asks for the forecast, SENSOR-01 asks how long the sensor has been dark, and the page carried
+neither. Opus, same pages, wrote around the gap and listed it under `unknowns`.
+
+**Fix.** The field's description now names what is an unknown (forecast, fuel, head count, tank
+capacity) and what is insufficiency (the incident's own reading missing, no rule on the page). That
+moved the water packet from 5/5 to 2/5 and the feed packet from 5/5 to 4/5. The rest is not a prompt
+problem: the feed page needs the weather station on it (`docs/issues.md` #12).
+
+**Lesson.** An honest exit gets used exactly as often as the inputs are honestly insufficient. When
+a cheap model takes it constantly, look at the page before the model; the fix is usually more
+evidence, not less permission.
+
+**Found:** M7, first measurement.
+
+---
+
+## 37. A citation can be right and fail a format check; trim in the parser, judge in the rail
+
+**Pain.** `rules_cited: ["FEED-02 - A bin at the warning line is a delivery to schedule, not a
+fire"]` on four of five local answers. The id was right every time. `invented_rule` compared the
+whole string and rejected, which would have escalated a correct order to Opus over punctuation.
+
+**Fix.** `normalize_citations` trims each citation to the rule id at its front before the rail runs,
+and records `rule_citation_trimmed` (non-blocking). The rail is unchanged: a trimmed id still has to
+be a heading in the SOP the packet carried, and `WATER-09 - anything` still rejects.
+
+**Lesson.** Separate "did it name a real rule" from "did it spell the reference the way we like."
+The first is a rail. The second is a parse step, and a parse step that is recorded is still
+countable in a ledger row.
+
+**Found:** M7, first measurement.
+
+---
+
+## 38. The rate was one constant, and it was wrong by 3x; the tokens beside it were fine
+
+**Pain.** `ASSUMED_RATE_USD_PER_M = (15, 75)` from M4, stated as an assumption in one place. The
+Opus 5 list price is $5 / $25. Every dollar figure in three docs for four phases was three times the
+real bill, including the "$28 an hour" that motivated the debounce (which was still the right call at
+$9).
+
+**Fix.** `routing.PRICE_TABLE`, per model id as the provider spells it, Tier 1 free by tier, an
+unknown paid model billed at the most expensive known row with one warning. The historical rows
+were left as written with the correction beside them, because their token counts are the
+measurement and the dollars were arithmetic.
+
+**Lesson.** State the assumption in one place, yes, and also write down where it came from, so
+the day it is checked the check is one lookup. And when it turns out wrong, correct the arithmetic
+and keep the measurement; rewriting history to the new rate destroys the record of what you thought
+when you decided.
+
+**Found:** M7, loading the price table.
+
+---
+
+_Candidates still known from the design and not yet paid for: none._

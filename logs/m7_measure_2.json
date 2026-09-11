@@ -1,0 +1,210 @@
+{
+  "incident": {
+    "key": "alkali-flat-water:water_low",
+    "sensor_id": "alkali-flat-water",
+    "sensor_type": "water-level",
+    "location": "Alkali Flat",
+    "category": "water_low",
+    "severity": "warning",
+    "status": "opened",
+    "summary": "Alkali Flat: stock-tank level reads 3.4 gal on alkali-flat-water, at or below the warning line of 6 gal. This tank is drawing down and will not carry the cattle on it through a hot afternoon.",
+    "last_value": "3.4 gal",
+    "unit": " gal",
+    "threshold": 6.0,
+    "occurrences": 1,
+    "first_seen_at": "2026-09-11T13:21:08.281000Z",
+    "last_seen_at": "2026-09-11T13:21:08.281000Z",
+    "resolved_at": null,
+    "tick_opened": 0,
+    "tick_last_seen": 0,
+    "run_id": "",
+    "owner": "water_feed",
+    "row_id": null
+  },
+  "agent": "water_feed",
+  "sop": "water.md",
+  "page": "## The incident, as triage ranked it in code\n\n- severity: WARNING (already decided; not yours to change)\n- category: water_low\n- sensor: alkali-flat-water, a stock-tank level sensor\n- location: Alkali Flat\n- reading: 3.4 gal, against a warning line of 6 gal\n- triage said: Alkali Flat: stock-tank level reads 3.4 gal on alkali-flat-water, at or below the warning line of 6 gal. This tank is drawing down and will not carry the cattle on it through a hot afternoon.\n- history of this incident: seen 1 time(s), first at 2026-09-11T13:21:08.281000+00:00, still opened\n\n## This sensor's last 12 readings, newest first\n\n  (This series is generated independently of the reading above and does NOT contain it. Use it for the range and the trend; the authoritative current value is the triaged reading.)\n  - 2026-09-11T13:21:11.059Z: 3.6 gal\n  - 2026-09-11T13:11:11.059Z: 2.6 gal\n  - 2026-09-11T13:01:11.059Z: 3.2 gal\n  - 2026-09-11T12:51:11.059Z: 3.1 gal\n  - 2026-09-11T12:41:11.059Z: 4.7 gal\n  - 2026-09-11T12:31:11.059Z: 4.5 gal\n  - 2026-09-11T12:21:11.059Z: 3.7 gal\n  - 2026-09-11T12:11:11.059Z: 0.2 gal\n  - 2026-09-11T12:01:11.059Z: 0.4 gal\n  - 2026-09-11T11:51:11.059Z: 1.8 gal\n  - 2026-09-11T11:41:11.059Z: 1 gal\n  - 2026-09-11T11:31:11.059Z: 1.2 gal\n\n## Other sensors at Alkali Flat, read in this same sweep\n\n  - battery charge (alkali-flat-battery): 80.5%\n  - fence energizer voltage (alkali-flat-fence): 8.7 kV\n  - gate (alkali-flat-gate): closed\n  - relative humidity (alkali-flat-humidity): 14.3%\n  - soil moisture (alkali-flat-soil): 27.1%\n  - air temperature (alkali-flat-temp): 42.6 F\n  - stock-tank level (alkali-flat-water-2): 21 gal\n\n## What is standing behind it\n\n  Alkali Flat (alkali-flat): 2400 acres, 111 head on it, barbed-wire, pasture status open\n\n## The standing orders that apply (water.md)\n\n# SOP: Water - the production world\n\nDerived from `docs/sweetwater-ranch.md`. Nothing else in this repo may source these rules,\nand no rule here may be invented at the prompt: an agent that cites `WATER-04` when there\nis no `WATER-04` is worse than one that says it has no rule to cite.\n\n**The standing order this file serves:** keep ~1,000 head watered across 34,000 deeded and\nleased acres with a small year-round crew and brutal driving distances. Nobody dies of\nthirst. Everything below is downstream of that sentence.\n\n**What makes water different from every other sensing world here.** A dry tank is not a\ndegradation, it is a countdown. Cattle in this country drink 15 to 20 gallons a head a day\nand closer to double that over 90 degrees. There is no reserve behind a stock tank: when it\nis empty the animals on it have nothing, and the nearest fix is a human in a truck who may\nbe an hour out. That is why water escalates on a shorter clock than anything else on the\nranch, and why the crew would rather be sent to a full tank by mistake than not sent to an\nempty one.\n\n---\n\n## WATER-01 - A tank at or below the critical line is a haul today, not a work order for the morning\n\n**Applies to:** `water_low`, severity `critical`.\n\nThe tank is effectively dry. Assume the cattle on it are already out of water rather than\nabout to be.\n\n1. **Dispatch, do not investigate.** Send water to the location on this shift. Confirming\n   the reading first costs the same drive as fixing it.\n2. **Name the pasture and the head count in the work order.** The crew prioritizes by how\n   many animals are behind the problem, and that number is what makes this tank the first\n   stop instead of the third.\n3. **Check the well or windmill that feeds it before you leave the yard.** A tank that fell\n   to nothing is usually a supply failure, not consumption. If the site is solar-fed, the\n   battery is the first suspect, because a dead pump and a dead telemetry radio arrive\n   together and a blind tank reads exactly like a full one.\n4. **Do not close this out on a single good reading.** The tank has to hold, not just fill.\n\n**Escalate to the general manager** when two or more tanks are critical in the same tick, or\nwhen the same tank goes critical again after a haul. Both mean the supply, not the tank.\n\n## WATER-02 - A tank at the warning line is today's route, not tomorrow's\n\n**Applies to:** `water_low`, severity `warning`.\n\nThe tank is drawing down faster than it is filling. It has hours, not days, and heat takes\nthose hours away.\n\n1. Put it on today's water route. It does not need its own trip; it does need to be seen\n   before dark.\n2. **Read it against the location's other sensors before deciding it is normal.** A falling\n   tank next to a hot air temperature is a different problem than a falling tank on a cool\n   morning, and the second one is a leak.\n3. If the same tank has appeared on this list more than a couple of ticks running, stop\n   treating it as consumption and start treating it as a leak or a failed float.\n\n## WATER-03 - Freeze is a water problem before it is a weather problem\n\n**Applies to:** `freeze_risk` at any severity, on a `temperature` sensor.\n\nCold does not kill cattle here. Cold cuts them off from water, and thirst does.\n\n1. **Critical (hard freeze):** tanks at this location go solid. Check tank heaters and\n   floats at every water site in the pasture, not just the one that alarmed, and plan to\n   chop ice if the heaters are not holding.\n2. **Warning:** open water starts skinning over. Confirm heaters are drawing and that the\n   propane or battery behind them has a reserve.\n3. **A freeze reading and a low tank at the same location is the ranch's worst pairing.**\n   A tank that is both low and freezing has less water and less of it reachable. Treat it as\n   WATER-01 regardless of what the level band said on its own.\n\n## WATER-04 - Heat doubles demand and every low tank behind it\n\n**Applies to:** `heat_stress` at any severity, on a `temperature` sensor.\n\n1. **Critical:** water demand roughly doubles. Any tank already at a warning level will not\n   keep up through the afternoon, so pull those forward to today rather than waiting for\n   them to cross the critical line on their own.\n2. **Warning:** consumption climbs above the tank refill rate. Worth checking that the well\n   feeding the pasture is running, not just that the tank is currently full.\n3. Shade and wind matter to the animal; water is what the ranch controls. Keep the work\n   order about water.\n\n## WATER-05 - A sensor you cannot believe is a maintenance job, and the pasture is still unwatched\n\n**Applies to:** a water site whose sensor is `offline`, `degraded`, or reading outside\nphysical possibility.\n\n1. The sensor fault itself belongs to `infrastructure`. Do not write it as a water order.\n2. **But the pasture behind it is now unmonitored, and that is a water fact.** Say so\n   plainly and put physical eyes on the tank on the next pass through. A silent sensor and a\n   full tank are indistinguishable from here, and only one of them is survivable.\n\n## WATER-06 - Stock water is not the compliance gauge, and the two do not substitute\n\n**Applies to:** `stream_flow_low`, and to any temptation to read a creek gauge as stock water.\n\nRiparian flow is what the habitat and conservation payments are scored on, and it is\n`compliance`'s to work. A thin creek is not permission to leave a tank empty, and a full\ntank is not evidence the reach is flowing. Keep them in separate work orders.\n\n---\n\n## The two things never to write in a water work order\n\n1. **An all-clear.** Code already decided this location has a problem before any of this was\n   assembled. \"Nothing appears to be wrong here\" is a contradiction, not a finding, and on\n   water it is the specific failure that gets animals killed.\n2. **A number nobody measured.** Quote the reading in the packet, name the sensor that\n   produced it, and say the rest is unknown. Estimated gallons, invented head counts, and\n   inferred fill rates all read as authority and carry none.",
+  "system": "You are a working sub-agent on Sweetwater Land & Cattle Co., a fourth-generation Wyoming cattle ranch of roughly 34,000 acres and roughly 1,000 mother cows, run by a small year-round crew with long driving distances between places. Your output is read by a person who is about to get in a truck.\n\nYou are handed one evidence packet, already assembled. There is nothing to go look up and no tools to call. Everything you may rely on is on the page in front of you. Judge it and write the work order.\n\nFour rules, all of which outrank anything else in your brief.\n\n1. SEVERITY IS NOT YOURS. The packet's severity was decided in code by threshold rules before you were called. Echo it back exactly as given. Do not re-rank it, do not soften it, do not argue with it, and do not decide the sensor is probably fine. If the evidence genuinely contradicts the ranking, say so in one sentence inside your assessment and still echo the severity you were given.\n\n2. NEVER WRITE AN ALL-CLEAR. Code already found something wrong here. \"Nothing appears to be wrong\" is not a finding, it is a contradiction, and on this ranch it is the specific output that gets animals killed. If the packet is thin, write what is known, name what is unknown, and send someone to look.\n\n3. QUOTE ONLY WHAT IS ON THE PAGE. Every number in your output must appear in the packet, and you must name the sensor it came from. Do not estimate gallons, fill rates, days of feed remaining, drive times, or head counts that are not printed. If you need a number the packet does not have, put the need in `unknowns` instead of filling it in. An invented number reads as authority and carries none, and the crew cannot tell yours from a measured one.\n\n   Two specific traps on this page:\n   - The reading under \"the incident\" is the authoritative current value. The recent-readings series is generated separately and does NOT include it, so use that list only for the operating range and the trend. Never quote the top of the series as \"current.\"\n   - The packet states its absences in words (\"no pasture is mapped to...\", \"none available: ...\"). A stated absence is a gap, not a fact. Do not reason from it as though it were zero.\n\n4. CITE THE RULE YOU ACTED ON. Every action traces to a rule id from the standing orders at the bottom of the packet, quoted exactly as written there (for example `WATER-01`). If no rule covers what you are recommending, say that plainly instead of citing a rule id that does not exist. An invented rule id is worse than no citation, because the next person goes looking for it.\n\nHow to actually read the packet, in this order:\n- The incident, and the reading against its line. That is the fact.\n- The other sensors at the same location, read in the same sweep. This is where the diagnosis usually is: a second tank on the same ground reading full points at that tank rather than at the supply, and a hot air temperature next to a falling one changes what the falling one means.\n- What is standing behind it. The head count is why one job goes before another, so put it in the work order when it is there.\n- The standing orders. They decide what the crew does. The packet decides what is true.\n\nWrite the way the crew talks: short, concrete, no hedging, no restating the packet back. Name the place, name the sensor, say what to do first. No em dashes.\n\nYOUR PATCH: water and feed. Stock tanks, wells and windmills, feed bins, and the two weather readings that change what a tank or a bin means (temperature for freeze and heat, snow depth for access).\n\nWater is not like the other sensing worlds here. A dry tank is not a degradation, it is a countdown: cattle drink 15 to 20 gallons a head a day and closer to double that over 90 degrees, there is no reserve behind a stock tank, and the nearest fix is a human in a truck who may be an hour out. The crew would rather be sent to a full tank by mistake than not sent to an empty one. Write accordingly.\n\nFeed runs on a longer clock and is therefore the half that gets found late. A bin at reserve with weather coming is a today problem and the same bin under a clear week is not, so say which one you think it is and why.\n\nTwo things that are not yours, and saying so is part of the job:\n- A sensor you cannot believe (offline, degraded, or reading outside physical possibility) is `infrastructure`'s repair. But the pasture behind it is now unmonitored, and that IS your fact. Say it and get eyes on the tank.\n- Creek and stream flow is `compliance`'s, scored for habitat and conservation payments. It is not stock water and does not substitute for it in either direction.\n\nTHE `proposed_write` FIELD. Almost always leave `tool` as an empty string with empty `args`. Use it only when a change to the ranch's own records is the correct next step and the standing orders support it, and know that it is a proposal: a person reads it and approves or rejects it before anything runs, and the crew's actions in your list do not depend on it. If you do name one, every id and every quantity must be on this page exactly, and an argument that is not on the page is rejected in code. The tools you may name, and nothing else:\n- consume_feed(sku: an id printed on this page, quantity: a number printed on this page, reason: free text, optional)\n- restock_feed(sku: an id printed on this page, quantity: a number printed on this page, reason: free text, optional)",
+  "summary": {
+    "calls": 5,
+    "warm_latency_s": [
+      4.1,
+      3.9,
+      3.9,
+      3.2
+    ],
+    "input_tokens": [
+      3586
+    ],
+    "shipped": 5,
+    "rejected": 0,
+    "insufficient_information": 2,
+    "rule_citation_trimmed": 0,
+    "invented_rule": 0,
+    "write_shape_invalid": 0,
+    "sensor_named": 5,
+    "proposed_a_write": 0
+  },
+  "sequential": [
+    {
+      "finish_reason": "stop",
+      "latency_ms": 4457,
+      "input_tokens": 3586,
+      "output_tokens": 339,
+      "status": "ok",
+      "violations": [],
+      "payload": {
+        "severity_echo": "warning",
+        "headline": "Alkali Flat: stock-tank level reads 3.4 gal on alkali-flat-water, at or below the warning line of 6 gal. This tank is drawing down and will not carry the cattle on it through a hot afternoon.",
+        "assessment": "The evidence for the tank level suggests a rapid drawdown trend. The last twelve readings on alkali-flat-water show a steep decline from 4.7 gal (2026-09-11T12:41:11.059Z) to 3.4 gal (incident reading). The soil moisture (alkali-flat-soil) reading of 27.1% suggests dry conditions amplifying water risk. I do not find any direct contradiction to the warning assessment.",
+        "actions": [
+          "Put Alkali Flat on today's water route.",
+          "Check the well or windmill feeding alkali-flat-water before leaving the yard."
+        ],
+        "rules_cited": [
+          "WATER-02"
+        ],
+        "escalate": false,
+        "escalate_reason": "",
+        "insufficient_information": true,
+        "unknowns": [
+          "The supply source for alkali-flat-water needs checking, per WATER-02, point 2."
+        ],
+        "proposed_write": {
+          "tool": "",
+          "args": {}
+        }
+      },
+      "error": ""
+    },
+    {
+      "finish_reason": "stop",
+      "latency_ms": 4084,
+      "input_tokens": 3586,
+      "output_tokens": 388,
+      "status": "ok",
+      "violations": [],
+      "payload": {
+        "severity_echo": "warning",
+        "headline": "Alkali Flat: Water tank low. Send water today. Check feeder supply.",
+        "assessment": "Severity echoes as WARNING. Evidence does not contradict the warning ranking. The alkali-flat-water stock-tank level sensor reads 3.4 gal, which is below the warning line of 6 gal, confirming a draw-down issue. The tank is drawing down against the history of readings. The secondary tank reading, alkali-flat-water-2, shows 21 gal, indicating potential operational water elsewhere, but the primary tank is critically low. The feeder supply needs checking.",
+        "actions": [
+          "Go to Alkali Flat. Send water to alkali-flat-water stock-tank level sensor location.",
+          "On site, check the well or windmill feeding the alkali-flat-water stock-tank level sensor. Check the battery charge (alkali-flat-battery) of 80.5% for signs of failure.",
+          "When running water, check the alkali-flat-water-2 stock-tank level sensor for comparison. The area has 111 head on it.",
+          "Do not close this out until the tank holds water after filling."
+        ],
+        "rules_cited": [
+          "WATER-02"
+        ],
+        "escalate": false,
+        "escalate_reason": "",
+        "insufficient_information": true,
+        "unknowns": [
+          "The current fill rate or source capacity for the alkali-flat-water stock-tank level sensor."
+        ],
+        "proposed_write": {
+          "tool": "",
+          "args": {}
+        }
+      },
+      "error": ""
+    },
+    {
+      "finish_reason": "stop",
+      "latency_ms": 3942,
+      "input_tokens": 3586,
+      "output_tokens": 370,
+      "status": "ok",
+      "violations": [],
+      "payload": {
+        "severity_echo": "warning",
+        "headline": "Alkali Flat water tank requires immediate attention due to low level.",
+        "assessment": "The alkali-flat-water sensor reads 3.4 gal against a warning line of 6 gal, which confirms the severity level given. The alkali-flat-water sensor shows a clear declining trend over the last 12 readings. The alkali-flat-water-2 sensor reads 21 gal, which is higher than the current reading at alkali-flat-water. The soil moisture (alkali-flat-soil) is 27.1% and the air temperature (alkali-flat-temp) is 42.6 F. The alkali-flat-battery is at 80.5%.",
+        "actions": [
+          "Go to Alkali Flat. Check alkali-flat-water. It reads 3.4 gal. Due to severity WARNING, treat as WATER-02. Put it on today's water route. Check the well or windmill feeding alkali-flat-water before leaving the yard. Write a work order noting 111 head are behind the problem."
+        ],
+        "rules_cited": [
+          "WATER-02"
+        ],
+        "escalate": false,
+        "escalate_reason": "",
+        "insufficient_information": false,
+        "unknowns": [
+          "The water source feeding alkali-flat-water needs confirmation, per WATER-02."
+        ],
+        "proposed_write": {
+          "tool": "",
+          "args": {}
+        }
+      },
+      "error": ""
+    },
+    {
+      "finish_reason": "stop",
+      "latency_ms": 3873,
+      "input_tokens": 3586,
+      "output_tokens": 357,
+      "status": "ok",
+      "violations": [],
+      "payload": {
+        "severity_echo": "warning",
+        "headline": "Alkali Flat: Water tank critically low. Send water today.",
+        "assessment": "The Alkali Flat: stock-tank level reads 3.4 gal on alkali-flat-water, at or below the warning line of 6 gal. This tank is drawing down and will not carry the cattle on it through a hot afternoon. The reading of 3.4 gal on alkali-flat-water contradicts the recent reading of 21 gal on alkali-flat-water-2.",
+        "actions": [
+          "Dispatch water to Alkali Flat immediately.",
+          "Write the work order noting Alkali Flat and 111 head count.",
+          "Check the source feed for Alkali Flat before leaving the yard. Check the well or windmill that feeds alkali-flat-water."
+        ],
+        "rules_cited": [
+          "WATER-02"
+        ],
+        "escalate": false,
+        "escalate_reason": "No trigger met for escalation.",
+        "insufficient_information": false,
+        "unknowns": [
+          "Consumption rate between 2026-09-11T12:21:11.059Z and 2026-09-11T13:21:08.281000+00:00 for alkali-flat-water."
+        ],
+        "proposed_write": {
+          "tool": "",
+          "args": {}
+        }
+      },
+      "error": ""
+    },
+    {
+      "finish_reason": "stop",
+      "latency_ms": 3197,
+      "input_tokens": 3586,
+      "output_tokens": 285,
+      "status": "ok",
+      "violations": [],
+      "payload": {
+        "severity_echo": "warning",
+        "headline": "Alkali Flat water tank requires immediate attention today due to low level.",
+        "assessment": "The alkali-flat-water sensor reads 3.4 gal, which is at or below the warning line of 6 gal. The evidence does not contradict the given warning severity.",
+        "actions": [
+          "Today's water route: Visit Alkali Flat. Check alkali-flat-water sensor reading of 3.4 gal against the warning line of 6 gal. Check alkali-flat-water-2 sensor reading of 21 gal.",
+          "Check the well or windmill that feeds the alkali-flat-water sensor before leaving the area.",
+          "Name Alkali Flat and 111 head in the work order."
+        ],
+        "rules_cited": [
+          "WATER-02"
+        ],
+        "escalate": false,
+        "escalate_reason": "",
+        "insufficient_information": false,
+        "unknowns": [
+          "Unknown fuel source/supply failure for alkali-flat-water sensor."
+        ],
+        "proposed_write": {
+          "tool": "",
+          "args": {}
+        }
+      },
+      "error": ""
+    }
+  ],
+  "concurrent": [],
+  "pair_wall_s": 0.0
+}

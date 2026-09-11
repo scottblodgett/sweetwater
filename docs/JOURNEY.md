@@ -1188,3 +1188,88 @@ it cannot count what is waiting. The field is `None` on that tick and the line s
 | `write_key_unknown` in `_gate_step` | the key is code's, and "cannot happen" is what a hand-built work order will say |
 | the test-suite log directory fix | a receipt file must never carry a test |
 | `src/agent/gate.py` as a leaf | the tree had no home for a gate and its CLI |
+
+## M7 - Model routing, measured and not adopted
+
+**What was planned.** Tier 1 on Ollama, the cascade, the real pricing table, one job moved down at
+a time with a rail and a ledger row. Three pending rows in `docs/model-routing.md`.
+
+**What actually happened, in order.**
+
+**The ledger was wrong about what the jobs were, and that was the first fix.** The three pending rows
+named chaos observation prose (M5 made chaos pure code), packet judging, and the work-order write
+(one call since M2). Two model jobs exist: the per-incident work order and the fused shift report. The
+rows were rewritten before any code.
+
+**The design conversation changed the predicate.** Scott worked it from the readings up: code owns
+detection, code owns the page, the model writes; where can a cheaper model still miss? Not in
+finding, which is code's, but in reading the page thinly and in the cross-world pattern, which only
+the shift report sees. Two consequences, both decisions now (`docs/STATE.md` 28 and 29): "two or
+more worlds" gates fusion only and is not a per-incident trigger; and escalation is a rewrite from
+the identical page, triggered after the call by a rail rejection, `insufficient_information`, a
+proposed write, or no answer, and before it only by critical.
+
+**Three findings from the reads before a line was written.** The assumed rate was 3x the Opus 5
+list price (cookbook #38). Thinking on Opus 5 is adaptive by default and `budget_tokens` is rejected,
+which nothing here sends (`docs/issues.md` #13; 64 real calls, zero thinking blocks). And "proposes a
+write" cannot be known before the call, so it became a post-call trigger.
+
+**Built.** `routing.py` (price table, `tier_for`, `escalation_reason`), `call_tier1` on `ChatOllama`
+with `format=` carrying the schema, the cascade inside `judge_packet` with the Tier-1 receipt kept
+on the stored order, `insufficient_information` on the schema, `tier` / `tier1_orders` /
+`escalations` / `escalation_reasons` on the tick line, `TIER1_ENABLED` and `TIER_COMPARE`,
+`logs/compare.jsonl`, `normalize_citations`. Sixteen new tests including the planted local
+all-clear that must escalate, the per-reason escalations, compare mode, and the tick line. 369
+green, ruff and mypy clean.
+
+**Measured before the first live local tick, as asked.** One real packet through Ollama: 3,024 to
+3,586 tokens in against `num_ctx` 16,384 (cookbook #35), 4 to 13s warm, 22s cold, two concurrent
+calls overlapping partly. Two problems on the first five calls: whole headings copied into
+`rules_cited` (#37, trimmed in the parser) and `insufficient_information` on 5 of 5 (#36, wording
+tightened once, then 2 of 5 water and 4 of 5 feed). The wall-clock answer for a 14-incident tick:
+about 60s of local calls plus up to 60s of escalations, inside 300s.
+
+**Three measured ticks, test ledger, cascade and comparison on.** 12 opened, 12/12 shipped, 0
+rejected, 0 all-clears, 0 invented rules. 6 critical went straight to Opus. Of 6 Tier-1 candidates,
+5 escalated on `insufficient_information` and 1 stayed local. Side by side on the six pairs
+(`docs/m7-compare-transcript.md`): the local model named the flagged neighbour 1 of 3 (Opus 3 of 3),
+the head count 1 of 4 (Opus 4 of 4), padded actions with echoes of its brief on 3 of 6, and proposed
+writes outside its slice on 4 of 6 (all stripped or escalated before the gate). $0.74 for the run
+at the real rate, shadows excluded.
+
+**Verdict.** No move. `TIER1_ENABLED` ships off. The local model was never unsafe, and it saved one
+call in twelve while being thin about the two things a rancher reads the order for. The row says
+so, and it names the change that would earn the next attempt: the forecast on the feed page
+(`docs/issues.md` #12), so the honest answer stops being "I do not know."
+
+### What diverged from the plan
+
+| Planned | Happened | Why |
+| --- | --- | --- |
+| three Tier-1 jobs to move | two jobs exist; one measured, one kept at Tier 2 by decision | chaos is code, assembly is code, judging and writing are one call |
+| "2+ worlds" escalates per incident | gates fusion only | the world count says nothing about one packet; per incident it is the whole storm-tick bill |
+| a write proposal escalates before the call | after it, as a rewrite | the proposal is in the answer |
+| a Tier-1 rejection escalates | plus `insufficient_information`, `proposed_write`, `no_answer` | each is a different fact at 2am |
+| the job moves | it does not | the row |
+| `cost_usd` at the old rate | per model, 3x lower | the list price |
+
+### Defects the phase caught in itself
+
+1. **The rate.** `(15, 75)` against a list price of `(5, 25)`. Every dollar since M2, three docs.
+2. **A backspace in a regex.** The first `_RULE_ID_PREFIX` was written through a shell heredoc that
+   turned `\b` into a literal backspace; the trim silently matched nothing and a test caught it.
+3. **The measurement script's write in an async function** tripped `ASYNC240`; moved to the caller.
+4. **`judge_packet` was not imported** where the new tests used it, and the tick-line test needed
+   two incidents to show two tiers. Both found by the tests failing, both trivial.
+
+### Work not asked for, and why each one is here
+
+| Added | Why it was not optional |
+| --- | --- |
+| `normalize_citations` and `rule_citation_trimmed` | four of five correct local citations would have escalated over format |
+| `tier1_*` receipt fields on `WorkOrder` | the tick line and the row have to be readable off the stored orders |
+| `TIER_COMPARE` and `logs/compare.jsonl` | the row needs the same page to both models, and the ranch redraws every reading, so it cannot be reconstructed later |
+| `FALLBACK_RATE` with one warning | an unknown paid model must over-count toward the ceiling, never bill at zero |
+| `keep_alive=30m` | Ollama's default equals the cadence; the model would reload every tick |
+| `tier1_context_full` | the config bug the design warned about, made to announce itself |
+| the `insufficient_information` wording tightened once | 5 of 5 on the first packet was the description, not the model; a second pass was not tried because the rest is the page (#12) |

@@ -37,6 +37,11 @@ _BULK_KEYS = frozenset({"prompt", "prompt_body", "response_body", "messages", "t
 TICK_STREAM = "sweetwater.tick"
 AGENT_STREAM = "sweetwater.agent"
 AUDIT_STREAM = "sweetwater.audit"
+#: M7's measurement stream. One line per packet judged by both tiers on the identical page,
+#: written only when `TIER_COMPARE=1`. Not one of the three operational streams; a grading
+#: artifact, and the only file in `logs/` that carries model prose (two work orders, already
+#: stored in `sw_ops` anyway) because grading them is the whole point of it.
+COMPARE_STREAM = "sweetwater.compare"
 
 _configured = False
 _run_id = ""
@@ -163,7 +168,7 @@ def configure_logging(run_id: str | None = None) -> str:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    for name, filename, daily in ((TICK_STREAM, "tick.jsonl", False), (AGENT_STREAM, "agent.jsonl", False), (AUDIT_STREAM, "audit.jsonl", True)):
+    for name, filename, daily in ((TICK_STREAM, "tick.jsonl", False), (AGENT_STREAM, "agent.jsonl", False), (AUDIT_STREAM, "audit.jsonl", True), (COMPARE_STREAM, "compare.jsonl", False)):
         stream_logger = logging.getLogger(name)
         stream_logger.handlers.clear()
         stream_logger.addHandler(_file_handler(settings.log_path / filename, daily=daily))
@@ -240,6 +245,11 @@ def log_agent_call(
         tool_calls=tool_calls,
         **fields,
     )
+
+
+def log_compare(**fields: Any) -> None:
+    """One line per (packet, Tier-1 order, Tier-2 order) triple, M7. Written by `workers.judge_packet` when `TIER_COMPARE` is on."""
+    get_logger(COMPARE_STREAM).info("compare", **fields)
 
 
 def new_audit_id() -> str:

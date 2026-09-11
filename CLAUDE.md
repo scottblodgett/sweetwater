@@ -115,6 +115,9 @@ mypy src main.py
 
 python -m src.tools.chaos status   # M5. Also plan / inject / expire / restore, recipe in docs/STATE.md
 python -m src.agent.gate list      # M6. The writes agents proposed and nobody has answered. Also approve <audit_id> --by NAME, reject <audit_id> --by NAME --reason TEXT
+
+TIER1_ENABLED=1 python main.py --once                 # M7. The cascade: warning-severity work orders on the local model, Opus for critical and for every escalation. Ships OFF
+TIER1_ENABLED=1 TIER_COMPARE=1 python main.py --once  # M7. The measurement: every local order shadowed by Opus on the same page into logs/compare.jsonl. SPENDS
 ```
 
 **A model never performs a write. From M6 it may propose one, and a human answers.** A work order
@@ -139,6 +142,11 @@ does not apply to `--once`, where a human is at the keyboard.
 **`--once` costs money from M2.** Its last two stages assemble an evidence packet and hand
 it to Opus, once per newly-opened incident: 24k to 58k tokens depending on how much of the
 ledger is already `ongoing`, and **161k on the M3 tree with five agents and a shift report.**
+At the Opus 5 list price in `routing.PRICE_TABLE` that is about **$0.05 per work order**; every
+dollar figure written before M7 used a rate 3x too high, and the tokens beside it were the measurement.
+**The Tier-1 cascade exists from M7 and ships off** (`TIER1_ENABLED=0`): measured on three ticks, it
+saved one call in twelve and was thinner about the neighbour and the herd, so Opus writes every work
+order until `docs/model-routing.md` gets a row that says otherwise.
 In code, `run_tick(spend=False)` stops at the end of the free pass, and
 `conftest.no_model_calls` makes a forgotten flag fail loudly rather than bill.
 

@@ -34,7 +34,8 @@ container). Files are **always** JSON regardless of environment.
   "findings":21,"critical":6,"opened":2,"ongoing":8,"resolved":4,"pending":7,"dismissed":9,"held_unread":0,
   "agents_routed":["water_feed","infrastructure"],
   "work_orders":9,"work_orders_shipped":9,"work_orders_rejected":0,"escalated":1,
-  "input_tokens":50385,"output_tokens":7954,"cost_usd":1.35,
+  "tier":2,"tier1_orders":1,"escalations":8,"escalation_reasons":["critical","critical","insufficient_information","insufficient_information","critical","critical","insufficient_information","insufficient_information"],
+  "input_tokens":78773,"output_tokens":11186,"cost_usd":0.523485,
   "worlds":["infrastructure","water_feed"],"shift_report":"model","shift_report_violations":[],
   "ledger":{"opened":9,"ongoing":8,"resolved":4},
   "held":0,"skipped_upstreams":[],
@@ -42,8 +43,19 @@ container). Files are **always** JSON regardless of environment.
   "chaos_fired":0,"chaos_healed":0,"chaos_missed":[] }
 ```
 
-The M6 shape. A field is added to this line when the stage that produces it exists, not
+The M7 shape (the M7 fields and the token and cost values are from tick A of the M7 measurement,
+2026-09-11). A field is added to this line when the stage that produces it exists, not
 before, so a `null` here always means the stage ran and had nothing to say.
+
+**The cascade's four fields, M7.** `tier` is the highest tier that wrote anything this tick (a fused
+shift report counts as Tier 2), or `null` when no model was called, so a calm tick reads as no tier
+rather than as the cheap one. `tier1_orders` is how many stored work orders the local model wrote.
+`escalations` is how many stored orders were written by Tier 2 for a reason, and `escalation_reasons`
+is one code per such order, in order: `critical`, `rejected`, `insufficient_information`,
+`proposed_write`, `no_answer` (`routing.ESCALATION_REASONS`). `escalated`, older, is the model's own
+`escalate` flag on the order and means "a human above the crew should know"; it is a different fact.
+`input_tokens` and `output_tokens` include the Tier-1 attempt behind an escalation; `cost_usd` bills
+only the Tier-2 half, per order at that order's model.
 
 **The gate's four fields, M6.** `writes_proposed` is how many proposals paused for a human this
 tick; `writes_duplicate` is how many were suppressed because the same write for the same incident
@@ -54,8 +66,8 @@ count nobody measured must not read as zero.
 
 **`cost_usd` arrived at M4, not M7 as planned**, because the loop's spend ceiling is
 denominated in dollars and a ceiling in tokens is a multiplication somebody does wrong at 2am.
-It is `input_tokens` and `output_tokens` at `llm_client.ASSUMED_RATE_USD_PER_M`, a stated
-assumption in one place; M7's pricing table replaces the constant and not the field. Exactly
+From M7 it is summed per order at that order's model from `routing.PRICE_TABLE`, Tier 1 at $0.00;
+before M7 it was one assumed rate, which turned out to be 3x the Opus 5 list price. Exactly
 `0.0` on a tick that billed nothing. The loop sums it per run and halts at `SPEND_CEILING_USD`.
 
 **`pending` and `dismissed` are the debounce** (migration 0003). `pending` was flagged this sweep
@@ -118,9 +130,21 @@ notices it stop being flat.
   "content_types":["tool_use"],"incident_key":"feed-bin-03:feed_low" }
 ```
 
-That is a real M2 line. Tier 1 adds `num_ctx` and Tier 2 does not have one; the required
-fields are the ones in `log_agent_call`'s signature and everything else is per-call
-context. `content_types` is the block types the response actually contained, which is how
+That is a real M2 line. A real Tier-1 line, M7:
+
+```jsonc
+{ "ts":"…","run_id":"…","tick":1,"agent":"infrastructure","tier":1,
+  "provider":"ollama","model":"gemma4:e4b","reasoning_effort":"none",
+  "max_tokens":2048,"num_ctx":16384,"tool_calls":1,"input_tokens":3651,"output_tokens":443,
+  "finish_reason":"stop","latency_ms":5982,
+  "content_types":["json"],"incident_key":"coyote-draw-gate:sensor_offline" }
+```
+
+Tier 1 adds `num_ctx` and Tier 2 does not have one; `content_types` is `["json"]` when the
+schema-constrained answer parsed and `["text"]` when it did not; `tool_calls` is 1 for a parsed
+answer on either tier. The required fields are the ones in `log_agent_call`'s signature and
+everything else is per-call context. An escalation is two lines with the same `incident_key`, one
+per tier, and the console stream has `tier1_escalated` between them naming the reason. `content_types` is the block types the response actually contained, which is how
 "answered with no tool call" reads differently from "never answered."
 
 **`finish_reason` is the most valuable field in this whole scheme and it is required.**
@@ -136,6 +160,18 @@ value, or it flags an entire provider as broken. See below, and `src/models/CLAU
 **Written immediately on return, before validation runs**, so a response that fails a
 check still leaves a receipt of what was actually returned rather than vanishing into a
 retry.
+
+## `logs/compare.jsonl` - the measurement, M7, only when `TIER_COMPARE=1`
+
+One line per packet judged by both tiers on the identical page: `incident_key`, `agent`,
+`severity`, `escalation` (`""` when the local order stood and Opus was a shadow, else the reason),
+`page` (what code put on the page and a grader checks against: `sensor_id`, `last_value`,
+`siblings`, `siblings_flagged` per triage, `head_count`, `citable_rules`, `sop`), and `tier1` /
+`tier2` (headline, assessment, actions, rules, unknowns, `insufficient_information`,
+`proposed_write`, status, violations, receipt). **It carries model prose on purpose**: two work
+orders per line, already stored in `sw_ops`, because grading them is the whole point of the file. It
+is not one of the three operational streams, it is empty unless the knob is on, and the knob SPENDS.
+The M7 grading of six pairs is pinned as `docs/m7-compare-transcript.md`.
 
 ## `logs/audit.jsonl` - the receipt, one line per side effect
 
@@ -256,6 +292,7 @@ job: a finding that reads wrong and a log that cannot say why.
 
 ```bash
 jq -r '[.tick,(.input_tokens//0),(.output_tokens//0),(.work_orders_shipped//0),(.escalated//0)]|@tsv' logs/tick.jsonl
+jq -r '[.tick,(.tier//"-"),(.tier1_orders//0),(.escalations//0),((.escalation_reasons//[])|join(",")),(.cost_usd//0)]|@tsv' logs/tick.jsonl   # M7: who wrote the tick and why Opus was paid
 jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl
 jq -r '.audit_id' logs/audit.jsonl | sort | uniq -c | awk '$1!=2'   # every id here must be in `python -m src.agent.gate list`
 ```

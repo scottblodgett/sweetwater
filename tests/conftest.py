@@ -46,6 +46,7 @@ def no_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError("a test tried to construct a real model client. Pass spend=False, or build a ModelResponse directly (tests/CLAUDE.md).")
 
     monkeypatch.setattr("src.models.llm_client.build_client", _refuse)
+    monkeypatch.setattr("src.models.llm_client.build_tier1_client", _refuse)  # M7: free is not the same as allowed; a test that reaches Ollama is a test that needs Ollama
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +68,11 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
     monkeypatch.setattr("src.tools.chaos.get_settings", lambda: disarmed)
     monkeypatch.setattr("src.agent.executor.get_settings", lambda: disarmed)
     monkeypatch.setattr("src.agent.memory.get_settings", lambda: disarmed)
+    # M7: the cascade reads `tier1_enabled` and `tier_compare` through these three, so a test can
+    # flip either on the copy and have `judge_packet` see it.
+    monkeypatch.setattr("src.agent.workers.get_settings", lambda: disarmed)
+    monkeypatch.setattr("src.models.routing.get_settings", lambda: disarmed)
+    monkeypatch.setattr("src.models.llm_client.get_settings", lambda: disarmed)
     # And the log directory. Found at M6: a CLI rail calls `configure_logging()`, which installs
     # the file handlers for the whole process, and every audit line a later test wrote outside
     # `capture_logs` then landed in the real `logs/audit.jsonl` as a `proposed` nobody would ever

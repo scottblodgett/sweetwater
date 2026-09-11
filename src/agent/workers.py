@@ -1,9 +1,18 @@
-"""The sub-agents that spend money. Four responders as of M3, and Tier 2 for all of them.
+"""The sub-agents that spend money. Four responders as of M3; two tiers from M7.
 
 M2 built one, `water_feed`, to prove the shape end to end against the sharpest finding on the
 ranch ("the tank at Alkali Flat is dry"). M3 generalizes it: `run_agent` is that function with
-the agent name as an argument, and `fan_out` runs the four of them under one ceiling. The
-tier cascade still arrives at M7, with a rail and a ledger row per job moved.
+the agent name as an argument, and `fan_out` runs the four of them under one ceiling. M7 put the
+cascade inside `judge_packet`: `routing.tier_for` picks the first tier, the rails run on the
+answer as they always have, and `routing.escalation_reason` says whether Opus rewrites it.
+
+## The cascade is a rewrite, and the Tier-1 receipt survives it
+
+A Tier-1 order that fails a blocking rail, says `insufficient_information`, proposes a write, or
+never answered is not stored. Opus is handed the **identical** page and its order is the one
+stored, carrying `tier=2`, `escalation=<reason>`, and the Tier-1 receipt (`tier1_*`) so a tick
+line and a ledger row can be read off the stored orders alone. A Tier-2 rejection is stored as
+rejected, exactly as before M7. Nothing is retried at its own tier.
 
 **Four agents, one function.** What differs between them is their brief, their SOP set, and
 which sensor types reach them, and all three are data rather than behaviour: the brief comes
@@ -59,12 +68,16 @@ from typing import Any
 
 from src.agent.agent import WATER_FEED
 from src.agent.state import Incident, Severity, WorkOrder
-from src.models.llm_client import ModelResponse, call_tier2
+from src.models.llm_client import ModelResponse, call_tier1, call_tier2
+from src.models.routing import ESCALATE_CRITICAL, TIER1, TIER2, escalation_reason, tier_for
 from src.prompts.system_prompts import WORK_ORDER_SCHEMA, WORK_ORDER_TOOL, WORK_ORDER_TOOL_DESCRIPTION, system_prompt
 from src.tools.allowlists import WRITE_TOOL_ARGS, proposable_tools_for
 from src.tools.evidence import EvidencePacket
+from src.tools.sensors import SensorReading
+from src.tools.triage import triage_reading
+from src.utils.config import get_settings
 from src.utils.helpers import as_strings, gather_bounded, has_no_real_instruction
-from src.utils.logger import get_logger
+from src.utils.logger import get_logger, log_compare
 
 log = get_logger(__name__)
 
@@ -110,6 +123,14 @@ BLOCKING_VIOLATIONS = frozenset({"severity_mismatch", "all_clear", "invented_rul
 #:   * grounding: `ungrounded_write_arg`    an id or a quantity that is not on the page
 WRITE_VIOLATIONS = frozenset({"write_shape_invalid", "write_tool_not_allowed", "ungrounded_write_arg"})
 
+#: The id at the front of a citation, so `"FEED-02 - A bin at the warning line is a delivery to
+#: schedule"` is read as `FEED-02`. Found on the first Tier-1 measurement (M7): the local model
+#: copied whole headings into `rules_cited` on four of five answers, and the id was right every
+#: time. Trimming is a parse step, not a relaxed rail: the trimmed id still has to be a heading in
+#: the SOP the packet carried, and the trim is recorded (`rule_citation_trimmed`, non-blocking) so a
+#: ledger row can count it.
+_RULE_ID_PREFIX = re.compile(r"^\s*([A-Z][A-Z-]*-\d+)(?![A-Z0-9-])")
+
 _NUMBER_TOKEN = re.compile(r"-?\d+(?:\.\d+)?")
 _ISO_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$")
 
@@ -117,6 +138,21 @@ _ISO_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6
 def citable_rules(sop_text: str) -> frozenset[str]:
     """Every rule id the packet actually contained. Empty when it carried no SOP."""
     return frozenset(_RULE_HEADING.findall(sop_text))
+
+
+def normalize_citations(cited: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
+    """`(ids, trimmed)`. Each citation reduced to the rule id at its front when it has one; anything
+    without an id at the front is left as written, so it fails `invented_rule` on its own terms."""
+    out: list[str] = []
+    trimmed = False
+    for item in cited:
+        match = _RULE_ID_PREFIX.match(item)
+        if match and match.group(1) != item.strip():
+            trimmed = True
+            out.append(match.group(1))
+        else:
+            out.append(item.strip())
+    return tuple(dict.fromkeys(out)), trimmed
 
 
 def page_numbers(page: str) -> frozenset[float]:
@@ -205,15 +241,19 @@ def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket
         "headline": str(payload.get("headline") or "").strip(),
         "assessment": str(payload.get("assessment") or "").strip(),
         "actions": as_strings(payload.get("actions")),
-        "rules_cited": as_strings(payload.get("rules_cited")),
+        "rules_cited": as_strings(payload.get("rules_cited")),  # normalized below, once the violations list exists
         "escalate": bool(payload.get("escalate")),
         "escalate_reason": str(payload.get("escalate_reason") or "").strip(),
+        "insufficient_information": bool(payload.get("insufficient_information")),
         "unknowns": as_strings(payload.get("unknowns")),
         "severity_echo": str(payload.get("severity_echo") or "").strip().lower(),
         "proposed_write": proposal,
     }
 
     violations: list[str] = []
+    cleaned["rules_cited"], trimmed = normalize_citations(cleaned["rules_cited"])
+    if trimmed:
+        violations.append("rule_citation_trimmed")
     if not cleaned["headline"] or not cleaned["assessment"]:
         violations.append("schema_invalid")
     if cleaned["severity_echo"] != incident.severity:
@@ -253,6 +293,7 @@ def to_work_order(*, packet: EvidencePacket, agent: str, response: ModelResponse
         "latency_ms": response.latency_ms,
         "input_tokens": response.input_tokens,
         "output_tokens": response.output_tokens,
+        "tier": response.tier,
     }
 
     # `or response.truncated`: a tool call cut off at `max_tokens` still arrives with an
@@ -281,25 +322,106 @@ def to_work_order(*, packet: EvidencePacket, agent: str, response: ModelResponse
     )
 
 
+async def _judge_at(tier: int, packet: EvidencePacket, *, agent: str, system: str, page: str, reasoning_effort: str) -> WorkOrder:
+    """One call at one tier, folded through the rails. The two tiers differ only in how the schema is enforced."""
+    if tier == TIER1:
+        response = await call_tier1(agent=agent, system=system, user=page, schema=WORK_ORDER_SCHEMA, reasoning_effort=reasoning_effort, max_tokens=MAX_OUTPUT_TOKENS, incident_key=packet.incident.key)
+    else:
+        response = await call_tier2(
+            agent=agent,
+            system=system,
+            user=page,
+            schema=WORK_ORDER_SCHEMA,
+            schema_name=WORK_ORDER_TOOL,
+            schema_description=WORK_ORDER_TOOL_DESCRIPTION,
+            reasoning_effort=reasoning_effort,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            incident_key=packet.incident.key,
+        )
+    return to_work_order(packet=packet, agent=agent, response=response)
+
+
+def _tier1_receipt(order: WorkOrder) -> dict[str, Any]:
+    return {"tier1_finish_reason": order.finish_reason, "tier1_violations": order.violations, "tier1_latency_ms": order.latency_ms, "tier1_input_tokens": order.input_tokens, "tier1_output_tokens": order.output_tokens}
+
+
+def _compare_fields(order: WorkOrder) -> dict[str, Any]:
+    """What a grader reads off one order. The prose fields, the rails' verdict, and the receipt."""
+    return {
+        "tier": order.tier,
+        "model": order.model,
+        "status": order.status,
+        "violations": list(order.violations),
+        "headline": order.headline,
+        "assessment": order.assessment,
+        "actions": list(order.actions),
+        "rules_cited": list(order.rules_cited),
+        "unknowns": list(order.unknowns),
+        "insufficient_information": order.insufficient_information,
+        "proposed_write": order.proposed_write,
+        "finish_reason": order.finish_reason,
+        "latency_ms": order.latency_ms,
+        "input_tokens": order.input_tokens,
+        "output_tokens": order.output_tokens,
+    }
+
+
+def _page_facts(packet: EvidencePacket) -> dict[str, Any]:
+    """The facts code put on the page that a grader checks the orders against: which neighbours were
+    out of band, how many head were in the pasture, and which rules were citable. Code knows these
+    exactly because code assembled the page, which is what makes the comparison scorable at all."""
+    return {
+        "sensor_id": packet.incident.sensor_id,
+        "last_value": packet.incident.last_value,
+        "siblings_flagged": sorted(s.sensor_id for s in packet.siblings if triage_reading(SensorReading(sensor_id=s.sensor_id, sensor_type=s.sensor_type, location=packet.incident.location, status=s.status, value=s.value))),
+        "siblings": sorted(s.sensor_id for s in packet.siblings),
+        "head_count": packet.pasture.head_count if packet.pasture else None,
+        "citable_rules": sorted(citable_rules(packet.sop_text)),
+        "sop": packet.sop_name,
+    }
+
+
 async def judge_packet(packet: EvidencePacket, *, agent: str = WATER_FEED, reasoning_effort: str = "none") -> WorkOrder:
-    """One incident, one call, one work order.
+    """One incident, one page, one stored work order; one call usually, two when Tier 1 is overruled.
 
     The user turn is `packet.render()` verbatim, the same string a human reads when the
     packet is printed. One rendering, not two: a prompt whose text differs from the page you
-    inspected makes every debugging session a guess about which version the model saw.
+    inspected makes every debugging session a guess about which version the model saw. From M7
+    the same string is what both tiers see, which is what makes an escalation a fair rewrite and
+    a `TIER_COMPARE` pair a fair comparison.
+
+    The cascade, M7. `routing.tier_for` asks Tier 1 unless the incident is critical or the
+    cascade is off. `routing.escalation_reason` reads the Tier-1 order after the rails and says
+    whether Opus rewrites it; the reason lands on the stored order as `escalation` and the
+    Tier-1 attempt lands on it as the `tier1_*` receipt. A Tier-2 order is final either way.
     """
-    response = await call_tier2(
-        agent=agent,
-        system=system_prompt(agent),
-        user=packet.render(),
-        schema=WORK_ORDER_SCHEMA,
-        schema_name=WORK_ORDER_TOOL,
-        schema_description=WORK_ORDER_TOOL_DESCRIPTION,
-        reasoning_effort=reasoning_effort,
-        max_tokens=MAX_OUTPUT_TOKENS,
-        incident_key=packet.incident.key,
-    )
-    return to_work_order(packet=packet, agent=agent, response=response)
+    system, page = system_prompt(agent), packet.render()
+    first = tier_for(packet.incident)
+    if first == TIER2:
+        order = await _judge_at(TIER2, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
+        # Critical is the one pre-call reason. With the cascade off there is no reason at all,
+        # and the field says so: a Tier-2 order with `escalation=""` was never a Tier-1 candidate.
+        return order.model_copy(update={"escalation": ESCALATE_CRITICAL}) if packet.incident.severity == "critical" and get_settings().tier1_enabled else order
+
+    local = await _judge_at(TIER1, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
+    reason = escalation_reason(local)
+    shadow: WorkOrder | None = None
+    if get_settings().tier_compare and not reason:
+        # The measurement: the same page to Opus, its answer written beside the local one and
+        # NOT stored. When Tier 1 escalated, the Tier-2 rewrite below is the pair already.
+        shadow = await _judge_at(TIER2, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
+
+    if not reason:
+        if shadow is not None:
+            log_compare(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, escalation="", page=_page_facts(packet), tier1=_compare_fields(local), tier2=_compare_fields(shadow))
+        return local
+
+    log.warning("tier1_escalated", incident=packet.incident.key, agent=agent, reason=reason, tier1_status=local.status, tier1_violations=list(local.violations), tier1_finish_reason=local.finish_reason)
+    rewritten = await _judge_at(TIER2, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
+    stored = rewritten.model_copy(update={"escalation": reason, **_tier1_receipt(local)})
+    if get_settings().tier_compare:
+        log_compare(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, escalation=reason, page=_page_facts(packet), tier1=_compare_fields(local), tier2=_compare_fields(rewritten))
+    return stored
 
 
 async def run_agent(
@@ -351,6 +473,8 @@ async def run_agent(
         rejected=sum(1 for o in orders if o.status == "rejected"),
         no_answer=sum(1 for o in orders if o.status == "no_answer"),
         escalated=sum(1 for o in orders if o.escalate),
+        tier1=sum(1 for o in orders if o.tier == TIER1),
+        escalations=sum(1 for o in orders if o.escalation),
         sops=sorted({p.sop_name for p in packets if p.sop_name}),
         input_tokens=sum(o.input_tokens for o in orders),
         output_tokens=sum(o.output_tokens for o in orders),
@@ -429,4 +553,4 @@ async def fan_out(
     return orders
 
 
-__all__ = ["AGENT_CONCURRENCY", "BLOCKING_VIOLATIONS", "MAX_OUTPUT_TOKENS", "WRITE_VIOLATIONS", "check", "check_write_proposal", "citable_rules", "fan_out", "judge_packet", "page_numbers", "run_agent", "run_water_feed", "to_work_order"]
+__all__ = ["AGENT_CONCURRENCY", "BLOCKING_VIOLATIONS", "MAX_OUTPUT_TOKENS", "WRITE_VIOLATIONS", "check", "check_write_proposal", "citable_rules", "fan_out", "judge_packet", "normalize_citations", "page_numbers", "run_agent", "run_water_feed", "to_work_order"]

@@ -107,6 +107,13 @@ WORK_ORDER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Why, in one sentence, or an empty string when escalate is false.",
         },
+        # M7. The honest exit. A judge that may say "not enough here" says it instead of inventing
+        # a diagnosis, and code escalates the same page to a stronger model when it does. Described
+        # as a last resort so it is not the cheap answer to every page with an unknown on it.
+        "insufficient_information": {
+            "type": "boolean",
+            "description": "Almost always false. True only when the incident's own reading is missing from the page or no standing order on the page covers this category, so that no safe work order can be written at all. A missing forecast, fuel level, head count, tank capacity, or delivery schedule is an unknown: list it under unknowns, write the order around it, and leave this false. When true, still fill every other field as best you can.",
+        },
         "unknowns": {
             "type": "array",
             "items": {"type": "string"},
@@ -135,7 +142,7 @@ WORK_ORDER_SCHEMA: dict[str, Any] = {
             "additionalProperties": False,
         },
     },
-    "required": ["severity_echo", "headline", "assessment", "actions", "rules_cited", "escalate", "escalate_reason", "unknowns", "proposed_write"],
+    "required": ["severity_echo", "headline", "assessment", "actions", "rules_cited", "escalate", "escalate_reason", "insufficient_information", "unknowns", "proposed_write"],
     "additionalProperties": False,
 }
 

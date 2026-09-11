@@ -138,21 +138,31 @@ cost optimization nobody measured. What exists now is `escalate` / `escalate_rea
 `WorkOrder`: the model may say a human is needed, which is a different question from which
 tier answered.
 
-The design below is what M7 builds against. Escalate to Tier 2 when **any** of these
-holds, and log which one fired:
+Built at M7 as `routing.tier_for` (before the call) and `routing.escalation_reason` (after it),
+inside `workers.judge_packet`. Per incident, escalate to Tier 2 when **any** holds, and the reason
+lands on the order as `escalation` and on the tick line in `escalation_reasons`:
 
-- the Tier-1 judge returned `insufficient_information`
-- `triage.py` marked the incident **critical**
-- two or more sensing worlds opened incidents in the same tick (the storm front, which
-  is the whole reason a supervisor exists rather than four independent scripts). M3 already
-  reuses this exact condition as `FUSION_THRESHOLD`, the spend gate on the shift report, which
-  is not a coincidence: it is the same claim about when cross-domain reasoning is worth paying
-  for, and M7 should read one constant rather than agree with itself twice
-- a `Finding` proposes a write
+- `triage.py` marked the incident **critical** (the one pre-call condition; Tier 1 is never asked)
+- the Tier-1 order failed a **blocking rail** (`rejected`)
+- the Tier-1 judge returned **`insufficient_information`**, a schema field it may set on purpose
+- the Tier-1 order **proposed a write** (only a Tier-2 proposal may reach the gate)
+- Tier 1 **never answered** (`no_answer`: transport or truncation; Opus is standing right there)
+
+Escalation is a **rewrite from the identical page**, never a review and never a retry at the same
+tier. Opus's order is stored with the Tier-1 attempt on it as `tier1_*`; a Tier-2 rejection is
+stored as rejected, as it always was.
+
+**"Two or more sensing worlds" is not on this list, and the plan had it there.** It says nothing
+about what one packet contains, and per incident it would send every order on every storm tick to
+Opus. What it decides is whether the tick needs someone reading across the ranch, which is
+`synthesize` at `FUSION_THRESHOLD`, already Tier 2. One constant, one meaning
+(`docs/STATE.md` decision 28).
 
 **The rail: a Tier-1 model may never produce an all-clear.** Code already flagged the
 incident, so "nothing is wrong here" from the cheap judge is a contradiction, not a
-finding. Reject it and escalate. Do not relax this to make a test pass.
+finding. `all_clear` rejects it and the rejection escalates. Do not relax this to make a test pass.
+The cascade ships **off** (`TIER1_ENABLED=0`) after the M7 measurement; the predicate is live code
+either way and every path has a planted test.
 
 ## The five rails on a work order, and what each one reads
 

@@ -1,7 +1,7 @@
 # Issues
 
-Open items observed across M0 through M5, written at the M4 boundary on 2026-09-10 for Scott to
-come back to after M7. Nothing here is a failing gate. These are deferred verifications, owed
+Open items observed across M0 through M7, first written at the M4 boundary on 2026-09-10 and
+extended at each boundary since. Nothing here is a failing gate. These are deferred verifications, owed
 pieces, decisions waiting on a person, and known artifacts. Each one says where it came from and
 what it would take, so it can be picked up cold.
 
@@ -108,8 +108,8 @@ take the box. M10 dockerizes either way.
 
 This machine authenticates to Bedrock with session credentials that expire. From M4 an expiry
 mid-run is survivable (the incident is held, the model backs off) but a multi-day run still wants a
-key that does not expire. Nothing to build, one value to set. Also decide whether the assumed rate
-in `llm_client.ASSUMED_RATE_USD_PER_M` matches whatever contract the key is on.
+key that does not expire. Nothing to build, one value to set. From M7 the rate is `routing.PRICE_TABLE`
+per model; the first-party row is the list price and the Bedrock row is assumed equal (#14).
 
 ### 7. `CHAOS_ENABLED=1` in `.env`
 
@@ -125,6 +125,49 @@ is pending until a second run. That is correct for the loop and surprising at a 
 exists (`INCIDENT_CONFIRM_SWEEPS=1` for a demo), so this is a documentation and expectation
 question, not a code one. Decide whether `--once` should default to first sight, and if so say it
 in one place.
+
+---
+
+## Owed from M7
+
+### 12. The forecast on the feed page, so `insufficient_information` stops being the honest answer
+
+**Where it came from.** The M7 measurement (`docs/model-routing.md`, the M7 row). FEED-02 says
+weather is what turns a bin at reserve from routine into urgent, and asks the model to say which.
+The feed packet carries the bins and nothing about weather. The local model set
+`insufficient_information` on 4 of 5 feed calls and 5 of 6 Tier-1 candidates across the three ticks,
+and Opus on the same pages wrote "no forecast on this page, treat as scheduled and confirm before
+you commit the truck." Both were right. The page is what is wrong.
+
+**What it would take.** `evidence.assemble` already reads the whole sweep. The ranch has
+`wind-speed`, `temperature`, and `snow-depth` sensors; the packet for a `feed_low` or `deep_snow`
+incident could carry the current readings from the weather station (or the nearest of each type)
+under a "weather now" heading, at no extra HTTP. There is no forecast upstream, so it is conditions,
+not a forecast; the SOP wording may want to say "current conditions" once that is true. Then re-run
+the M7 measurement: three ticks, the same columns. This is the change that would earn the cascade
+its row, and it is `evidence.py`'s, not the model's.
+
+### 13. `THINKING_BUDGET` sends `budget_tokens`, which Claude Opus 5 rejects
+
+Found while loading the pricing at M7. `call_tier2` maps `reasoning_effort` low/medium/high to a
+`thinking: {type: "enabled", budget_tokens: N}` block, and the current API returns 400 for
+`budget_tokens` on Opus 5; adaptive thinking (`{type: "adaptive"}` plus `output_config.effort`) is
+the replacement. Nothing calls anything but `"none"`, and `"none"` omits the block, so every
+measured call was unaffected (64 real calls, zero thinking blocks returned). One function to change
+when a job first wants thinking on; not touched at M7 because no job did.
+
+### 14. The Bedrock price row is assumed, not read
+
+`routing.PRICE_TABLE` prices `us.anthropic.claude-opus-5` at the first-party list rate because the
+public Bedrock pricing page did not render an Opus 5 row when checked. Verify against the AWS bill
+for the M7 run (about $0.75 of Opus on 2026-09-11) and correct the one row if it differs.
+
+### 15. The M6 live pause is still owed
+
+Carried from M6. Three more paid ticks at M7 and the local model proposed writes readily
+(`restock_feed` with `quantity: "unknown"`, tools outside its slice), every one stripped by the
+shape and tool checks or escalated before the gate; Opus proposed nothing. The first real
+`write_paused` remains the verification, and `create_observation` still waits on #1.
 
 ---
 
@@ -149,9 +192,8 @@ read knowing it.
 
 ## Cookbook candidates never paid for
 
-Listed at the bottom of `docs/cookbook.md` since M2: the `num_ctx` shim trap (M7 territory) and why
-a gate must outlive its process (M6 territory). Both will get their entry when the phase that pays
-for them lands.
+Both paid for now: why a gate must outlive its process (M6) and the `num_ctx` trap (M7, #35, paid
+for by measuring rather than by tripping). The list at the bottom of `docs/cookbook.md` is empty.
 
 ---
 
@@ -160,7 +202,7 @@ for them lands.
 - `herd_health` gets no sensor incidents (decision 5). `chaos` has zero tools and no brief.
 - `GATE_LANDED` is True from M6, and that made writes **proposable**, not callable. A model never
   calls a write tool; a human performs an approved proposal through the gate CLI.
-- Tier 1 does not exist until M7; every model job is Opus.
+- Tier 1 exists from M7 and ships **off** (`TIER1_ENABLED=0`): every model job is Opus until a ledger row says otherwise. That is the measured result, not a stub.
 - A calm tick costs exactly $0.00, and `synthesize` assembles in code below two worlds.
 - The loop's held set and miss check being in-process is a scoped choice (issues 3 and 4), not an
   oversight.

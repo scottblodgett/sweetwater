@@ -132,6 +132,10 @@ class WorkOrder(BaseModel):
     #: return-path checks pauses in `src/agent/gate.py` for a human; one that did not is
     #: stripped here and its violation recorded, and the prose still ships.
     proposed_write: dict[str, Any] | None = None
+    #: M7. The Tier-1 judge's way of saying "I do not know" on purpose. An escalation trigger
+    #: (`routing.escalation_reason`): a model allowed to say it says it instead of inventing.
+    #: Recorded on a Tier-2 order too, where it is information for the human and escalates nothing.
+    insufficient_information: bool = False
 
     status: WorkOrderStatus = "ok"
     violations: tuple[str, ...] = ()
@@ -146,6 +150,18 @@ class WorkOrder(BaseModel):
     latency_ms: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    #: M7. Which tier wrote the stored order, and why it was not the cheaper one. `escalation`
+    #: is one of `routing.ESCALATION_REASONS`, or empty when the order was written by the tier
+    #: that was asked first. A Tier-2 order with `escalation=""` is one the cascade was off for.
+    tier: int = 2
+    escalation: str = ""
+    #: The receipt for the Tier-1 attempt that was rewritten, so a tick line can still sum what
+    #: the local model was asked, and so the pair is readable off the stored order alone.
+    tier1_finish_reason: str = ""
+    tier1_violations: tuple[str, ...] = ()
+    tier1_latency_ms: int = 0
+    tier1_input_tokens: int = 0
+    tier1_output_tokens: int = 0
 
     @property
     def shippable(self) -> bool:
@@ -272,7 +288,7 @@ class RanchState(BaseModel):
     #: The supervisor's own page, assembled last. `None` on a tick that spent nothing,
     #: because a tick with no work orders has no shift to report on.
     shift_report: ShiftReport | None = None
-    #: Dollars this tick billed at `llm_client.ASSUMED_RATE_USD_PER_M`. Exactly 0.0 on a calm
+    #: Dollars this tick billed at `routing.PRICE_TABLE`, per model, Tier 1 at zero. Exactly 0.0 on a calm
     #: tick, and the number the M4 loop sums against its ceiling.
     cost_usd: float = 0.0
     #: Incidents whose owner never answered for a reason worth retrying (the agent raised, the
