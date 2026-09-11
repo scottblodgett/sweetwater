@@ -1273,3 +1273,119 @@ so, and it names the change that would earn the next attempt: the forecast on th
 | `keep_alive=30m` | Ollama's default equals the cadence; the model would reload every tick |
 | `tier1_context_full` | the config bug the design warned about, made to announce itself |
 | the `insufficient_information` wording tightened once | 5 of 5 on the first packet was the description, not the model; a second pass was not tried because the rest is the page (#12) |
+
+## M7A - The herd sweep, the coyote gap
+
+**What was planned.** The M7A paragraph in `docs/Plan.md`: a second free sweep off the Farm and Care
+APIs, animal categories in triage, migration `0006`, `knowledge_base/herd.md`, `herd_health` handed
+its first real work, and one paid run that closes `docs/issues.md` #1, #2, #11, and #15. Two wire facts
+to read first: the herd count, and whether observations list ranch-wide.
+
+**What actually happened, in order.**
+
+**The two wire facts, and a third the plan did not know to ask for.** The herd is **1,195 head**
+(1,025 cows, 156 sheep, 10 horses, 2 donkeys, 2 goats, 18 pastures), every one `active`, every
+`updatedAt` the seed stamp. Observations list **per animal only**: `GET /observations` is a 404, the MCP
+tool requires `animalId`, and every since-style parameter is silently ignored. And `GET /animals` runs at
+roughly 90 ms a row: `limit=500` hits the API Gateway 30s wall and returns 503 every time, so the
+catalog cannot be read in one call. The `status` filter was honoured and validated, so the first design
+was four cheap reads: the pasture roster (1,195 `animalIds` in one 1.2s call) plus one filtered read per
+non-active status, observations only for the changed set. Gate green at 404 tests on that design, and
+one free live tick found the three overdue care tasks the wire had shown (cow-0777's down-cow recheck a
+month late, cow-0512's pinkeye patch, sheep-0001's shearing), which Scott kept live.
+
+**The first live kill broke the design, twice, and both breaks are now rails.** `chaos inject --tick 32`
+PATCHed cow-0905 to `deceased`. The Farm API **nulled her `pastureId`**, so she left every roster, and
+`GET /animals?status=deceased` **returned nothing** with her sitting in the unfiltered list as
+`deceased`. A filter that validates its input and excludes a dead cow from `status=active` still cannot
+find her by `status=deceased`. So the catalog became the full list, paged at 100. Then the pages failed:
+at 12 or 20 in flight the Farm API returned HTTP 500 on 2 of 12, every time; at 6 in flight, 12 of 12,
+five times running. Pages go out in waves of `HERD_PAGE_CONCURRENCY = 6` and stop at the first short
+page: 12 pages, about 18s, and the herd stage never fails the tick. The restored cow, `active` and on
+no roster, is vouched for by the list, and every animal with a live incident is in the changed set so
+her packet always has a record (`watch`, read off the ledger by `memory.live_animal_subjects`).
+
+**The ledger reset under the run, twice.** `conftest.migrated_store` drops `sw_ops_test` and
+re-migrates it, and the demo was on `sw_ops_test`. A full `pytest` mid-run, and later a `-k` selection
+that still touched a store fixture, each wiped the pending rows and the active chaos events. Cookbook
+#41. No pytest from then until the run was done.
+
+**The pause that would not come.** Ticks C, E, and F opened `cow-0905:deceased` and the three
+care_overdue and routed them to `herd_health` and nobody else. Seven herd orders, all naming the animal
+by id and tag, quoting the coyote note word for word, citing `HERD-01` and `HERD-05`, escalating to the
+general manager on the predator note, and one catching the restore note sitting against the deceased
+status and flagging the conflict. **`proposed_write` was null on all seven.** Opus was following the SOP:
+`HERD-05` says never fabricate an observation, so every order told the person on site to record what
+they find. The verification asked the model to propose the one write the SOP told it not to invent.
+Scott's call: a legitimate write, not a steered prompt. `HERD-07` says the finding itself is recorded in
+the care record, once, quoting only what is on the page, with a timestamp from the page. One more tick
+pair: `write_paused` on `cow-0905:deceased`, `create_observation` with the note built from the page and
+`observedAt` the Farm API's own update stamp, `audit_id 968e7f64fb7540dc9adeed547d15e802`. Approved at
+the CLI by scooter after 49s, the note landed on the deployed Care API as observation
+`2dd60c7d-b9a2-413d-b17c-3cae46563d64`. The audit stream carries chaos's `auto_allowed` pair (twice, the
+kill was fired twice) and `herd_health`'s `proposed` / `decided` pair in one run.
+
+**The storm front, fused.** Tick H opened the kill and `storm_front` together: 18 orders, three worlds,
+17 shipped, `linked` naming eleven keys including `met-tower-wind:high_wind`,
+`antelope-ridge-fence:fence_down`, and `home-place-temp:freeze_risk`, and fusing
+`cow-0777:care_overdue` into the Red Canyon water run ("one drive covers a freezing tank behind 111
+head, a 32-day-overdue recheck on a cow that was not rising, and a fence with no push"). That is the
+supervisor joining the herd to the tanks, which is the line the cow's packet exists to protect.
+`docs/issues.md` #2 closed. Then `chaos restore`, and `cow-0905:deceased` resolved on the next tick.
+
+| tick | what | cost |
+| --- | --- | --- |
+| A | first sighting after the kill, everything pending, herd stage failed on 3 pages of 21 in flight | $0.00 |
+| B | 10 sensor orders, fused; herd failed on 6 pages | $0.66 |
+| C | paged list whole: deceased + 3 care_overdue opened and routed to herd_health, 3 worlds, 1 herd order rejected on `severity_mismatch` and `write_shape_invalid` | $0.42 |
+| D | (ledger reset by pytest) first sighting again | $0.00 |
+| E | 3 care_overdue orders, 0 rejected, 3 worlds | $0.70 |
+| F | kill and storm opened, herd_health 1, 0 violations, fused | $0.29 |
+| G | (ledger reset on purpose, `HERD-07` in the SOP) first sighting | $0.00 |
+| H | 18 opened, **`write_paused`**, fused with `linked`, 1 infrastructure order rejected | $1.16 |
+| I | after restore: `cow-0905:deceased` resolved, 5 sensor orders | $0.34 |
+| | **ten test-ledger ticks** | **$3.57** |
+
+Under the $5 Scott set, and about 3.5x the $1.00 estimated, because the design changed twice mid-run
+and the ledger reset twice, so the permanently bad sensors were paid for four times over.
+
+**Built.** Migration `0006` (`subject_id` / `subject_type`, applied to Supabase with Scott's yes),
+`SUBJECT_ANIMAL` and `is_animal` on `Finding` and `Incident`, `tools/herd.py` (the paged list in waves,
+the roster as context, the care tasks, observations for the changed set, `HerdSweepResult.answered`),
+`triage.triage_herd` and the four animal categories, `ROUTES` for `herd_health`, the animal page in
+`evidence.py` with no sensor reading on it, `knowledge_base/herd.md` (HERD-01 to HERD-07), the herd stage
+in `run_tick` with `herd_animals` / `herd_errors` / `herd_error` on the tick line, `read_subject_ids` in
+reconcile, animal events in the chaos miss check, `memory.live_animal_subjects`, and `LOG_TRANSCRIPTS`
+made real. 407 tests, ruff and mypy clean.
+
+### What diverged from the plan
+
+| Planned | Happened | Why |
+| --- | --- | --- |
+| herd catalog once, observations for changed animals | the roster plus the whole list paged in waves of 6, observations for the changed set | the status filter cannot find a non-active animal and the Farm API 500s above 6 pages in flight |
+| `reconcile` takes the subjects that answered | yes, and the list is the vouching, never the roster | a deceased PATCH nulls `pastureId`; the restored cow is on no roster |
+| the model proposes `create_observation` | it did not, seven times, because the SOP forbade fabricating one | `HERD-07` names the one legitimate note; Scott's decision |
+| one paid run, under $5 | ten ticks, $3.57 | two design changes and two ledger resets mid-run |
+| `LOG_TRANSCRIPTS=1` writes full bodies | it wrote nothing; `write_transcript` had no caller since M0 | wired into `judge_packet` and `synthesize` |
+
+### Defects the phase caught in itself
+
+1. **The status filter design shipped green and was blind to the first real kill.** 404 tests passed against
+   fakes that honoured `status=deceased`. The wire did not. Cookbook #39.
+2. **The Farm API's concurrency ceiling** was never measured before 21 requests went out at once. Cookbook #40.
+3. **`pytest` drops the demo ledger.** Cookbook #41.
+4. **`write_transcript` was dead code** and the flag documented in `docs/logging.md` did nothing.
+5. **A shadowed `watch` Stopwatch** took 24 tests down for one rename; mypy named it.
+6. **respx route order.** A specific route added after a helper's catch-all never matches, and an identical
+   pattern silently replaces; two rails were asserting against the wrong mock until they failed.
+
+### Work not asked for, and why each one is here
+
+| Added | Why it was not optional |
+| --- | --- |
+| `HERD_PAGE_CONCURRENCY` and wave paging | the herd stage failed 2 ticks in 2 at the sweep's concurrency |
+| `memory.live_animal_subjects` and `watch` | a restored kill could never resolve otherwise |
+| `HERD-07` | the verification was impossible under the SOP as written; a rule, not a prompt tweak |
+| `write_transcript` wired in, with `current_tick` | the herd order's prose was unreadable after the tick, and `linked` with it |
+| `herd_roster_disagrees` warning | the roster and the list are two sources; a disagreement beyond the pastureless is worth a line |
+

@@ -930,4 +930,69 @@ when you decided.
 
 ---
 
+## 39. A filter that validates its input is not a filter that works; test it against a real non-default value
+
+**Pain.** `GET /animals?status=deceased` 422s on a bad value and `status=active` excludes a dead cow,
+so the filter was treated as honoured and the herd sweep was built on three filtered reads. It was
+honoured for `active`. For `deceased` it returned nothing while the unfiltered list showed the cow as
+deceased. 404 tests passed against fakes that did what the filter promised, and the first live kill was
+invisible.
+
+**Fix.** The catalog is the whole list, paged, and the status is read off each row. The fakes serve
+pages now, not filters.
+
+**Lesson.** Before building on a filter, put a real non-default value behind it and read it back
+through the filter. On a ranch where every animal was `active`, `status=deceased` returning empty
+proved nothing, and the probe that would have proved something cost one PATCH.
+
+**Found:** M7A, the first live kill.
+
+## 40. Measure the upstream's concurrency ceiling before the first fan-out at yours
+
+**Pain.** 21 herd pages went out at `SWEEP_CONCURRENCY = 20`, and the Farm API returned HTTP 500 on
+several, including empty tail pages. Two paid ticks with the herd stage failed. Measured afterwards: 2
+of 12 fail at 12 or 20 in flight, every time; 12 of 12 succeed at 6, five times running.
+
+**Fix.** `HERD_PAGE_CONCURRENCY = 6`, a wave size with the measurement beside it, and paging that stops
+at the first short page.
+
+**Lesson.** A concurrency ceiling is a property of each upstream, not of this repo. The sensor sweep's
+160 reads at 20 were fine because that Lambda is stateless; the Farm API has a database behind it. One
+five-minute probe at three concurrency levels would have cost less than one failed tick.
+
+**Found:** M7A, tick B.
+
+## 41. The test suite drops the demo ledger
+
+**Pain.** `conftest.migrated_store` drops `sw_ops_test` `CASCADE` and re-migrates it. The M7A run was
+on `sw_ops_test`. A full `pytest` mid-run wiped the pending rows and the active chaos events; a `-k`
+selection that happened to pick up one store-backed test did it again an hour later. Each time the
+debounce started over and the permanently bad sensors were paid for again.
+
+**Fix.** No pytest of any kind between the first tick of a demo on the test ledger and its last. Written
+in `tests/CLAUDE.md`.
+
+**Lesson.** #18 said two sessions cannot run pytest at once. The same drop bites one session running a
+demo and a test. The fixture is right to drop the schema; the person is what has to know.
+
+**Found:** M7A, twice.
+
+## 42. A rule the model is told not to break will not be broken for the demo
+
+**Pain.** The verification asked `herd_health` to propose `create_observation` and pause at the gate.
+`HERD-05` said never fabricate an observation. Seven orders, seven `proposed_write: null`, each telling
+the person on site to record what they find. The model was right and the verification was impossible.
+
+**Fix.** `HERD-07`: the finding itself is recorded in the care record, once, in words from the page,
+with a timestamp from the page. A legitimate write the grounding check can verify word for word. The
+next tick paused.
+
+**Lesson.** When a verification needs the model to do something, look for the rule that forbids it
+before touching the prompt. If the rule is right, the verification is wrong or the SOP is missing a
+legitimate case. The prompt was never steered (STATE decision 27 holds).
+
+**Found:** M7A, tick F.
+
+---
+
 _Candidates still known from the design and not yet paid for: none._

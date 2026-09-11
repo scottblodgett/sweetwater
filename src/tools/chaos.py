@@ -579,8 +579,10 @@ def apply_overlay(readings: Sequence[SensorReading], events: Sequence[ChaosEvent
     return tuple(out)
 
 
-async def active_overlay(*, now: datetime | None = None, target: StoreTarget | None = None) -> tuple[ChaosEvent, ...]:
-    """The active sensor overlay, or nothing at all. Called by `sweep()` every tick.
+async def active_overlay(*, now: datetime | None = None, target: StoreTarget | None = None, kind: str = KIND_SENSOR) -> tuple[ChaosEvent, ...]:
+    """The active sensor overlay, or nothing at all. Called by `sweep()` every tick. With
+    `kind=KIND_ANIMAL` it is the active animal events, which M7A's herd stage reads so the miss
+    check can tell "the sweep saw the dead cow" from "she was killed and restored between sweeps".
 
     Returns `()` immediately when chaos is off, before touching a database, so a switched-off
     overlay costs a boolean rather than a connection. And it swallows its own failures on
@@ -594,7 +596,7 @@ async def active_overlay(*, now: datetime | None = None, target: StoreTarget | N
     try:
         store = target or resolve_store()
         async with store_session(url=store.url, schema=store.schema) as session:
-            rows = await active_chaos_events(session, now=stamp, kind=KIND_SENSOR)
+            rows = await active_chaos_events(session, now=stamp, kind=kind)
         return tuple(ChaosEvent.from_row(r) for r in rows)
     except Exception as exc:
         log.warning("chaos_overlay_unavailable", error=f"{type(exc).__name__}: {exc}", hint="the sweep continues on honest readings; chaos never fails the tick it decorates")

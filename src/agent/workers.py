@@ -77,7 +77,7 @@ from src.tools.sensors import SensorReading
 from src.tools.triage import triage_reading
 from src.utils.config import get_settings
 from src.utils.helpers import as_strings, gather_bounded, has_no_real_instruction
-from src.utils.logger import get_logger, log_compare
+from src.utils.logger import current_tick, get_logger, log_compare, write_transcript
 
 log = get_logger(__name__)
 
@@ -267,7 +267,9 @@ def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket
         violations.append("invented_rule")
     if not cleaned["rules_cited"] and citable:
         violations.append("no_rule_cited")
-    if incident.sensor_id not in f"{cleaned['headline']} {cleaned['assessment']}":
+    if incident.subject_id not in f"{cleaned['headline']} {cleaned['assessment']}":
+        # The code keeps its M2 name. From M7A the subject may be an animal, and a herd order that
+        # never names the cow fails the same rail for the same reason.
         violations.append("sensor_not_named")
 
     if invented:
@@ -371,7 +373,7 @@ def _page_facts(packet: EvidencePacket) -> dict[str, Any]:
     out of band, how many head were in the pasture, and which rules were citable. Code knows these
     exactly because code assembled the page, which is what makes the comparison scorable at all."""
     return {
-        "sensor_id": packet.incident.sensor_id,
+        "subject_id": packet.incident.subject_id,
         "last_value": packet.incident.last_value,
         "siblings_flagged": sorted(s.sensor_id for s in packet.siblings if triage_reading(SensorReading(sensor_id=s.sensor_id, sensor_type=s.sensor_type, location=packet.incident.location, status=s.status, value=s.value))),
         "siblings": sorted(s.sensor_id for s in packet.siblings),
@@ -401,7 +403,7 @@ async def judge_packet(packet: EvidencePacket, *, agent: str = WATER_FEED, reaso
         order = await _judge_at(TIER2, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
         # Critical is the one pre-call reason. With the cascade off there is no reason at all,
         # and the field says so: a Tier-2 order with `escalation=""` was never a Tier-1 candidate.
-        return order.model_copy(update={"escalation": ESCALATE_CRITICAL}) if packet.incident.severity == "critical" and get_settings().tier1_enabled else order
+        return _transcribed(order.model_copy(update={"escalation": ESCALATE_CRITICAL}) if packet.incident.severity == "critical" and get_settings().tier1_enabled else order, page=page)
 
     local = await _judge_at(TIER1, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
     reason = escalation_reason(local)
@@ -414,14 +416,22 @@ async def judge_packet(packet: EvidencePacket, *, agent: str = WATER_FEED, reaso
     if not reason:
         if shadow is not None:
             log_compare(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, escalation="", page=_page_facts(packet), tier1=_compare_fields(local), tier2=_compare_fields(shadow))
-        return local
+        return _transcribed(local, page=page)
 
     log.warning("tier1_escalated", incident=packet.incident.key, agent=agent, reason=reason, tier1_status=local.status, tier1_violations=list(local.violations), tier1_finish_reason=local.finish_reason)
     rewritten = await _judge_at(TIER2, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
     stored = rewritten.model_copy(update={"escalation": reason, **_tier1_receipt(local)})
     if get_settings().tier_compare:
         log_compare(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, escalation=reason, page=_page_facts(packet), tier1=_compare_fields(local), tier2=_compare_fields(rewritten))
-    return stored
+    return _transcribed(stored, page=page)
+
+
+def _transcribed(order: WorkOrder, *, page: str) -> WorkOrder:
+    """Write the page and the stored order to `logs/transcripts/<run>/` when `LOG_TRANSCRIPTS=1`, and
+    hand the order back unchanged. The only place a full prompt body is ever written, and only on
+    the flag: `docs/logging.md` forbids it in the three operational streams."""
+    write_transcript(tick=current_tick(), agent=order.agent, name=order.incident_key, payload={"incident_key": order.incident_key, "agent": order.agent, "page": page, "order": order.model_dump()})
+    return order
 
 
 async def run_agent(

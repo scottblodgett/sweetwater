@@ -37,11 +37,18 @@ One thing that looks like a boundary violation and is not: this packet hands `wa
 pasture and animal context that its own tool allowlist (`src/tools/allowlists.py`) does not
 include. That is the design. Code assembles the page; the allowlist governs what the agent
 may go touch on its own. An agent that could fetch this itself would be navigating.
+
+**The one place that precedent is refused: a cow's packet carries no sensor reading.** M7A. It
+would be easy to put the pasture's tank level in the dead cow's page, and the precedent above
+says a code-assembled packet may cross an allowlist. Do not. `herd_health` sees the dead cow and
+`water_feed` sees the dry tank and only the supervisor can fuse them; put the tank in the cow's
+packet and fusion stops being tested. The cow's packet is the record, its pasture, its recent
+observations, its open care tasks, and its herd-mates in that pasture. Nothing that starts with a
+number from a sensor. A test renders one against a sweep full of readings and asserts none leaked.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -49,6 +56,18 @@ from typing import Any
 import httpx
 
 from src.agent.state import Incident
+from src.tools.herd import (
+    PASTURE_LIMIT,
+    AnimalRecord,
+    CareTask,
+    HerdSweepResult,
+    Observation,
+    PastureContext,
+    PastureRoster,
+    fetch_pasture_roster,
+    parse_pastures,
+    slugify,
+)
 from src.tools.mcp_client import RanchMap
 from src.tools.sensors import SensorReading
 from src.tools.triage import RULES, format_value
@@ -65,7 +84,10 @@ KNOWLEDGE_BASE = REPO_ROOT / "data" / "knowledge_base"
 #: somebody acts on at 2am.
 HISTORY_LIMIT = 12
 
-PASTURE_LIMIT = 50  # 18 exist; the ceiling is here so a new pasture does not silently page
+#: How many of an animal's observations the page carries, newest first. The ranch's history is
+#: the point here: triage windows a `high` note to 24 hours, but a vet reading about cow-0777
+#: wants the August mobility note on the same page as today's.
+ANIMAL_OBSERVATION_LIMIT = 10
 
 #: Category to SOP file. Explicit rather than derived from the category name, because a
 #: missing SOP must read as "no rule exists for this yet" and not as a filename typo that
@@ -106,6 +128,11 @@ SOP_FOR_CATEGORY: dict[str, str] = {
     # environmental: keep the payments, prove the stewardship
     "range_dry": "compliance.md",
     "stream_flow_low": "compliance.md",
+    # the animals. M7A: the herd sweep's four categories, one file, `herd_health` only
+    "deceased": "herd.md",
+    "inactive": "herd.md",
+    "observation_high": "herd.md",
+    "care_overdue": "herd.md",
 }
 
 
@@ -137,19 +164,55 @@ class SiblingReading:
 
 
 @dataclass(frozen=True)
-class PastureContext:
-    """What is standing behind the problem. The head count is why one tank goes first."""
+class AnimalContext:
+    """What the herd sweep already knows about one animal. Zero extra HTTP: every field here was
+    read in the free pass, so a cow's packet costs the tick nothing the sweep did not already pay.
 
-    pasture_id: str
-    name: str
-    acreage: int | None
-    fence_type: str
-    status: str
-    head_count: int
+    `record` is `None` when the Farm read for this animal failed and the finding came off a care
+    task alone; the page says so rather than guessing a species.
+    """
 
-    def render(self) -> str:
-        acres = f"{self.acreage} acres, " if self.acreage else ""
-        return f"{self.name} ({self.pasture_id}): {acres}{self.head_count} head on it, {self.fence_type or 'fence type unrecorded'}, pasture status {self.status or 'unrecorded'}"
+    record: AnimalRecord | None
+    record_note: str = ""
+    observations: tuple[Observation, ...] = ()
+    observations_note: str = ""
+    care_tasks: tuple[CareTask, ...] = ()
+    herd_mates: tuple[AnimalRecord, ...] = ()
+
+    def render(self, *, animal_id: str) -> list[str]:
+        lines: list[str] = []
+        lines.append("## The animal, as the Farm API records it")
+        lines.append("")
+        if self.record:
+            r = self.record
+            lines.append(f"- id: {r.animal_id}" + (f", tag {r.name}" if r.name else ""))
+            lines.append(f"- species: {r.species}" + (f", {r.sex}" if r.sex else ""))
+            lines.append(f"- status: {r.status}" + (f", last updated {r.updated_at}" if r.updated_at else ""))
+            lines.append(f"- pasture: {r.pasture_id or 'none recorded'}" + (f", shelter {r.shelter_id}" if r.shelter_id else ""))
+        else:
+            lines.append(f"- id: {animal_id}")
+            lines.append(f"  (record unavailable: {self.record_note or 'not read this tick'}. Species, status, and pasture are unknown; say so.)")
+        lines.append("")
+
+        lines.append(f"## This animal's last {ANIMAL_OBSERVATION_LIMIT} observations on the Care API, newest first")
+        lines.append("")
+        if self.observations:
+            lines.append("  (Quote these as written. An observation is a person, at an animal, on a date; there is no re-reading it.)")
+            for obs in self.observations[:ANIMAL_OBSERVATION_LIMIT]:
+                lines.append(f'  - {obs.observed_at}: [{obs.severity}] {obs.type}: "{obs.note}"')
+        else:
+            lines.append(f"  (none: {self.observations_note or 'no observation has ever been recorded for this animal'})")
+        lines.append("")
+
+        lines.append("## Open care tasks for this animal")
+        lines.append("")
+        if self.care_tasks:
+            for task in self.care_tasks:
+                lines.append(f'  - {task.task_id}: "{task.title}", due {task.due_at}, status {task.status}' + (f", notes: {task.notes}" if task.notes else ""))
+        else:
+            lines.append("  (none pending)")
+        lines.append("")
+        return lines
 
 
 @dataclass(frozen=True)
@@ -159,6 +222,10 @@ class EvidencePacket:
     Absences are stated, never omitted. `history_note` carrying "unavailable" is a fact the
     model has to work around; an empty history list with no explanation is one it will fill
     in for itself, which is exactly the invented premise the brief forbids.
+
+    Two pages live here from M7A, chosen by `incident.is_animal`. A sensor page carries history
+    and siblings; an animal page carries `animal` and **never** history or siblings, which is the
+    line described at the top of this module.
     """
 
     incident: Incident
@@ -170,6 +237,7 @@ class EvidencePacket:
     sop_name: str = ""
     sop_text: str = ""
     coordinates: dict[str, float] | None = None
+    animal: AnimalContext | None = None
 
     def render(self) -> str:
         """The page, as the model receives it. Also what a human reads to check the model.
@@ -178,10 +246,12 @@ class EvidencePacket:
         form makes every debugging session a guess. If it reads badly here it reads badly
         to the model.
         """
+        if self.incident.is_animal:
+            return self._render_animal()
         inc = self.incident
-        rule = RULES.get(inc.sensor_type)
+        rule = RULES.get(inc.subject_type)
         unit = rule.unit if rule else inc.unit
-        noun = rule.noun if rule else inc.sensor_type
+        noun = rule.noun if rule else inc.subject_type
         where = f"{inc.location}" + (f" at map point {self.coordinates.get('x')},{self.coordinates.get('y')}" if self.coordinates else "")
 
         lines: list[str] = []
@@ -189,7 +259,7 @@ class EvidencePacket:
         lines.append("")
         lines.append(f"- severity: {inc.severity.upper()} (already decided; not yours to change)")
         lines.append(f"- category: {inc.category}")
-        lines.append(f"- sensor: {inc.sensor_id}, a {noun} sensor")
+        lines.append(f"- sensor: {inc.subject_id}, a {noun} sensor")
         lines.append(f"- location: {where}")
         lines.append(f"- reading: {inc.last_value or 'no reading'}" + (f", against a {inc.severity} line of {inc.threshold:g}{unit}" if inc.threshold is not None else ""))
         lines.append(f"- triage said: {inc.summary}")
@@ -227,9 +297,40 @@ class EvidencePacket:
         lines.append(f"  {self.pasture.render()}" if self.pasture else f"  ({self.pasture_note or 'no pasture is mapped to this location'})")
         lines.append("")
 
-        lines.append(f"## The standing orders that apply ({self.sop_name or 'none on file'})")
+        lines.extend(self._render_sop())
+        return "\n".join(lines)
+
+    def _render_sop(self) -> list[str]:
+        return [f"## The standing orders that apply ({self.sop_name or 'none on file'})", "", self.sop_text.strip() if self.sop_text else "  (no SOP exists for this category yet. Say so rather than citing one.)"]
+
+    def _render_animal(self) -> str:
+        """The cow's page. The record, its pasture, its observations, its open care tasks, its
+        herd-mates in that pasture, the SOP. **No sensor reading, ever**, see the module docstring."""
+        inc = self.incident
+        animal = self.animal or AnimalContext(record=None, record_note="the herd sweep carried nothing for this animal")
+        lines: list[str] = []
+        lines.append("## The incident, as triage ranked it in code")
         lines.append("")
-        lines.append(self.sop_text.strip() if self.sop_text else "  (no SOP exists for this category yet. Say so rather than citing one.)")
+        lines.append(f"- severity: {inc.severity.upper()} (already decided; not yours to change)")
+        lines.append(f"- category: {inc.category}")
+        lines.append(f"- animal: {inc.subject_id}")
+        lines.append(f"- pasture: {inc.location or 'unrecorded'}")
+        lines.append(f"- triage said: {inc.summary}")
+        lines.append(f"- history of this incident: seen {inc.occurrences} time(s), first at {inc.first_seen_at.isoformat()}, still {inc.status}")
+        lines.append("")
+        lines.extend(animal.render(animal_id=inc.subject_id))
+
+        lines.append("## The pasture it stands in")
+        lines.append("")
+        lines.append(f"  {self.pasture.render()}" if self.pasture else f"  ({self.pasture_note or 'no pasture is recorded for this animal'})")
+        if animal.herd_mates:
+            lines.append("  Other animals in this pasture whose state changed this sweep:")
+            lines.extend(f"  - {m.species} {m.animal_id}: status {m.status}" for m in animal.herd_mates)
+        elif self.pasture:
+            lines.append("  No other animal in this pasture read as anything but active this sweep.")
+        lines.append("  (No sensor reading is on this page by design. Water, feed, fence, and weather at this pasture are another agent's, and the supervisor joins the two.)")
+        lines.append("")
+        lines.extend(self._render_sop())
         return "\n".join(lines)
 
 
@@ -259,96 +360,10 @@ def load_sop(category: str) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- #
-# the pasture roster: one call per tick, flat
+# the pasture roster lives in `herd.py` from M7A (the herd sweep reads it as its catalog) and is
+# re-exported here because it is still this module's context for a sensor packet
 # --------------------------------------------------------------------------- #
-_SLUG = re.compile(r"[^a-z0-9]+")
-#: The two upstream surfaces spell a location differently. `GET /sensors/:id` returns
-#: `locationName: "Alkali Flat"`, while the `ranch://sensors/map` resource labels the same
-#: group `"Alkali Flat (alkali-flat)"`. Incidents carry the REST form because that is what
-#: the sweep parses, but a location string from the map must not slug to
-#: `alkali-flat-alkali-flat` and silently match no pasture. When the id is spelled out in
-#: parentheses, take it rather than re-deriving it.
-_PARENTHESIZED_ID = re.compile(r"\(([a-z0-9][a-z0-9-]*)\)\s*$")
-
-
-def slugify(location: str) -> str:
-    text = location.strip()
-    embedded = _PARENTHESIZED_ID.search(text.lower())
-    if embedded:
-        return embedded.group(1)
-    return _SLUG.sub("-", text.lower()).strip("-")
-
-
-@dataclass(frozen=True)
-class PastureRoster:
-    """Every pasture and its head count, from one `GET /pastures`.
-
-    Matched to a sensor location by **slug against the pasture id**, not by display name.
-    The two disagree on purpose upstream: the sensor location `East Allotment` is the
-    pasture named `East BLM Allotment`, and both are the id `east-allotment`. A name match
-    would drop three pastures and report "no cattle here" for ground with 111 head on it,
-    which is the most dangerous way for this lookup to be wrong.
-    """
-
-    pastures: tuple[PastureContext, ...] = ()
-    error: str = ""
-
-    def for_location(self, location: str) -> tuple[PastureContext | None, str]:
-        slug = slugify(location)
-        for pasture in self.pastures:
-            if pasture.pasture_id == slug:
-                return pasture, ""
-        if self.error:
-            return None, f"pasture roster unavailable: {self.error}"
-        # Not every sensor location is a pasture. A spring, a well, a barn, and the weather
-        # station are all real locations with no cattle standing on them, and saying so is
-        # better than implying the herd count is zero.
-        return None, f"no pasture is mapped to {location}; it is a site rather than grazing ground"
-
-
-def parse_pastures(payload: Any) -> tuple[PastureContext, ...]:
-    data = payload.get("data", payload) if isinstance(payload, dict) else payload
-    if not isinstance(data, list):
-        return ()
-    out: list[PastureContext] = []
-    for raw in data:
-        if not isinstance(raw, dict):
-            continue
-        animal_ids = raw.get("animalIds")
-        acreage = raw.get("acreage")
-        out.append(
-            PastureContext(
-                pasture_id=str(raw.get("id") or ""),
-                name=str(raw.get("name") or raw.get("id") or "unnamed"),
-                acreage=int(acreage) if isinstance(acreage, (int, float)) else None,
-                fence_type=str(raw.get("fenceType") or ""),
-                status=str(raw.get("status") or ""),
-                head_count=len(animal_ids) if isinstance(animal_ids, list) else 0,
-            )
-        )
-    return tuple(p for p in out if p.pasture_id)
-
-
-async def fetch_pasture_roster() -> PastureRoster:
-    """One call. Errors come back as data, on the same rule as `sensors.py`.
-
-    A missing roster must not fail the packet: a work order that names the tank and admits
-    it does not know the head count is useful, and one that never got written because the
-    farm API hiccuped is not.
-    """
-    settings = get_settings()
-    try:
-        async with upstream_client(settings.farm_api) as client:
-            response = await client.get("/pastures", params={"limit": PASTURE_LIMIT})
-            response.raise_for_status()
-            pastures = parse_pastures(response.json())
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("pasture_roster_unavailable", error=f"{type(exc).__name__}: {exc}")
-        return PastureRoster(error=f"{type(exc).__name__}")
-    if not pastures:
-        log.warning("pasture_roster_empty", hint="200 with no pastures; head counts will be absent from every packet this tick")
-        return PastureRoster(error="upstream returned no pastures")
-    return PastureRoster(pastures=pastures)
+__all__ = ["PASTURE_LIMIT", "PastureContext", "PastureRoster", "fetch_pasture_roster", "parse_pastures", "slugify"]
 
 
 # --------------------------------------------------------------------------- #
@@ -401,12 +416,33 @@ def siblings_for(location: str, sensor_id: str, readings: tuple[SensorReading, .
     )
 
 
+def animal_context(incident: Incident, herd: HerdSweepResult | None) -> AnimalContext:
+    """The cow's page from what the sweep already read. No HTTP here, and none allowed."""
+    if herd is None:
+        return AnimalContext(record=None, record_note="the herd sweep did not run this tick")
+    record = herd.record(incident.subject_id)
+    failed = next((e for e in herd.errors if e.subject == incident.subject_id), None)
+    observations = herd.observations_for(incident.subject_id)
+    note = ""
+    if not observations:
+        note = f"the Care API read for this animal failed ({failed.message})" if failed else ("the Care API was not read this tick" if herd.failure.startswith("care") else "")
+    return AnimalContext(
+        record=record,
+        record_note=(failed.message if failed and record is None else ""),
+        observations=observations,
+        observations_note=note,
+        care_tasks=herd.tasks_for(incident.subject_id),
+        herd_mates=herd.herd_mates(record.pasture_id, excluding=incident.subject_id) if record else (),
+    )
+
+
 async def assemble(
     incidents: tuple[Incident, ...] | list[Incident],
     *,
     readings: tuple[SensorReading, ...] | list[SensorReading] = (),
     ranch_map: RanchMap | None = None,
     roster: PastureRoster | None = None,
+    herd: HerdSweepResult | None = None,
     limit: int | None = None,
 ) -> tuple[EvidencePacket, ...]:
     """One packet per incident, in the order handed in.
@@ -416,35 +452,45 @@ async def assemble(
     a work order nobody wanted twice.
 
     `roster` is passed in rather than fetched per call so a tick pays for the roster once.
-    Fetched here when absent, which is the shape a test and a one-off script both want.
+    Fetched here when absent, which is the shape a test and a one-off script both want. From
+    M7A the herd sweep already fetched it, so a tick hands it over through `herd`.
+
+    An animal incident (`incident.is_animal`) costs **no HTTP at all** here: its page is built from
+    `herd`, which the free pass already paid for, and it is never handed to the sensor client.
     """
     if not incidents:
         return ()
 
     settings = get_settings()
     ceiling = limit or settings.sweep_concurrency
-    roster = roster if roster is not None else await fetch_pasture_roster()
+    if roster is None:
+        roster = herd.roster if herd is not None and herd.roster.pastures else await fetch_pasture_roster()
 
-    async with upstream_client(settings.sensor_api) as client:
-        raw = await gather_bounded([fetch_history(client, inc.sensor_id) for inc in incidents], limit=ceiling)
-
-    packets: list[EvidencePacket] = []
-    for incident, outcome in zip(incidents, raw, strict=True):
-        if isinstance(outcome, tuple):
-            history, note = outcome
-        else:
+    sensor_incidents = [inc for inc in incidents if not inc.is_animal]
+    history_by_key: dict[str, tuple[tuple[HistoryPoint, ...], str]] = {}
+    if sensor_incidents:
+        async with upstream_client(settings.sensor_api) as client:
+            raw = await gather_bounded([fetch_history(client, inc.subject_id) for inc in sensor_incidents], limit=ceiling)
+        for incident, outcome in zip(sensor_incidents, raw, strict=True):
             # `gather_bounded` returns exceptions as values. One sensor's history failing is
             # not a failed packet; it is a stated absence.
-            history, note = (), f"{type(outcome).__name__}"
+            history_by_key[incident.key] = outcome if isinstance(outcome, tuple) else ((), f"{type(outcome).__name__}")
+
+    packets: list[EvidencePacket] = []
+    for incident in incidents:
         pasture, pasture_note = roster.for_location(incident.location)
         sop_name, sop_text = load_sop(incident.category)
-        ref = ranch_map.get(incident.sensor_id) if ranch_map else None
+        if incident.is_animal:
+            packets.append(EvidencePacket(incident=incident, pasture=pasture, pasture_note=pasture_note, sop_name=sop_name, sop_text=sop_text, animal=animal_context(incident, herd)))
+            continue
+        history, note = history_by_key[incident.key]
+        ref = ranch_map.get(incident.subject_id) if ranch_map else None
         packets.append(
             EvidencePacket(
                 incident=incident,
                 history=history,
                 history_note=note,
-                siblings=siblings_for(incident.location, incident.sensor_id, readings),
+                siblings=siblings_for(incident.location, incident.subject_id, readings),
                 pasture=pasture,
                 pasture_note=pasture_note,
                 sop_name=sop_name,
@@ -456,5 +502,5 @@ async def assemble(
     missing_sop = sorted({p.incident.category for p in packets if not p.sop_name})
     if missing_sop:
         log.warning("packets_without_sop", categories=missing_sop, hint="add the category to SOP_FOR_CATEGORY and write the rule in data/knowledge_base/")
-    log.info("evidence_assembled", packets=len(packets), history_calls=len(packets), pastures_known=len(roster.pastures), with_history=sum(1 for p in packets if p.history))
+    log.info("evidence_assembled", packets=len(packets), animal_packets=sum(1 for p in packets if p.incident.is_animal), history_calls=len(sensor_incidents), pastures_known=len(roster.pastures), with_history=sum(1 for p in packets if p.history))
     return tuple(packets)

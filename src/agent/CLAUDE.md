@@ -28,7 +28,8 @@ expensive statement.
 catalog                free   the MCP map, with GET /sensors as fallback
 chaos maybe-fires      free   after the catalog, because plan() picks targets from the topology
 sweep ~160 sensors     free   bounded by SWEEP_CONCURRENCY
-triage                 free   code owns severity
+herd                   free   M7A: the Farm list in waves of 6, the care record for the changed set. ~18s. Never fails the tick
+triage                 free   code owns severity, for sensors and for animals
 reconcile into sw_ops  free   pending / opened / ongoing / resolved / dismissed
 route new incidents    free
   -> evidence          SPEND  HTTP, not tokens: ~4 extra calls per newly-opened incident
@@ -37,8 +38,8 @@ gate on writes         free   a proposed write pauses for a human; the tick does
 synthesize             maybe  one call, or zero. Runs on every tick, see below
 ```
 
-Five stages cost zero tokens. That is not an optimization, it is the architecture: 160
-sensors are far too many to hand a model every tick, and a model asked to find the problem
+Six stages cost zero tokens. That is not an optimization, it is the architecture: 160
+sensors and 1,195 head are far too many to hand a model every tick, and a model asked to find the problem
 will burn its budget navigating. The free pass narrows the ranch to what is actually wrong,
 and only then does anything expensive happen.
 
@@ -81,6 +82,15 @@ opened per tick, almost all of them dice.
 a per-sensor `SweepError` and the sweep carries on; all of them dark is an outage, and without
 the raise the tick is green with zero readings and the loop reads 160 connection errors every
 tick at cadence forever, which is the opposite of backing off.
+
+**The herd stage is the other way round, on purpose: it never fails the tick.** A Farm or Care
+outage is `herd_error` on the line and an empty `answered` set from `sweep_herd`, so no animal
+incident resolves, the findings that did come back still open, and the tanks are still watched.
+It reads the ledger's live animal subjects first (`memory.live_animal_subjects`) so an animal that
+has left every roster (the Farm API nulls a dead cow's pasture) is still in the changed set and
+still vouched for by the list. `reconcile` takes `read_subject_ids`: the sensors read plus
+`herd.answered`. The stage is not in `STAGE_UPSTREAM`, so it has no backoff; 20 requests against a
+sick Farm API every 300s is a cost the heartbeat can carry.
 
 ## The loop (M4). `run_loop` in `executor.py`, and the rules it enforces
 
@@ -230,8 +240,10 @@ prose, everything from `status` down is code's verdict on it, and `severity` is 
 rather than the model's echo. The echo is kept in its own field so a disagreement is
 recorded rather than smoothed over.
 
-`memory.py` owns `sw_ops` and nothing else. Incidents are keyed on **sensor plus
-category**, so the same tank going dry twice in one afternoon is one incident.
+`memory.py` owns `sw_ops` and nothing else. Incidents are keyed on **subject plus
+category** (`subject_id` / `subject_type` since migration `0006`; `subject_type` is the sensor type
+or the literal `animal`), so the same tank going dry twice in one afternoon is one incident, and so
+is the same cow reading deceased on every sweep until somebody restores her.
 
 ## The gate (M6): a proposed write pauses for a human, and the pause outlives the process
 

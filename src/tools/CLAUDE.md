@@ -27,6 +27,39 @@ flat tool names**, no namespaces. Consequences that are easy to get wrong:
   bogus path to `MCP_URL` does not produce a failure. Test failure paths with an
   unreachable host instead.
 
+## herd.py: the second free sweep, and what the wire forced on it (M7A)
+
+`sweep_herd` is `sensors.py`'s shape pointed at the Farm and Care APIs, under the same three rules
+(errors as data, an empty catalog fails the stage, the stage returns the subjects that answered), and
+three wire facts decided everything else. All three are in `docs/STATE.md`; the short form:
+
+- **The catalog is the whole `GET /animals` list, paged at 100, in waves of `HERD_PAGE_CONCURRENCY = 6`,
+  stopping at the first short page.** Not the `status` filter: it validates its input and still returned
+  nothing for `status=deceased` with a deceased cow in the list. Not the roster: a deceased PATCH nulls
+  `pastureId` and she leaves it. Not one call: `limit=500` is a 503 at the API Gateway wall. Not 12 at
+  once: 2 of 12 come back HTTP 500 at 12 or 20 in flight, 0 of 12 at 6, measured.
+- **Observations are read only for the changed set** (non-active status, pending care task, live incident
+  from the ledger via `watch`), because they list per animal only and 1,195 reads a tick is 344k Care
+  requests a day. What that leaves invisible is `docs/issues.md` #16.
+- **`answered` is the list, minus the animals whose own read failed, and empty whenever `failure` is set.**
+  Any page failing, or the care-task read failing, means no animal answered. The tick still runs; the
+  line carries `herd_error`.
+
+The roster is read for context (head counts, and the packet's pasture line) and is a second source: a
+list that disagrees with it beyond the pastureless animals logs `herd_roster_disagrees`.
+
+**Severity for animals is `triage.triage_herd`'s**, same ownership as sensors: `deceased` critical,
+`inactive` warning, `sold` nothing (an explicit branch, not a fall-through), a `high` observation inside
+`OBSERVATION_WINDOW` (24h) critical for `injury` / `mobility` and warning otherwise and never beside a
+status finding, `care_overdue` warning. The window exists because the ranch has history (cow-0777's
+August mobility note) and the debounce does nothing against a note that is stable across sweeps.
+
+**The cow's packet carries no sensor reading.** `evidence.py` documents that a code-assembled packet may
+cross an allowlist; this is the one place that is refused. `herd_health` sees the dead cow, `water_feed`
+sees the dry tank, the supervisor fuses them, and a test renders a cow's page against a sweep with the
+pasture's tank at 1.4 gal and asserts none of it leaked. The page costs zero HTTP: everything on it was
+read by the sweep.
+
 ## allowlists.py: declared, proposable, performable
 
 The counts are the spec: **7 / 6 / 5 / 5 / 0**, and a test asserts each one exactly, so a
@@ -37,7 +70,7 @@ number here needs changing, change the number, not the test.
 that matters is the brief, the SOP set, and which sensor types reach each agent; tool-name
 exclusivity would mean editing a frozen server. `herd_health` has no sensor reads at all,
 which is design and not omission: it cannot see a sensor, so no sensor incident can route to
-it (`src/agent/agent.py`).
+it, and from M7A it owns the four animal categories and nothing else (`src/agent/agent.py`).
 
 **A model never calls a write tool. From M6 it may propose one, and a human performs it.** Four
 names, and none of them is redundant:
@@ -84,8 +117,8 @@ covers exactly `agent.AGENTS`, so the rail is the sync mechanism.
 
 ## Severity belongs to triage.py
 
-`triage.py` decides severity, in code, from per-type thresholds. No model, at any
-tier, ever assigns it. A model handed a verdict and asked to justify it fabricates the
+`triage.py` decides severity, in code, from per-type thresholds, and from M7A from the animal
+truth table in `triage_herd`. No model, at any tier, ever assigns it. A model handed a verdict and asked to justify it fabricates the
 justification, measured at 94/97 correct down to 2/100 in a previous life of this
 project. A sub-agent may **echo** severity and must never author it.
 

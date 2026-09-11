@@ -31,6 +31,7 @@ container). Files are **always** JSON regardless of environment.
 { "ts":"2026-09-10T14:30:00.000Z","run_id":"9a10c5f00357","tick":42,"duration_ms":8140,
   "store":"prod","catalog_source":"mcp_resource",
   "sensors_read":160,"sensors_failed":0,
+  "herd_animals":6,"herd_errors":0,"herd_error":null,
   "findings":21,"critical":6,"opened":2,"ongoing":8,"resolved":4,"pending":7,"dismissed":9,"held_unread":0,
   "agents_routed":["water_feed","infrastructure"],
   "work_orders":9,"work_orders_shipped":9,"work_orders_rejected":0,"escalated":1,
@@ -284,7 +285,10 @@ replaced with `[redacted]`; bulk bodies with `[omitted: set LOG_TRANSCRIPTS=1]` 
 than deleted, so a reader can tell "there was a prompt we chose not to store" from
 "there was no prompt."
 
-`LOG_TRANSCRIPTS=1` writes full bodies to `logs/transcripts/{run_id}/{tick}-{agent}.json`.
+`LOG_TRANSCRIPTS=1` writes full bodies to `logs/transcripts/{run_id}/{tick}-{agent}-{incident_key}.json`,
+one per stored work order (the page and the order), plus `{tick}-supervisor-tick-{n}.json` for a fused
+shift report (the page and the report, so `linked` is readable after the tick). **Dead until M7A**: the
+function existed from M0 and nothing called it, found the first time a herd order's prose was needed.
 Off by default because prompts dwarf everything else on disk. Invaluable for exactly one
 job: a finding that reads wrong and a log that cannot say why.
 

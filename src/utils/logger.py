@@ -19,6 +19,7 @@ import atexit
 import json
 import logging
 import logging.handlers
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -273,20 +274,30 @@ def log_audit_decided(*, audit_id: str, decision: str, decided_by: str, result: 
     )
 
 
-def write_transcript(*, tick: int, agent: str, payload: dict[str, Any]) -> Path | None:
+def write_transcript(*, tick: int, agent: str, payload: dict[str, Any], name: str = "") -> Path | None:
     """Full prompt and response bodies, only when LOG_TRANSCRIPTS=1.
 
     Off by default because prompts dwarf everything else on disk. Invaluable for
-    exactly one job: a finding that reads wrong and a log that cannot say why.
+    exactly one job: a finding that reads wrong and a log that cannot say why. Defined at M0 and
+    **called by nothing until M7A**, which found out the flag was dead the first time it needed a
+    herd order's prose: `workers.judge_packet` writes one file per stored order now. `name` keeps two
+    orders from one agent on one tick apart, and a colon in an incident key is not a filename.
     """
     settings = get_settings()
     if not settings.log_transcripts:
         return None
     out_dir = settings.log_path / "transcripts" / (_run_id or "unknown")
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{tick:06d}-{agent}.json"
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+    path = out_dir / (f"{tick:06d}-{agent}-{safe}.json" if safe else f"{tick:06d}-{agent}.json")
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return path
+
+
+def current_tick() -> int:
+    """The tick bound on the logging context, or 0 outside one. For a file name, never for a decision."""
+    value = structlog.contextvars.get_contextvars().get("tick", 0)
+    return int(value) if isinstance(value, int) else 0
 
 
 class Stopwatch:

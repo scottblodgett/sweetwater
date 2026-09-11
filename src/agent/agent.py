@@ -25,7 +25,7 @@ from typing import Any, Literal
 from src.agent.state import SEVERITY_ORDER, Finding, Incident, RanchState, ShiftReport, WorkOrder
 from src.tools.triage import ALL_CATEGORIES
 from src.utils.helpers import as_strings, has_no_real_instruction
-from src.utils.logger import get_logger
+from src.utils.logger import current_tick, get_logger, write_transcript
 
 log = get_logger(__name__)
 
@@ -75,6 +75,13 @@ ROUTES: dict[str, str] = {
     # Keep the payments, prove the stewardship.
     "range_dry": COMPLIANCE,
     "stream_flow_low": COMPLIANCE,
+    # The animals. M7A: the herd sweep's four categories, and `herd_health` owns animals and
+    # nothing else (`docs/STATE.md` decision 5, rewritten). It still cannot read a sensor, so
+    # nothing above this comment may ever route here.
+    "deceased": HERD_HEALTH,
+    "inactive": HERD_HEALTH,
+    "observation_high": HERD_HEALTH,
+    "care_overdue": HERD_HEALTH,
 }
 
 _warned_categories: set[str] = set()
@@ -88,9 +95,9 @@ def reset_warn_once() -> None:
 def owner_for(category: str) -> str:
     """The one agent that owns this category.
 
-    `herd_health` deliberately owns nothing here. It cannot read a sensor: its tools are
-    the Care API, and every category in this table comes from a sensor. It stays idle
-    until chaos writes real animal events at M5, and that is correct rather than a gap.
+    `herd_health` owns the four animal categories and nothing else. It cannot read a sensor: its
+    tools are the Care API, so no sensor category may ever route to it, and from M7A the herd
+    sweep is the only thing that hands it work.
     """
     owner = ROUTES.get(category)
     if owner is None:
@@ -337,4 +344,8 @@ async def synthesize(state: RanchState, *, spend: bool = True) -> ShiftReport:
         fallback = assemble_shift_report(orders, worlds=worlds, violations=tuple(violations))
         return fallback.model_copy(update=receipt)
 
-    return ShiftReport(**cleaned, source="model", worlds=tuple(worlds), work_orders=len(orders), **receipt)
+    report = ShiftReport(**cleaned, source="model", worlds=tuple(worlds), work_orders=len(orders), **receipt)
+    # `LOG_TRANSCRIPTS=1` only: the page the supervisor read and the report it wrote, beside the work
+    # orders' own transcripts. The `linked` claim is otherwise unreadable after the tick.
+    write_transcript(tick=current_tick(), agent="supervisor", name=f"tick-{state.tick}", payload={"page": page, "report": report.model_dump()})
+    return report

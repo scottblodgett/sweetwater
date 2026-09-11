@@ -23,6 +23,7 @@ external product; this is a client of it that happens to be smart.
         │                                                         │
         │  every tick:   chaos maybe-fires ──┐                     │
         │                sweep ~160 sensors  │  free, 0 tokens     │
+        │                herd: 1,195 head    │  free, 0 tokens     │  M7A: the Farm list in waves, the care record for the changed set
         │                triage (code)       │  free, 0 tokens     │
         │                reconcile sw_ops    │  free, 0 tokens     │
         │                route NEW incidents │  free, 0 tokens     │
@@ -45,10 +46,12 @@ external product; this is a client of it that happens to be smart.
                                  sensor faults go to the sw_ops overlay
 ```
 
-## Four of seven stages cost nothing
+## Six of eleven stages cost nothing
 
-160 sensors are far too many to hand a model every tick, and a model asked to *find* the
-problem burns its budget navigating instead. So the free pass narrows the ranch to what
+160 sensors and 1,195 head are far too many to hand a model every tick, and a model asked to *find* the
+problem burns its budget navigating instead. From M7A the free pass has two sweeps: the sensors, and
+the herd off the Farm and Care APIs (`src/tools/herd.py`), which is the only discovery path
+`herd_health` has and the reason it is no longer idle by design. So the free pass narrows the ranch to what
 is actually wrong, and **only newly-opened incidents ever reach an LLM.**
 
 - **`GET /sensors?limit=500` once** for the catalog, or better, the `ranch://sensors/map`

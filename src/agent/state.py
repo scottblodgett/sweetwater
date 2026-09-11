@@ -21,9 +21,15 @@ LIVE_STATUSES: tuple[IncidentStatus, ...] = ("pending", "opened", "ongoing")
 
 SEVERITY_ORDER: dict[Severity, int] = {"nominal": 0, "warning": 1, "critical": 2}
 
+#: M7A. `subject_type` on a `Finding` or an `Incident` is one of the 13 sensor types for a sensor
+#: subject, or this literal for an animal subject. That is how the two kinds of row are told apart
+#: (migration `0006`): anything that is not `animal` is a sensor, including a sensor type triage
+#: has never heard of, which keeps the unknown-type path a sensor path.
+SUBJECT_ANIMAL = "animal"
+
 
 class Finding(BaseModel):
-    """One thing that is wrong with one sensor, right now.
+    """One thing that is wrong with one subject, a sensor or an animal, right now.
 
     This is the **handoff contract** between a sub-agent and the supervisor. A sub-agent
     inherits no context, so anything the supervisor will need has to be carried here
@@ -36,8 +42,10 @@ class Finding(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    sensor_id: str
-    sensor_type: str
+    #: The sensor id, or from M7A the animal id. `subject_type` is the sensor type, or `SUBJECT_ANIMAL`.
+    subject_id: str
+    subject_type: str
+    #: The sensor's location name, or the animal's pasture id. Both slug to a pasture id in `evidence.py`.
     location: str
     category: str
     severity: Severity
@@ -56,8 +64,13 @@ class Finding(BaseModel):
 
     @property
     def key(self) -> str:
-        """`sensor:category`. The same tank going dry twice in one afternoon is one incident."""
-        return f"{self.sensor_id}:{self.category}"
+        """`subject:category`. The same tank going dry twice in one afternoon is one incident, and so
+        is the same cow reading deceased on every sweep until somebody restores her."""
+        return f"{self.subject_id}:{self.category}"
+
+    @property
+    def is_animal(self) -> bool:
+        return self.subject_type == SUBJECT_ANIMAL
 
 
 class Incident(BaseModel):
@@ -72,8 +85,8 @@ class Incident(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     key: str
-    sensor_id: str
-    sensor_type: str
+    subject_id: str
+    subject_type: str
     location: str
     category: str
     severity: Severity
@@ -94,6 +107,11 @@ class Incident(BaseModel):
     # is a decision about it.
     owner: str | None = None
     row_id: int | None = None
+
+    @property
+    def is_animal(self) -> bool:
+        """An animal row (migration `0006`). Decides which page `evidence.py` renders for it."""
+        return self.subject_type == SUBJECT_ANIMAL
 
 
 WorkOrderStatus = Literal["ok", "rejected", "no_answer"]
@@ -269,6 +287,13 @@ class RanchState(BaseModel):
     catalog_source: str = ""
     sensors_read: int = 0
     sensors_failed: int = 0
+    #: M7A, the herd sweep. `herd_animals` is how many animals it read a record for this tick (the
+    #: ones whose state changed: non-active, or named on a pending care task), `herd_errors` is how
+    #: many per-subject reads failed, and `herd_error` is why the stage as a whole failed, or `None`.
+    #: A failed herd stage never fails the tick; it means no animal answered, so none resolves.
+    herd_animals: int = 0
+    herd_errors: int = 0
+    herd_error: str | None = None
     findings: tuple[Finding, ...] = ()
     #: `opened` is what gets paged and billed. `pending` was flagged this sweep but not yet
     #: confirmed; `dismissed` was pending and read clean, never alarmed.

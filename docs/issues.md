@@ -13,9 +13,13 @@ Plain-language rule for reading this: **"owed" means we said we would prove it a
 
 ## Owed verifications
 
-### 1. `herd_health` discovering the coyote kill through its own tools
+### 1. `herd_health` discovering the coyote kill through its own tools. **Closed at M7A, 2026-09-11.**
 
-**Scheduled: M7A**, inserted before M8 at the M7 boundary. Design is the M7A paragraph in `docs/Plan.md`. Closes with #2, #11, and #15 in one paid run.
+**What closed it.** `tools/herd.py`, the second free sweep. `chaos inject --tick 32` PATCHed cow-0905 to
+`deceased` on the real Farm API; the next tick held `cow-0905:deceased` pending, the one after opened it
+and routed it to `herd_health` alone, and the order named her by id and tag, quoted the coyote note
+verbatim, cited `HERD-01`, and escalated to the GM on the predator note. The pause is #11's audit id.
+The design changed twice on the wire before it worked: see `docs/JOURNEY.md` M7A and cookbook #39, #40.
 
 **Where it came from.** M5 built the `coyote_kill` scenario and the guarded animal write path, and
 deferred the check to "the first phase with a supervisor." M3 built the supervisor. M4 was the
@@ -34,9 +38,13 @@ cow rather than a sensor.
 where it lives before building it. Until then `docs/STATE.md` decision 5 stands: `herd_health`
 idle is correct, not a gap.
 
-### 2. A chaos storm front fusing into one shift report
+### 2. A chaos storm front fusing into one shift report. **Closed at M7A, 2026-09-11.**
 
-**Scheduled: M7A.** "Cattle through the gap" is an animal event, so the storm front has both halves only once the herd sweep exists.
+**What closed it.** Tick H on the test ledger (run `06177b7095cf`): `storm_front` and the coyote kill
+opened together, 18 orders across three worlds, and the fused report's `linked` named eleven keys
+including `met-tower-wind:high_wind`, `antelope-ridge-fence:fence_down`, and `home-place-temp:freeze_risk`
+together, and fused `cow-0777:care_overdue` into the Red Canyon water run. Zero violations. The report
+is pinned in `logs/transcripts/06177b7095cf/`.
 
 **Where it came from.** M5 deferred it to M3. M3 verified fusion live, but on natural churn across
 three sensing worlds, not on the chaos `storm_front` group. The specific claim that four correlated
@@ -73,9 +81,12 @@ while a CLI decision is mid-write, or the reverse, is the unlikely case nobody h
 gets there for free, since the API is the loop's process), or the receipt moves to a table and the
 file becomes a projection of it. Decide at M8, when the second writer becomes the API.
 
-### 11. The gate's interrupt is verified on `restock_feed`, not `create_observation`
+### 11. The gate's interrupt is verified on `restock_feed`, not `create_observation`. **Closed at M7A, 2026-09-11.**
 
-**Scheduled: M7A.** The live `create_observation` pause is M7A's headline verification.
+**What closed it.** `write_paused` on `cow-0905:deceased`, `create_observation`, **audit_id
+`968e7f64fb7540dc9adeed547d15e802`**, the note built from the page under `HERD-07` and `observedAt` the
+Farm API's own update stamp. Approved at the CLI by scooter after 49s; the note landed on the deployed
+Care API as observation `2dd60c7d-b9a2-413d-b17c-3cae46563d64`. Both halves in `logs/audit.jsonl`.
 
 **Where it came from.** The plan's M6 verification says "let a tick pause on a `create_observation`."
 That needs `herd_health` to propose one, and `herd_health` is handed nothing because no stage reads
@@ -168,9 +179,12 @@ when a job first wants thinking on; not touched at M7 because no job did.
 public Bedrock pricing page did not render an Opus 5 row when checked. Verify against the AWS bill
 for the M7 run (about $0.75 of Opus on 2026-09-11) and correct the one row if it differs.
 
-### 15. The M6 live pause is still owed
+### 15. The M6 live pause is still owed. **Closed at M7A, 2026-09-11**, with #11.
 
-**Scheduled: M7A**, with #11.
+Same pause, same audit id. Worth keeping the finding beside it: Opus proposed **nothing** on seven herd
+orders while the SOP forbade fabricating an observation, exactly as it proposed nothing on M6's and
+M7's feed pages. The prompt was not steered; `HERD-07` names a legitimate write and the model took it
+on the first tick it was offered. The gate has never paused on a proposal the SOP did not sanction.
 
 Carried from M6. Three more paid ticks at M7 and the local model proposed writes readily
 (`restock_feed` with `quantity: "unknown"`, tools outside its slice), every one stripped by the
@@ -178,6 +192,45 @@ shape and tool checks or escalated before the gate; Opus proposed nothing. The f
 `write_paused` remains the verification, and `create_observation` still waits on #1.
 
 ---
+
+## Owed from M7A
+
+### 16. A `high` observation on an `active` animal with no care task is invisible
+
+**Where it came from.** The herd sweep reads observations only for the changed set (non-active status,
+pending care task, live incident), because observations list per animal only and 1,195 reads a tick is
+344k Care requests a day. So a `high` `injury` note written against a healthy-status cow with no task
+opens nothing until something else puts her in the changed set. The coyote kill is caught through the
+status; a "cow down, still active" note is not.
+
+**What it would take.** A rotating slice (read 1/N of the herd's observations per tick, so every animal
+is read every N ticks), or a `high` note on the Care API becoming a care task upstream, which is a
+conversation with the frozen repo. Neither is V1.
+
+### 17. A deceased PATCH nulls the animal's pasture, and restore does not put it back
+
+**Where it came from.** The first live kill. The Farm API clears `pastureId` when an animal is patched
+to `deceased`, so the dead cow's packet says "pasture unrecorded" and her herd-mates are unknown to it;
+the deceased order had to ask the GM where she was found. `chaos restore` PATCHes the status back and
+leaves her pastureless, and the chaos kill leaves a `high` `injury` note inside the 24-hour window, so a
+restored cohort animal reads as `observation_high` critical for a day (`cow-0905:observation_high` went
+pending on the tick after restore, correctly).
+
+**What it would take.** The kill event could record the pasture and `restore` could `assign_to_pasture`
+it back: one more real write through the guard, in `chaos.py`. The observation is append-only upstream
+and stays; the window handles it after a day. Decide whether the demo wants the cohort to survive a kill
+intact before building it.
+
+### 18. `sensor_not_named` grades the animal id on a herd order
+
+The rail is right and the code is wrong for a cow. Kept because docs, transcripts, and the ledger name it.
+Rename to `subject_not_named` when the M8 API decides what it shows a human, so it is renamed once.
+
+### 19. Care task titles carry em dashes, from the upstream
+
+"Recheck pinkeye eye — remove patch" is the Farm's seed data, so a triage summary quoting the title
+carries the dash and so does the herd page. Data, not our prose; the em-dash rail is on the SOPs and
+the briefs and stays there.
 
 ## Known artifacts, not fixable from here
 
@@ -207,7 +260,8 @@ for by measuring rather than by tripping). The list at the bottom of `docs/cookb
 
 ## By design, not open. Easy to mistake for gaps
 
-- `herd_health` gets no sensor incidents (decision 5). `chaos` has zero tools and no brief.
+- `herd_health` owns animals and nothing else (decision 5, rewritten at M7A): the four animal categories and never a sensor incident. `chaos` has zero tools and no brief.
+- The herd stage never fails the tick. `herd_error` on the line and zero animals answered is the failure mode, by design.
 - `GATE_LANDED` is True from M6, and that made writes **proposable**, not callable. A model never
   calls a write tool; a human performs an approved proposal through the gate CLI.
 - Tier 1 exists from M7 and ships **off** (`TIER1_ENABLED=0`): every model job is Opus until a ledger row says otherwise. That is the measured result, not a stub.

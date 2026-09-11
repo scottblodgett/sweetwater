@@ -24,9 +24,11 @@ Two structural rules, both of which exist because of a specific way this goes wr
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from src.agent.state import Finding, Severity
+from src.agent.state import SUBJECT_ANIMAL, Finding, Severity
+from src.tools.herd import ANIMAL_STATUS_ACTIVE, AnimalRecord, CareTask, HerdSweepResult, Observation
 from src.tools.sensors import SensorReading
 from src.utils.logger import get_logger
 
@@ -46,6 +48,31 @@ CATEGORY_DEGRADED = "sensor_degraded"
 CATEGORY_FAULT = "sensor_fault"
 CATEGORY_UNKNOWN_TYPE = "unknown_sensor_type"
 SENSOR_CATEGORIES = frozenset({CATEGORY_OFFLINE, CATEGORY_DEGRADED, CATEGORY_FAULT, CATEGORY_UNKNOWN_TYPE})
+
+# M7A. Animal categories, from the herd sweep. The key is `animal:category` exactly as it is
+# `sensor:category`, so `cow-0903:deceased` is one incident for as long as she reads deceased.
+CATEGORY_DECEASED = "deceased"
+CATEGORY_INACTIVE = "inactive"
+CATEGORY_OBSERVATION_HIGH = "observation_high"
+CATEGORY_CARE_OVERDUE = "care_overdue"
+ANIMAL_CATEGORIES = frozenset({CATEGORY_DECEASED, CATEGORY_INACTIVE, CATEGORY_OBSERVATION_HIGH, CATEGORY_CARE_OVERDUE})
+
+#: `sold` is the one non-active status that is a ranch running normally. Named so the branch that
+#: rules it out is explicit rather than a fall-through, and so a test can point at the row.
+ANIMAL_STATUS_SOLD = "sold"
+ANIMAL_STATUS_DECEASED = "deceased"
+ANIMAL_STATUS_INACTIVE = "inactive"
+
+#: The ranch has history. cow-0777 carries a `high` `mobility` observation from 2026-08-09 and the
+#: Care API lists per animal with no since filter, so the first sweep would open one incident per
+#: old note and the debounce would not help, because an old observation is stable across sweeps.
+#: A high observation opens a finding only inside this window; outside it, it is history that the
+#: packet still carries and a rancher still reads.
+OBSERVATION_WINDOW = timedelta(hours=24)
+#: A `high` observation of one of these types is an animal that needs a person today. The rest
+#: (`behavior`, `appetite`, `appearance`, `general`) are a warning: real, and on a clock of days.
+CRITICAL_OBSERVATION_TYPES = frozenset({"injury", "mobility"})
+OBSERVATION_SEVERITY_HIGH = "high"
 
 
 @dataclass(frozen=True)
@@ -314,9 +341,9 @@ RULES: dict[str, TypeRule] = {
     ),
 }
 
-# Every category triage can ever emit. `routing.py` is tested against this set, so a new
+# Every category triage can ever emit. `agent.ROUTES` is tested against this set, so a new
 # band cannot be added without an owner: an incident nobody owns is silently dropped.
-ALL_CATEGORIES: frozenset[str] = frozenset(b.category for r in RULES.values() for b in r.bands) | SENSOR_CATEGORIES
+ALL_CATEGORIES: frozenset[str] = frozenset(b.category for r in RULES.values() for b in r.bands) | SENSOR_CATEGORIES | ANIMAL_CATEGORIES
 
 
 # --------------------------------------------------------------------------- #
@@ -339,6 +366,7 @@ class _WarnOnce:
 
 _unknown_types = _WarnOnce()
 _unknown_statuses = _WarnOnce()
+_unknown_animal_statuses = _WarnOnce()
 
 
 def reset_warn_once() -> None:
@@ -346,6 +374,7 @@ def reset_warn_once() -> None:
     warning cannot depend on which test ran before it."""
     _unknown_types.seen.clear()
     _unknown_statuses.seen.clear()
+    _unknown_animal_statuses.seen.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -392,8 +421,8 @@ def triage_reading(reading: SensorReading) -> list[Finding]:
     def add(category: str, severity: Severity, summary: str, threshold: float | None = None) -> None:
         findings.append(
             Finding(
-                sensor_id=reading.sensor_id,
-                sensor_type=reading.sensor_type,
+                subject_id=reading.sensor_id,
+                subject_type=reading.sensor_type,
                 location=reading.location,
                 category=category,
                 severity=severity,
@@ -459,13 +488,123 @@ def triage_reading(reading: SensorReading) -> list[Finding]:
     return findings
 
 
-def triage_sweep(readings: tuple[SensorReading, ...] | list[SensorReading]) -> list[Finding]:
-    """Findings across a whole sweep, worst first, then by sensor for a stable order.
+def _ranked(findings: list[Finding]) -> list[Finding]:
+    order = {"critical": 0, "warning": 1, "nominal": 2}
+    return sorted(findings, key=lambda f: (order.get(f.severity, 3), f.subject_id, f.category))
+
+
+def triage_sweep(readings: tuple[SensorReading, ...] | list[SensorReading], *, herd: HerdSweepResult | None = None, now: datetime | None = None) -> list[Finding]:
+    """Findings across a whole sweep, worst first, then by subject for a stable order.
 
     Sorted so the tick line and any human reading the log see the critical items first.
     Stable ordering also means two runs over the same sweep produce the same list, which
-    is what lets the reconciliation tests assert on it.
+    is what lets the reconciliation tests assert on it. From M7A the herd's findings are
+    ranked into the same list: a dead cow and a dry tank are one tick's work, not two lists.
     """
     findings = [f for reading in readings for f in triage_reading(reading)]
-    order = {"critical": 0, "warning": 1, "nominal": 2}
-    return sorted(findings, key=lambda f: (order.get(f.severity, 3), f.sensor_id, f.category))
+    if herd is not None:
+        findings.extend(triage_herd(herd, now=now))
+    return _ranked(findings)
+
+
+# --------------------------------------------------------------------------- #
+# the herd. M7A: animal categories, in code, same ownership rule
+# --------------------------------------------------------------------------- #
+def _who(record: AnimalRecord | None, animal_id: str) -> str:
+    if record is None:
+        return f"{animal_id} (record unavailable this tick)"
+    name = f", tag {record.name}" if record.name else ""
+    return f"{record.species} {animal_id}{name}"
+
+
+def _where(record: AnimalRecord | None) -> str:
+    return record.pasture_id if record and record.pasture_id else "pasture unrecorded"
+
+
+def _newest_high_observation(observations: tuple[Observation, ...], *, since: datetime) -> Observation | None:
+    """The newest `high` observation inside the window, or `None`. Anything without a parseable
+    timestamp is history that cannot be dated and so cannot be inside the window."""
+    for obs in observations:  # newest first
+        if obs.severity != OBSERVATION_SEVERITY_HIGH:
+            continue
+        observed = obs.observed
+        if observed is not None and observed >= since:
+            return obs
+    return None
+
+
+def _animal_finding(record: AnimalRecord | None, animal_id: str, *, category: str, severity: Severity, summary: str, observed_at: str | None) -> Finding:
+    return Finding(subject_id=animal_id, subject_type=SUBJECT_ANIMAL, location=record.pasture_id if record else "", category=category, severity=severity, observed_at=observed_at, summary=summary)
+
+
+def triage_herd(herd: HerdSweepResult, *, now: datetime | None = None) -> list[Finding]:
+    """Every animal finding this sweep supports. Empty list means the herd read normally.
+
+    The truth table, in code, one row per animal category:
+
+      * `deceased`  critical. Under M7's predicate this escalates to Tier 2 on its own, which is
+                    where a dead cow belongs. Not tuned down to save a call.
+      * `inactive`  warning. On the books, not sold, not dead, not standing in a pasture as far as
+                    the record knows: unaccounted for, which the ranch mission names as a loss.
+      * `sold`      **not a finding.** Ruled out here, explicitly. One non-active status is a ranch
+                    running normally, and a work order about a cow that went to the sale barn on
+                    purpose teaches the crew to ignore the category.
+      * `observation_high`  a `high` observation inside `OBSERVATION_WINDOW`: critical for `injury`
+                    and `mobility`, warning otherwise. One per animal, the newest. **Not opened on an
+                    animal that already has a status finding**: the observation rides in that
+                    packet, and two incidents about one dead cow is one work order too many.
+      * `care_overdue`  warning. A pending care task past its `dueAt`. One per animal, the oldest.
+                    The clock is the only threshold, and an overdue task is a present state rather
+                    than history, so no window applies.
+
+    A status outside the Farm API's enum cannot arrive (the sweep reads by status), so the branch
+    for it warns once and opens nothing rather than inventing a category.
+    """
+    stamp = now or datetime.now(UTC)
+    since = stamp - OBSERVATION_WINDOW
+    findings: list[Finding] = []
+    status_flagged: set[str] = set()
+
+    for record in herd.animals:
+        who, where = _who(record, record.animal_id), _where(record)
+        status = record.status.lower()
+        if status == ANIMAL_STATUS_DECEASED:
+            status_flagged.add(record.animal_id)
+            findings.append(_animal_finding(record, record.animal_id, category=CATEGORY_DECEASED, severity="critical", observed_at=record.updated_at or None, summary=f"{where}: {who} is recorded deceased on the Farm API. A dead animal is a loss to record and a cause to find, and the rest of the group in that pasture is the next question."))
+        elif status == ANIMAL_STATUS_INACTIVE:
+            status_flagged.add(record.animal_id)
+            findings.append(_animal_finding(record, record.animal_id, category=CATEGORY_INACTIVE, severity="warning", observed_at=record.updated_at or None, summary=f"{where}: {who} is recorded inactive, which is not sold and not deceased. This animal is on the books and not accounted for."))
+        elif status == ANIMAL_STATUS_SOLD:
+            # A ranch running normally. Named as a branch rather than left to fall through, so the
+            # decision is visible here and pointed at by a test.
+            continue
+        elif status == ANIMAL_STATUS_ACTIVE:
+            pass  # a care-task animal, or a cohort animal restored; its observations and tasks decide
+        else:
+            _unknown_animal_statuses.fire(status, "unknown_animal_status", status=record.status, animal_id=record.animal_id, hint="not one of the Farm API's four statuses; nothing opened, add it to triage.py explicitly")
+
+    for record in herd.animals:
+        if record.animal_id in status_flagged:
+            continue
+        newest = _newest_high_observation(herd.observations_for(record.animal_id), since=since)
+        if newest is None:
+            continue
+        severity: Severity = "critical" if newest.type in CRITICAL_OBSERVATION_TYPES else "warning"
+        who, where = _who(record, record.animal_id), _where(record)
+        consequence = "This animal needs a person at it today." if severity == "critical" else "Real, and on a clock of days rather than hours."
+        findings.append(_animal_finding(record, record.animal_id, category=CATEGORY_OBSERVATION_HIGH, severity=severity, observed_at=newest.observed_at, summary=f'{where}: {who} carries a high-severity {newest.type} observation from {newest.observed_at}: "{newest.note}". {consequence}'))
+
+    overdue_by_animal: dict[str, CareTask] = {}
+    for task in herd.care_tasks:
+        due = task.due
+        if task.status != "pending" or due is None or due >= stamp:
+            continue
+        prior = overdue_by_animal.get(task.animal_id)
+        if prior is None or (prior.due or stamp) > due:
+            overdue_by_animal[task.animal_id] = task
+    for animal_id, task in sorted(overdue_by_animal.items()):
+        known = herd.record(animal_id)
+        days = (stamp - (task.due or stamp)).days
+        findings.append(_animal_finding(known, animal_id, category=CATEGORY_CARE_OVERDUE, severity="warning", observed_at=task.due_at, summary=f'{_where(known)}: care task {task.task_id} for {_who(known, animal_id)}, "{task.title}", was due {task.due_at} and is still pending, {days} day{"s" if days != 1 else ""} overdue. A promise the record shows was not kept.'))
+
+    return _ranked(findings)

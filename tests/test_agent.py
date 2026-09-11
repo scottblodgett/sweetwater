@@ -28,6 +28,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,7 +115,7 @@ from src.tools.allowlists import DEPLOYED_TOOLS, GATE_LANDED, WRITE_TOOL_ARGS, W
 from src.tools.chaos import KIND_ANIMAL, KIND_SENSOR, ChaosEvent
 from src.tools.evidence import EvidencePacket, HistoryPoint, PastureContext, SiblingReading
 from src.tools.mcp_client import RanchMap, SensorRef, flatten_exception, parse_ranch_map
-from src.tools.triage import ALL_CATEGORIES
+from src.tools.triage import ALL_CATEGORIES, ANIMAL_CATEGORIES
 from src.utils.config import Settings, get_settings
 from src.utils.helpers import backoff_delay, utc_now_iso
 from src.utils.logger import _foreign_chain, _redact
@@ -122,6 +123,8 @@ from src.utils.logger import _foreign_chain, _redact
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 BASE = "https://sensor.test"
+FARM = "https://farm.test"
+CARE = "https://care.test"
 
 #: One frozen clock for every suite below. Fixtures use literal timestamps and no test
 #: asserts on a value it got from the clock.
@@ -143,8 +146,10 @@ def _fake_upstreams(monkeypatch: pytest.MonkeyPatch) -> None:
     reaching the deployed ranch. Autouse across all five suites: only the tick suite reads
     it, and the others never call into `sensors` or `helpers`, so it costs them nothing.
     """
-    settings = Settings(sensor_api=BASE, sweep_concurrency=4, upstream_timeout_ms=500, _env_file=None)
+    settings = Settings(sensor_api=BASE, farm_api=FARM, care_api=CARE, sweep_concurrency=4, upstream_timeout_ms=500, _env_file=None)
     monkeypatch.setattr("src.tools.sensors.get_settings", lambda: settings)
+    monkeypatch.setattr("src.tools.herd.get_settings", lambda: settings)
+    monkeypatch.setattr("src.tools.evidence.get_settings", lambda: settings)
     monkeypatch.setattr("src.utils.helpers.get_settings", lambda: settings)
 
 
@@ -198,19 +203,51 @@ def payload_for(ref: SensorRef, value: object, *, status: str = "online") -> dic
     return {"data": {"id": ref.sensor_id, "type": ref.sensor_type, "locationName": ref.location, "status": status, "latestReading": {"value": value, "recordedAt": "2026-09-10T14:00:00.000Z"}}}
 
 
-def serve(mock: respx.MockRouter, values: dict[str, object], *, broken: set[str] = frozenset()) -> None:
+#: The herd as the tick tests see it unless one of them says otherwise: two pastures, five head,
+#: nobody non-active, no pending care task. Quiet, and **not empty**: an empty roster is a failed
+#: herd stage (`herd.py`), and a tick test that served one would be testing the failure path by accident.
+QUIET_ROSTER = {"data": [{"id": "alkali-flat", "name": "Alkali Flat", "acreage": 2400, "fenceType": "barbed-wire", "status": "open", "animalIds": ["cow-0001", "cow-0002", "cow-0003"]}, {"id": "east-allotment", "name": "East BLM Allotment", "acreage": 8800, "fenceType": "barbed-wire", "status": "open", "animalIds": ["cow-0901", "cow-0902"]}], "meta": {"count": 2, "limit": 50, "offset": 0}}
+EMPTY_PAGE = {"data": [], "meta": {"count": 0, "limit": 500, "offset": 0}}
+
+
+def _row(animal_id: str, pasture: str | None, *, status: str = "active") -> dict[str, object]:
+    return {"id": animal_id, "name": f"SW-{animal_id[-4:]}", "species": "cow", "sex": "female", "status": status, "pastureId": pasture, "shelterId": None, "createdAt": "2026-08-10T14:00:00.000Z", "updatedAt": "2026-08-10T14:00:00.000Z"}
+
+
+def serve_herd(mock: respx.MockRouter, *, non_active: dict[str, list[dict[str, object]]] | None = None, extra: list[dict[str, object]] = (), care_tasks: list[dict[str, object]] | None = None, observations: dict[str, list[dict[str, object]]] | None = None, roster: dict[str, object] | None = None) -> None:  # type: ignore[assignment]
+    """The Farm and Care routes the herd stage reads, with a quiet herd unless told otherwise. The
+    herd list is served as pages: page 0 is an active row per roster id, plus `non_active` and `extra`
+    rows (which replace the roster's row for the same id), and the other pages are empty."""
+    the_roster = roster if roster is not None else QUIET_ROSTER
+    mock.get(f"{FARM}/pastures").mock(return_value=httpx.Response(200, json=the_roster))
+    given = [row for rows in (non_active or {}).values() for row in rows] + list(extra)
+    given_ids = {str(r["id"]) for r in given}
+    listed = [_row(aid, str(p["id"])) for p in the_roster["data"] for aid in (p.get("animalIds") or []) if aid not in given_ids] + given  # type: ignore[index, union-attr, attr-defined]
+    for offset in range(0, 2000, 100):
+        rows = listed if offset == 0 else []
+        mock.get(f"{FARM}/animals", params__contains={"offset": str(offset)}).mock(return_value=httpx.Response(200, json={"data": rows, "meta": {"count": len(rows), "limit": 100, "offset": offset}}))
+    tasks = care_tasks or []
+    mock.get(f"{CARE}/care-tasks").mock(return_value=httpx.Response(200, json={"data": tasks, "meta": {"count": len(tasks), "limit": 500, "offset": 0}}))
+    for animal_id, rows in (observations or {}).items():
+        mock.get(f"{CARE}/animals/{animal_id}/observations").mock(return_value=httpx.Response(200, json={"data": rows, "meta": {"count": len(rows), "limit": 50, "offset": 0}}))
+    mock.route(method="GET", host="care.test", path__regex=r"^/animals/[^/]+/observations$").mock(return_value=httpx.Response(200, json=EMPTY_PAGE))
+
+
+def serve(mock: respx.MockRouter, values: dict[str, object], *, broken: set[str] = frozenset(), herd: bool = True) -> None:
     for ref in CATALOG.sensors:
         route_ = mock.get(f"{BASE}/sensors/{ref.sensor_id}")
         if ref.sensor_id in broken:
             route_.mock(return_value=httpx.Response(503, json={"error": {"category": "upstream"}}))
         else:
             route_.mock(return_value=httpx.Response(200, json=payload_for(ref, values[ref.sensor_id])))
+    if herd:
+        serve_herd(mock)
 
 
 def finding(sensor_id: str = "alkali-flat-water", *, category: str = "water_low", severity: str = "critical", value: float = 1.4, summary: str = "") -> Finding:
     return Finding(
-        sensor_id=sensor_id,
-        sensor_type="water-level",
+        subject_id=sensor_id,
+        subject_type="water-level",
         location="Alkali Flat",
         category=category,
         severity=severity,  # type: ignore[arg-type]
@@ -225,8 +262,8 @@ def finding(sensor_id: str = "alkali-flat-water", *, category: str = "water_low"
 def incident(key: str, *, category: str, owner: str | None = None) -> Incident:
     return Incident(
         key=key,
-        sensor_id=key.split(":")[0],
-        sensor_type="water-level",
+        subject_id=key.split(":")[0],
+        subject_type="water-level",
         location="Alkali Flat",
         category=category,
         severity="critical",
@@ -391,11 +428,14 @@ def test_every_owner_is_a_real_agent() -> None:
     assert set(ROUTES.values()) <= set(AGENTS)
 
 
-def test_herd_health_owns_nothing_in_m1_and_that_is_deliberate() -> None:
-    """Its tools are the Care API and every category here comes from a sensor. Handing it
-    a dry tank would produce a work order about cattle that are fine. It wakes up at M5,
-    when chaos writes real animal events."""
-    assert HERD_HEALTH not in set(ROUTES.values())
+def test_herd_health_owns_animals_and_nothing_else() -> None:
+    """`docs/STATE.md` decision 5, rewritten at M7A. Its tools are the Care API, so no sensor
+    category may route to it (handing it a dry tank would produce a work order about cattle
+    that are fine), and every animal category the herd sweep can emit must, or a dead cow is
+    an incident nobody is paged about."""
+    owned = {category for category, agent in ROUTES.items() if agent == HERD_HEALTH}
+    assert owned == set(ANIMAL_CATEGORIES), f"herd_health owns {sorted(owned)}, the herd sweep emits {sorted(ANIMAL_CATEGORIES)}"
+    assert all(owner_for(category) == HERD_HEALTH for category in ANIMAL_CATEGORIES)
 
 
 def test_an_unrouted_category_falls_back_loudly_and_only_warns_once() -> None:
@@ -427,8 +467,8 @@ def test_owners_for_keys_on_incident_key_not_sensor_id() -> None:
     """A degraded water sensor produces two findings on one sensor, and they belong to two
     different agents. Keying the owner map on `sensor_id` would silently drop one."""
     findings = (
-        Finding(sensor_id="alkali-flat-water", sensor_type="water-level", location="Alkali Flat", category="water_low", severity="critical", summary="a"),
-        Finding(sensor_id="alkali-flat-water", sensor_type="water-level", location="Alkali Flat", category="sensor_degraded", severity="warning", summary="b"),
+        Finding(subject_id="alkali-flat-water", subject_type="water-level", location="Alkali Flat", category="water_low", severity="critical", summary="a"),
+        Finding(subject_id="alkali-flat-water", subject_type="water-level", location="Alkali Flat", category="sensor_degraded", severity="warning", summary="b"),
     )
     assert owners_for(findings) == {"alkali-flat-water:water_low": "water_feed", "alkali-flat-water:sensor_degraded": "infrastructure"}
 
@@ -466,16 +506,16 @@ def test_route_of_nothing_is_nothing_not_five_empty_agents() -> None:
 async def test_a_new_finding_is_pending_once_opens_exactly_once_and_is_ongoing_after(store: AsyncSession) -> None:
     """The five statuses, in order, on one row. At the default `INCIDENT_CONFIRM_SWEEPS = 2` a
     finding is pending on its first sweep, opened on its second, and ongoing from the third."""
-    first = await reconcile(store, [finding()], tick=1, run_id="r1", read_sensor_ids=ALL_SENSORS, now=T0)
+    first = await reconcile(store, [finding()], tick=1, run_id="r1", read_subject_ids=ALL_SENSORS, now=T0)
     assert first.counts == {"opened": 0, "ongoing": 0, "resolved": 0, "pending": 1, "dismissed": 0}
     assert first.pending[0].key == "alkali-flat-water:water_low" and first.pending[0].status == "pending"
     assert first.pending[0].tick_opened == 0 and first.pending[0].occurrences == 1, "not opened yet, so no opening tick"
 
-    second = await reconcile(store, [finding()], tick=2, run_id="r1", read_sensor_ids=ALL_SENSORS, now=T1)
+    second = await reconcile(store, [finding()], tick=2, run_id="r1", read_subject_ids=ALL_SENSORS, now=T1)
     assert second.counts == {"opened": 1, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}
     assert second.opened[0].tick_opened == 2 and second.opened[0].first_seen_at == T0 and second.opened[0].occurrences == 2
 
-    third = await reconcile(store, [finding()], tick=3, run_id="r1", read_sensor_ids=ALL_SENSORS, now=T2)
+    third = await reconcile(store, [finding()], tick=3, run_id="r1", read_subject_ids=ALL_SENSORS, now=T2)
     assert third.counts == {"opened": 0, "ongoing": 1, "resolved": 0, "pending": 0, "dismissed": 0}, "a persisting fault is ongoing, never re-alarmed"
     assert third.ongoing[0].occurrences == 3
     assert third.ongoing[0].tick_opened == 2 and third.ongoing[0].tick_last_seen == 3
@@ -489,14 +529,14 @@ async def test_a_pending_finding_that_reads_clean_is_dismissed_not_resolved(stor
     """One bad draw from a synthesized sensor is not an incident. It was never alarmed, so it
     cannot have healed; `dismissed` keeps the row so the churn rate stays countable and keeps it
     out of every resolved count a human reads."""
-    await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
-    result = await reconcile(store, [], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
+    await reconcile(store, [finding()], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
+    result = await reconcile(store, [], tick=2, read_subject_ids=ALL_SENSORS, now=T1)
 
     assert result.counts == {"opened": 0, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 1}
     assert result.dismissed[0].resolved_at == T1
     assert await open_incidents(store) == () and await counts_by_status(store) == {"dismissed": 1}
 
-    again = await reconcile(store, [finding()], tick=3, read_sensor_ids=ALL_SENSORS, now=T2)
+    again = await reconcile(store, [finding()], tick=3, read_subject_ids=ALL_SENSORS, now=T2)
     assert again.counts["pending"] == 1, "a dismissed row is terminal, so the same key can go pending again"
     assert (await store.execute(text("select count(*) from incidents"))).scalar_one() == 2
 
@@ -504,33 +544,33 @@ async def test_a_pending_finding_that_reads_clean_is_dismissed_not_resolved(stor
 async def test_a_pending_finding_whose_sensor_went_dark_is_held_not_dismissed(store: AsyncSession) -> None:
     """Unread is not read-clean, for a pending row exactly as for an opened one. An outage
     during the confirmation window must not quietly dismiss what was about to open."""
-    await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
-    blind = await reconcile(store, [], tick=2, read_sensor_ids=(), now=T1)
+    await reconcile(store, [finding()], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
+    blind = await reconcile(store, [], tick=2, read_subject_ids=(), now=T1)
     assert blind.counts == {"opened": 0, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}
     assert blind.skipped_unread == ("alkali-flat-water:water_low",)
-    confirmed = await reconcile(store, [finding()], tick=3, read_sensor_ids=ALL_SENSORS, now=T2)
+    confirmed = await reconcile(store, [finding()], tick=3, read_subject_ids=ALL_SENSORS, now=T2)
     assert confirmed.counts["opened"] == 1, "and the next clean read that still shows the fault opens it"
 
 
 async def test_the_confirmation_window_is_a_knob_and_one_means_first_sight(store: AsyncSession) -> None:
     """`INCIDENT_CONFIRM_SWEEPS`. 1 is the pre-0003 behaviour; 3 needs three in a row."""
-    now = await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0, confirm_sweeps=1)
+    now = await reconcile(store, [finding()], tick=1, read_subject_ids=ALL_SENSORS, now=T0, confirm_sweeps=1)
     assert now.counts["opened"] == 1 and now.opened[0].tick_opened == 1
-    await reconcile(store, [], tick=2, read_sensor_ids=ALL_SENSORS, now=T1, confirm_sweeps=1)
+    await reconcile(store, [], tick=2, read_subject_ids=ALL_SENSORS, now=T1, confirm_sweeps=1)
 
-    slow = [await reconcile(store, [finding()], tick=t, read_sensor_ids=ALL_SENSORS, now=T2, confirm_sweeps=3) for t in (3, 4, 5)]
+    slow = [await reconcile(store, [finding()], tick=t, read_subject_ids=ALL_SENSORS, now=T2, confirm_sweeps=3) for t in (3, 4, 5)]
     assert [r.counts["pending"] for r in slow] == [1, 1, 0] and [r.counts["opened"] for r in slow] == [0, 0, 1]
 
 
 async def test_severity_on_a_pending_row_follows_the_latest_read_when_it_opens(store: AsyncSession) -> None:
-    await reconcile(store, [finding(severity="warning", value=5.0)], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
-    result = await reconcile(store, [finding(severity="critical", value=1.4)], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
+    await reconcile(store, [finding(severity="warning", value=5.0)], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
+    result = await reconcile(store, [finding(severity="critical", value=1.4)], tick=2, read_subject_ids=ALL_SENSORS, now=T1)
     assert result.opened[0].severity == "critical" and result.opened[0].last_value == "1.4"
 
 
 async def test_a_finding_that_stops_appearing_resolves(first_sight: Settings, store: AsyncSession) -> None:
-    await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
-    result = await reconcile(store, [], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
+    await reconcile(store, [finding()], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
+    result = await reconcile(store, [], tick=2, read_subject_ids=ALL_SENSORS, now=T1)
 
     assert result.counts == {"opened": 0, "ongoing": 0, "resolved": 1, "pending": 0, "dismissed": 0}
     assert result.resolved[0].resolved_at == T1
@@ -541,9 +581,9 @@ async def test_a_finding_that_stops_appearing_resolves(first_sight: Settings, st
 async def test_the_same_fault_returning_after_a_resolve_is_a_new_incident(first_sight: Settings, store: AsyncSession) -> None:
     """History survives. The same tank drying out in March and again in July is two work
     orders, and collapsing them would overwrite the March story."""
-    await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
-    await reconcile(store, [], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
-    again = await reconcile(store, [finding()], tick=3, read_sensor_ids=ALL_SENSORS, now=T2)
+    await reconcile(store, [finding()], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
+    await reconcile(store, [], tick=2, read_subject_ids=ALL_SENSORS, now=T1)
+    again = await reconcile(store, [finding()], tick=3, read_subject_ids=ALL_SENSORS, now=T2)
 
     assert again.counts == {"opened": 1, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}
     assert (await store.execute(text("select count(*) from incidents"))).scalar_one() == 2
@@ -554,9 +594,9 @@ async def test_a_sensor_that_did_not_answer_resolves_nothing(first_sight: Settin
     """The failure this prevents: the Sensor API has a bad five minutes, the sweep returns
     errors instead of readings, every incident on the ranch closes, and the feed reports an
     all-clear at the exact moment nobody can see anything."""
-    await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
+    await reconcile(store, [finding()], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
 
-    blind = await reconcile(store, [], tick=2, read_sensor_ids=(), now=T1)
+    blind = await reconcile(store, [], tick=2, read_subject_ids=(), now=T1)
 
     assert blind.counts == {"opened": 0, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}
     assert blind.skipped_unread == ("alkali-flat-water:water_low",)
@@ -567,18 +607,18 @@ async def test_a_sensor_that_did_not_answer_resolves_nothing(first_sight: Settin
 
 async def test_other_sensors_still_resolve_while_one_is_dark(first_sight: Settings, store: AsyncSession) -> None:
     """Per sensor, not per tick. One dark sensor must not freeze the whole ledger."""
-    await reconcile(store, [finding(), finding("east-allotment-fence", category="fence_down")], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
-    result = await reconcile(store, [], tick=2, read_sensor_ids=("east-allotment-fence",), now=T1)
+    await reconcile(store, [finding(), finding("east-allotment-fence", category="fence_down")], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
+    result = await reconcile(store, [], tick=2, read_subject_ids=("east-allotment-fence",), now=T1)
 
-    assert [i.sensor_id for i in result.resolved] == ["east-allotment-fence"]
+    assert [i.subject_id for i in result.resolved] == ["east-allotment-fence"]
     assert result.skipped_unread == ("alkali-flat-water:water_low",)
 
 
 async def test_severity_follows_the_current_reading_on_an_ongoing_incident(first_sight: Settings, store: AsyncSession) -> None:
     """Code owns severity at every tick, not just the first one. A tank that fills back to
     a warning is still one incident, described accurately."""
-    await reconcile(store, [finding(severity="critical", value=1.4)], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
-    result = await reconcile(store, [finding(severity="warning", value=5.0)], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
+    await reconcile(store, [finding(severity="critical", value=1.4)], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
+    result = await reconcile(store, [finding(severity="warning", value=5.0)], tick=2, read_subject_ids=ALL_SENSORS, now=T1)
 
     assert result.ongoing[0].severity == "warning"
     assert result.ongoing[0].last_value == "5"
@@ -589,18 +629,18 @@ async def test_severity_follows_the_current_reading_on_an_ongoing_incident(first
 async def test_two_categories_on_one_sensor_are_two_incidents(first_sight: Settings, store: AsyncSession) -> None:
     """A degraded probe reporting a dry tank is two work orders for two different people.
     The key is `sensor:category`, so they never collapse."""
-    result = await reconcile(store, [finding(), finding(category="sensor_degraded", severity="warning")], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
+    result = await reconcile(store, [finding(), finding(category="sensor_degraded", severity="warning")], tick=1, read_subject_ids=ALL_SENSORS, now=T0)
     assert {i.key for i in result.opened} == {"alkali-flat-water:water_low", "alkali-flat-water:sensor_degraded"}
 
 
 async def test_a_gate_value_is_stored_as_open_not_as_true(first_sight: Settings, store: AsyncSession) -> None:
-    gate = Finding(sensor_id="coyote-draw-gate", sensor_type="gate", location="Coyote Draw", category="gate_open", severity="warning", value=True, summary="Coyote Draw: gate coyote-draw-gate reads open.")
-    result = await reconcile(store, [gate], tick=1, read_sensor_ids=("coyote-draw-gate",), now=T0)
+    gate = Finding(subject_id="coyote-draw-gate", subject_type="gate", location="Coyote Draw", category="gate_open", severity="warning", value=True, summary="Coyote Draw: gate coyote-draw-gate reads open.")
+    result = await reconcile(store, [gate], tick=1, read_subject_ids=("coyote-draw-gate",), now=T0)
     assert result.opened[0].last_value == "open"
 
 
 async def test_the_owner_is_recorded_when_routing_supplies_one(first_sight: Settings, store: AsyncSession) -> None:
-    result = await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0, owners={"alkali-flat-water:water_low": "water_feed"})
+    result = await reconcile(store, [finding()], tick=1, read_subject_ids=ALL_SENSORS, now=T0, owners={"alkali-flat-water:water_low": "water_feed"})
     assert result.opened[0].owner == "water_feed"
 
 
@@ -610,8 +650,8 @@ async def test_the_partial_unique_index_forbids_two_live_incidents_on_one_key(st
     concurrent tick away."""
     row = {
         "incident_key": "alkali-flat-water:water_low",
-        "sensor_id": "alkali-flat-water",
-        "sensor_type": "water-level",
+        "subject_id": "alkali-flat-water",
+        "subject_type": "water-level",
         "location": "Alkali Flat",
         "category": "water_low",
         "severity": "critical",
@@ -958,8 +998,8 @@ FEED_SOP = (REPO_ROOT / "data" / "knowledge_base" / "feed.md").read_text(encodin
 
 TANK_INCIDENT = Incident(
     key="alkali-flat-water:water_low",
-    sensor_id="alkali-flat-water",
-    sensor_type="water-level",
+    subject_id="alkali-flat-water",
+    subject_type="water-level",
     location="Alkali Flat",
     category="water_low",
     severity="critical",
@@ -1152,7 +1192,7 @@ def ungrounded_numbers(order: WorkOrder, packet: EvidencePacket) -> set[str]:
 def test_a_real_answer_quotes_only_numbers_that_are_on_the_page() -> None:
     order = _order(_answer())
     assert ungrounded_numbers(order, TANK_PACKET) == set()
-    assert TANK_INCIDENT.sensor_id in order.assessment, "name the sensor behind the number"
+    assert TANK_INCIDENT.subject_id in order.assessment, "name the sensor behind the number"
     assert "1.9" in order.assessment, "and quote the reading triage actually judged"
 
 
@@ -1179,10 +1219,10 @@ async def test_no_packets_means_no_calls_at_all() -> None:
 async def test_one_agent_raising_is_not_an_outage_for_the_other_ten(monkeypatch: pytest.MonkeyPatch) -> None:
     """`src/agent/CLAUDE.md`: a tick survives one sub-agent raising. Eleven incidents behind
     one unhandled error is ten pastures nobody hears about."""
-    second = EvidencePacket(incident=TANK_INCIDENT.model_copy(update={"key": "windmill-pasture-water:water_low", "sensor_id": "windmill-pasture-water"}), sop_name="water.md", sop_text=WATER_SOP)
+    second = EvidencePacket(incident=TANK_INCIDENT.model_copy(update={"key": "windmill-pasture-water:water_low", "subject_id": "windmill-pasture-water"}), sop_name="water.md", sop_text=WATER_SOP)
 
     async def _judge(packet: EvidencePacket, **_kw: object) -> WorkOrder:
-        if packet.incident.sensor_id == "alkali-flat-water":
+        if packet.incident.subject_id == "alkali-flat-water":
             raise RuntimeError("bedrock said no")
         return to_work_order(packet=packet, agent="water_feed", response=_response(_answer()))
 
@@ -1342,7 +1382,7 @@ async def test_a_tick_told_not_to_spend_stops_at_the_end_of_the_free_pass(first_
 def _packet(sensor_id: str, *, key: str = "", severity: str = "critical") -> EvidencePacket:
     """One packet per sensor, cheap. The SOP text is real because the citation rail reads it."""
     return EvidencePacket(
-        incident=TANK_INCIDENT.model_copy(update={"key": key or f"{sensor_id}:water_low", "sensor_id": sensor_id, "severity": severity}),
+        incident=TANK_INCIDENT.model_copy(update={"key": key or f"{sensor_id}:water_low", "subject_id": sensor_id, "severity": severity}),
         sop_name="water.md",
         sop_text=WATER_SOP,
     )
@@ -1417,18 +1457,73 @@ async def test_every_routed_incident_produces_a_work_order(monkeypatch: pytest.M
         assert {o.incident_key for o in orders[name]} == {p.incident.key for p in group}
 
 
-async def test_herd_health_is_handed_nothing_and_nobody_logs_a_fault_about_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`docs/STATE.md` decision 5 working correctly rather than a gap. `herd_health` cannot read
-    a sensor and nothing writes animal events until chaos does at M5, so it is handed nothing on
-    every tick. A warning per tick per idle agent trains everyone to ignore the log."""
+DEAD_COW = {"id": "cow-0901", "name": "SW-1901", "species": "cow", "sex": "female", "status": "deceased", "pastureId": "east-allotment", "shelterId": None, "createdAt": "2026-08-10T14:00:00.000Z", "updatedAt": "2026-09-10T13:58:00.000Z"}
+COYOTE_NOTE = {"id": "obs-coyote", "animalId": "cow-0901", "type": "injury", "severity": "high", "note": "Found down at first light, throat and hindquarter torn, tracks and scat consistent with coyote.", "observedAt": "2026-09-10T13:58:00.000Z", "createdAt": "2026-09-10T13:58:00.000Z"}
+
+
+@respx.mock
+async def test_herd_health_is_handed_the_dead_cow_and_handed_nothing_is_the_failure(catalog: RanchMap, target: StoreTarget) -> None:
+    """The opposite of the rail this replaced. Through M7 `herd_health` handed nothing was decision 5
+    working; from M7A a tick with a deceased animal on the Farm API that hands `herd_health` nothing
+    is the coyote gap, open again. The debounce is the debounce: pending on the first sweep, opened
+    and routed on the second, and never to any other agent."""
+    serve(respx.mock, CALM, herd=False)
+    serve_herd(respx.mock, non_active={"deceased": [DEAD_COW]}, observations={"cow-0901": [COYOTE_NOTE]})
+
+    first = await run_tick(tick=1, store=target, now=T0, spend=False)
+    assert first.error is None and first.herd_error is None and first.herd_animals == 1
+    assert [(f.key, f.severity, f.subject_type) for f in first.findings] == [("cow-0901:deceased", "critical", "animal")]
+    assert len(first.pending) == 1 and first.routed == {}, "one sweep is pending, exactly as for a sensor"
+    assert "cow-0901" in first.findings[0].summary and first.findings[0].location == "east-allotment"
+
+    second = await run_tick(tick=2, store=target, now=T1, spend=False)
+    assert [inc.key for inc in second.opened] == ["cow-0901:deceased"]
+    assert second.routed == {HERD_HEALTH: ("cow-0901:deceased",)}, "handed to herd_health and to nobody else"
+    assert second.opened[0].owner == HERD_HEALTH and second.opened[0].is_animal
+    assert "herd 1 changed" in summarize(second)
+
+
+@respx.mock
+async def test_a_restored_cow_resolves_and_a_care_api_outage_resolves_no_animal(catalog: RanchMap, target: StoreTarget) -> None:
+    """`chaos restore` PATCHes the cohort back to `active`; the next sweep does not see her in the
+    deceased read, she is on the roster, so she answered clean and the incident resolves. But a
+    tick where the Care API is down has no `answered` animals at all, and the very same clean
+    Farm reads resolve nothing, because "not deceased" was read and "no new observation" was not."""
+    serve(respx.mock, CALM, herd=False)
+    serve_herd(respx.mock, non_active={"deceased": [DEAD_COW]})
+    await run_tick(tick=1, store=target, now=T0, spend=False)
+    opened = await run_tick(tick=2, store=target, now=T1, spend=False)
+    assert [inc.key for inc in opened.opened] == ["cow-0901:deceased"]
+
+    respx.mock.reset()
+    respx.mock.clear()  # `reset()` keeps routes, and the helper's catch-alls would outrank anything added after them
+    serve(respx.mock, CALM, herd=False)
+    serve_herd(respx.mock)  # the cohort is back to active, nobody non-active
+    respx.mock.get(f"{CARE}/care-tasks").mock(return_value=httpx.Response(503, json={"error": {"category": "upstream"}}))
+    blind = await run_tick(tick=3, store=target, now=T2, spend=False)
+    assert blind.error is None, "the herd stage never fails the tick"
+    assert blind.herd_error is not None and blind.herd_error.startswith("care:")
+    assert blind.resolved == () and blind.ongoing == () and blind.findings == (), "a Care API outage resolves no animal: the incident is neither resolved nor re-seen, it is held unread"
+    assert "herd FAILED" in summarize(blind)
+
+    respx.mock.reset()
+    respx.mock.clear()  # `reset()` keeps routes, and the helper's catch-alls would outrank anything added after them
+    serve(respx.mock, CALM, herd=False)
+    # The restored cow is on no roster (the Farm API nulled her pasture on the kill). The ledger says
+    # she has a live incident, so the sweep reads her record directly, and that read is what resolves her.
+    serve_herd(respx.mock, roster={"data": [{"id": "alkali-flat", "name": "Alkali Flat", "animalIds": ["cow-0001"]}], "meta": {"count": 1}}, extra=[{**DEAD_COW, "status": "active", "pastureId": None}])
+    healed = await run_tick(tick=4, store=target, now=T2, spend=False)
+    assert healed.herd_error is None and [inc.key for inc in healed.resolved] == ["cow-0901:deceased"]
+
+
+async def test_an_idle_herd_health_still_logs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kept from the retired rail: on the many ticks with no animal incident, an idle agent produces
+    no line at all. A warning per tick per idle agent trains everyone to ignore the log."""
     monkeypatch.setattr("src.agent.workers.judge_packet", _judged)
     with capture_logs() as logs:
         orders = await fan_out(_fan(water_feed=1, herd_health=0, infrastructure=1, compliance=0))
-
-    assert orders["herd_health"] == () and orders["compliance"] == ()
-    assert set(orders) == set(RESPONDERS), "asked-and-found-nothing has to stay distinguishable from never-asked"
-    assert not [entry for entry in logs if entry.get("agent") == "herd_health"], "an idle agent produces no line at all, not even an info one"
-    assert next(entry for entry in logs if entry["event"] == "fan_out_start")["worlds"] == 2, "and an idle agent is not a world"
+    assert orders["herd_health"] == () and set(orders) == set(RESPONDERS)
+    assert not [entry for entry in logs if entry.get("agent") == "herd_health"]
 
 
 async def test_a_fan_out_with_nothing_in_it_calls_nobody() -> None:
@@ -1643,8 +1738,8 @@ COMPLIANCE_SOP = (REPO_ROOT / "data" / "knowledge_base" / "compliance.md").read_
 
 RANGE_INCIDENT = Incident(
     key="alkali-flat-soil:range_dry",
-    sensor_id="alkali-flat-soil",
-    sensor_type="soil-moisture",
+    subject_id="alkali-flat-soil",
+    subject_type="soil-moisture",
     location="Alkali Flat",
     category="range_dry",
     severity="critical",
@@ -1750,7 +1845,7 @@ def test_the_rails_cannot_tell_the_unbriefed_answer_from_the_briefed_one() -> No
         assert order.violations == (), "both answers are clean; see docs/no-brief-transcript.md"
         assert order.status == "ok" and order.shippable
         assert ungrounded_numbers(order, RANGE_PACKET) == set(), "and both quote only the page"
-        assert RANGE_INCIDENT.sensor_id in order.assessment and "4.2" in order.assessment
+        assert RANGE_INCIDENT.subject_id in order.assessment and "4.2" in order.assessment
 
     assert len(no_brief.actions) == 1, "one action, and it is filing a note"
     assert len(with_brief.actions) == 5
@@ -2210,16 +2305,41 @@ async def test_a_chaos_fault_that_healed_without_ever_being_read_is_reported_mis
 
     with capture_logs() as logs:
         unseen = await run_tick(tick=2, store=target, now=T1, spend=False, chaos_injected=("chaos-1-0", "chaos-1-1"), chaos_seen=())
-    assert unseen.chaos_missed == ("chaos-1-0",), "the sensor fault was never read; the animal event has no observer yet and is not counted against the sweep"
+    assert unseen.chaos_missed == ("chaos-1-0", "chaos-1-1"), "neither the sensor fault nor the animal event was ever read; from M7A the herd stage is the animal event's observer and its absence is a miss"
     assert unseen.chaos_healed == 2 and unseen.error is None
-    missed = next(entry for entry in logs if entry["event"] == "chaos_event_missed")
-    assert missed["event_id"] == "chaos-1-0"
-    assert next(entry for entry in logs if entry["event"] == "tick")["chaos_missed"] == ["chaos-1-0"]
+    assert [entry["event_id"] for entry in logs if entry["event"] == "chaos_event_missed"] == ["chaos-1-0", "chaos-1-1"]
+    assert next(entry for entry in logs if entry["event"] == "tick")["chaos_missed"] == ["chaos-1-0", "chaos-1-1"]
 
     respx.mock.reset()
     serve(respx.mock, CALM)
     seen = await run_tick(tick=3, store=target, now=T1, spend=False, chaos_injected=("chaos-1-0",), chaos_seen=("chaos-1-0",))
     assert seen.chaos_missed == (), "read once during its life is observed, not missed"
+
+
+@respx.mock
+async def test_the_herd_stage_observes_an_animal_event_when_it_reads_the_animal(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """The other half of the miss check for animals. An active `coyote_kill` on cow-0901 is observed
+    on the tick the herd sweep reads her record as deceased, and lands in `chaos_observed` beside the
+    sensor overlay ids, so the loop's `chaos_seen` covers both kinds and the eventual expiry is not a miss."""
+    monkeypatch.setattr("src.agent.executor.get_settings", _chaos_settings)
+
+    async def _nothing(*_a: object, **_k: object) -> tuple[ChaosEvent, ...]:
+        return ()
+
+    async def _active(**kw: object) -> tuple[ChaosEvent, ...]:
+        return (_healed("kill-0901", kind=KIND_ANIMAL), replace(_healed("kill-0902", kind=KIND_ANIMAL), target_id="cow-0902")) if kw.get("kind") == KIND_ANIMAL else ()
+
+    monkeypatch.setattr("src.agent.executor.chaos.expire", _nothing)
+    monkeypatch.setattr("src.agent.executor.chaos.inject_for_tick", _nothing)
+    monkeypatch.setattr("src.agent.executor.chaos.plan", lambda **_kw: ())
+    monkeypatch.setattr("src.agent.executor.chaos.active_overlay", _active)
+    serve(respx.mock, CALM, herd=False)
+    serve_herd(respx.mock, non_active={"deceased": [DEAD_COW]})
+
+    state = await run_tick(tick=2, store=target, now=T1, spend=False)
+    assert state.error is None and state.herd_animals == 1
+    assert "kill-0901" in state.chaos_observed, "the herd stage read cow-0901's record, so the kill on her was observed"
+    assert "kill-0902" not in state.chaos_observed, "cow-0902 is active and on nobody's list, so an event on her was not read this tick"
 
     respx.mock.reset()
     serve(respx.mock, CALM)

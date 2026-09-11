@@ -11,9 +11,11 @@ goes wrong:
     remember not to type; it is something the connection cannot reach.
   * **`opened` happens once.** A persisting fault is `ongoing`, forever if need be.
     Duplicate alerts train the client to ignore the service.
-  * **A sensor that failed to read resolves nothing.** "No finding" and "no reading" are
+  * **A subject that failed to read resolves nothing.** "No finding" and "no reading" are
     different facts, and conflating them means a single upstream outage closes every
-    incident on the ranch and reports an all-clear at the worst possible moment.
+    incident on the ranch and reports an all-clear at the worst possible moment. From M7A a
+    subject is a sensor or an animal (migration `0006`), and the rule is the same for both: a
+    Care API outage resolves no cow.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from src.agent.state import LIVE_STATUSES, Finding, Incident, IncidentStatus, Severity
+from src.agent.state import LIVE_STATUSES, SUBJECT_ANIMAL, Finding, Incident, IncidentStatus, Severity
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
 
@@ -109,11 +111,13 @@ incidents = Table(
     "incidents",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
-    # `sensor:category`, not a foreign key to anything. Cross-service IDs are plain
-    # strings here; the sensor lives in another service and orphans are allowed.
+    # `subject:category`, not a foreign key to anything. Cross-service IDs are plain
+    # strings here; the sensor or animal lives in another service and orphans are allowed.
     Column("incident_key", Text, nullable=False),
-    Column("sensor_id", Text, nullable=False),
-    Column("sensor_type", Text, nullable=False),
+    # Migration 0006 renamed these from `sensor_id` / `sensor_type`. `subject_type` is one of the
+    # 13 sensor types for a sensor row or the literal `animal` for an animal row (`state.SUBJECT_ANIMAL`).
+    Column("subject_id", Text, nullable=False),
+    Column("subject_type", Text, nullable=False),
     Column("location", Text, nullable=False),
     Column("category", Text, nullable=False),
     Column("severity", Text, nullable=False),
@@ -141,7 +145,7 @@ incidents = Table(
     # two work orders, not one row with its March story overwritten.
     Index("uq_incidents_open_key", "incident_key", unique=True, postgresql_where=text("status IN ('pending', 'opened', 'ongoing')")),
     Index("ix_incidents_status_last_seen", "status", "last_seen_at"),
-    Index("ix_incidents_sensor", "sensor_id"),
+    Index("ix_incidents_subject", "subject_id"),
 )
 
 #: The chaos overlay. Mirrors migration 0002, and it is the only place in this system
@@ -289,8 +293,8 @@ def _display_value(finding: Finding) -> str | None:
 def _to_incident(row: dict[str, Any]) -> Incident:
     return Incident(
         key=row["incident_key"],
-        sensor_id=row["sensor_id"],
-        sensor_type=row["sensor_type"],
+        subject_id=row["subject_id"],
+        subject_type=row["subject_type"],
         location=row["location"],
         category=row["category"],
         severity=str(row["severity"]),
@@ -318,23 +322,31 @@ async def open_incidents(session: AsyncSession) -> tuple[Incident, ...]:
     return tuple(_to_incident(dict(r)) for r in rows)
 
 
+async def live_animal_subjects(session: AsyncSession) -> frozenset[str]:
+    """The animal ids with a live incident. M7A: the herd sweep reads each of these directly, because
+    an animal can fall off every roster and every status read (a restored kill) and still be owed a
+    resolution. Read before the sweep, on the same connection budget as everything else here."""
+    rows = (await session.execute(select(incidents.c.subject_id).where(incidents.c.subject_type == SUBJECT_ANIMAL, incidents.c.status.in_(LIVE_STATUSES)))).scalars().all()
+    return frozenset(str(k) for k in rows)
+
+
 async def reconcile(
     session: AsyncSession,
     findings: Sequence[Finding],
     *,
     tick: int,
     run_id: str = "",
-    read_sensor_ids: Iterable[str] | None = None,
+    read_subject_ids: Iterable[str] | None = None,
     now: datetime | None = None,
     owners: dict[str, str] | None = None,
     confirm_sweeps: int | None = None,
 ) -> ReconcileResult:
     """Fold this tick's findings into the ledger and return the buckets.
 
-    `read_sensor_ids` is the set of sensors this tick actually got a reading for. An
-    incident is only resolved (or dismissed) if its sensor answered and had nothing wrong
-    to say. Leaving it `None` means "everything was read", which is convenient in a test
-    and wrong in production, so `main.py` always passes it.
+    `read_subject_ids` is the set of subjects (sensors, and from M7A animals) this tick actually
+    got a reading for. An incident is only resolved (or dismissed) if its subject answered and
+    had nothing wrong to say. Leaving it `None` means "everything was read", which is convenient
+    in a test and wrong in production, so `executor.py` always passes it.
 
     `confirm_sweeps` is the debounce: a finding has to be present on this many consecutive
     sweeps before it opens. Until then it is `pending`: live in the ledger so the unique
@@ -348,7 +360,7 @@ async def reconcile(
     """
     stamp = now or datetime.now(UTC)
     confirm = max(1, get_settings().incident_confirm_sweeps if confirm_sweeps is None else confirm_sweeps)
-    readable = set(read_sensor_ids) if read_sensor_ids is not None else None
+    readable = set(read_subject_ids) if read_subject_ids is not None else None
     by_key = {f.key: f for f in findings}
     existing = {inc.key: inc for inc in await open_incidents(session)}
 
@@ -365,8 +377,8 @@ async def reconcile(
             first_status: IncidentStatus = "opened" if confirm <= 1 else "pending"
             values = {
                 "incident_key": key,
-                "sensor_id": finding.sensor_id,
-                "sensor_type": finding.sensor_type,
+                "subject_id": finding.subject_id,
+                "subject_type": finding.subject_type,
                 "location": finding.location,
                 "category": finding.category,
                 "severity": finding.severity,
@@ -418,10 +430,11 @@ async def reconcile(
     for key, prior in existing.items():
         if key in by_key:
             continue
-        if readable is not None and prior.sensor_id not in readable:
-            # The sensor did not answer this tick. Absence of a finding is not evidence of
+        if readable is not None and prior.subject_id not in readable:
+            # The subject did not answer this tick. Absence of a finding is not evidence of
             # health, and an upstream outage must not close every incident on the ranch. This
-            # holds for a pending row too: unread is not "read clean".
+            # holds for a pending row too: unread is not "read clean", and for an animal too: a
+            # Care API outage resolves no cow.
             continue
         if prior.status == "pending":
             # One bad draw, then a clean read. Never alarmed, so never resolved.
@@ -431,7 +444,7 @@ async def reconcile(
         await session.execute(incidents.update().where(incidents.c.id == prior.row_id).values(status="resolved", resolved_at=stamp, tick_last_seen=tick))
         resolved.append(prior.model_copy(update={"status": "resolved", "resolved_at": stamp, "tick_last_seen": tick}))
 
-    skipped = tuple(sorted(k for k, inc in existing.items() if k not in by_key and readable is not None and inc.sensor_id not in readable))
+    skipped = tuple(sorted(k for k, inc in existing.items() if k not in by_key and readable is not None and inc.subject_id not in readable))
     await session.commit()
 
     log.info("reconciled", tick=tick, opened=len(opened), ongoing=len(ongoing), resolved=len(resolved), pending=len(pending), dismissed=len(dismissed), held_unread=len(skipped), confirm_sweeps=confirm)

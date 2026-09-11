@@ -147,6 +147,11 @@ dollar figure written before M7 used a rate 3x too high, and the tokens beside i
 **The Tier-1 cascade exists from M7 and ships off** (`TIER1_ENABLED=0`): measured on three ticks, it
 saved one call in twelve and was thinner about the neighbour and the herd, so Opus writes every work
 order until `docs/model-routing.md` gets a row that says otherwise.
+**From M7A the free pass also reads the herd**: the Farm list in waves of 6 (about 18s and 20 requests a tick,
+because the Farm API 500s above 6 in flight and its `status` filter cannot find a dead cow), the care record
+for the animals whose state changed, and `herd_health` is handed animal incidents for the first time. A
+herd order costs about the same as a sensor order. **The herd stage never fails the tick**: a Farm or Care
+outage is `herd_error` on the line and no animal resolves.
 In code, `run_tick(spend=False)` stops at the end of the free pass, and
 `conftest.no_model_calls` makes a forgotten flag fail loudly rather than bill.
 

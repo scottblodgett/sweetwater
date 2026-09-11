@@ -1,12 +1,15 @@
-"""The continuous loop. One tick, all ten stages of it, and from M4 the loop that runs them.
+"""The continuous loop. One tick, all eleven stages of it, and from M4 the loop that runs them.
 
-    catalog -> chaos -> sweep -> triage -> reconcile -> route      free
-      -> evidence -> fan_out                                       spends
-      -> gate                                                      pauses a proposed write for a human, never the tick (M6)
-      -> synthesize                                                decides for itself
+    catalog -> chaos -> sweep -> herd -> triage -> reconcile -> route      free
+      -> evidence -> fan_out                                               spends
+      -> gate                                                              pauses a proposed write for a human, never the tick (M6)
+      -> synthesize                                                        decides for itself
 
-Five stages, zero tokens, and they are what narrows 160 sensors down to what is actually
-wrong. Only what comes out of `route` reaches a model. `run_tick` returns a `RanchState`
+Six stages, zero tokens, and they are what narrows 160 sensors and 1,195 head down to what is
+actually wrong. Only what comes out of `route` reaches a model. `herd` is M7A: the second free
+sweep, off the Farm and Care APIs, and the only discovery path `herd_health` has. **It never
+fails the tick.** A Farm or Care outage marks the stage failed on the line, no animal answers
+(so no animal incident resolves), and the sensor half of the ranch is still watched. `run_tick` returns a `RanchState`
 rather than an exit code because the loop needs exactly this object, and `main.py` needs
 one integer.
 
@@ -55,6 +58,7 @@ from src.agent.memory import (
     checkpointer,
     counts_by_status,
     held_incident_keys,
+    live_animal_subjects,
     reconcile,
     record_held,
     resolve_store,
@@ -66,6 +70,7 @@ from src.models.llm_client import cost_usd
 from src.models.routing import TIER1, TIER2
 from src.tools import chaos
 from src.tools.evidence import EvidencePacket, assemble
+from src.tools.herd import HerdSweepResult, sweep_herd
 from src.tools.mcp_client import RanchMap
 from src.tools.sensors import fetch_catalog, sweep
 from src.tools.triage import triage_sweep
@@ -167,7 +172,7 @@ class Backoff:
                 self.record_success(UPSTREAM_MODEL)
 
 
-_STAGE_ORDER = ("catalog", "sweep", "triage", "reconcile", "route", "evidence", "fan_out", "gate", "synthesize")
+_STAGE_ORDER = ("catalog", "sweep", "herd", "triage", "reconcile", "route", "evidence", "fan_out", "gate", "synthesize")
 
 #: Why an incident is being held, written to `incidents.held_reason` so the reason survives a
 #: restart with the key. The gate's own reason is the one the orders' violations cannot carry.
@@ -282,16 +287,17 @@ async def _chaos_step(session: object, *, state: RanchState, catalog: RanchMap, 
     and continues on honest readings. The miss check is the M4 addition: an event this run
     injected that heals without its sensor ever having been read was born and died between
     two sweeps, and a chaos log full of events nobody saw is the silent failure this exists to
-    make loud. Animal events are excluded from the check because nothing observes them yet: no
-    stage reads the Care API, which is the owed `herd_health` verification and its own item.
+    make loud. From M7A animal events are in the check too: the herd stage observes one when it
+    reads the target animal's record, and a kill that is restored between two herd sweeps is a
+    miss like any other.
     """
     settings = get_settings()
     healed = await chaos.expire(session)
     state.chaos_healed = len(healed)
-    missed = tuple(e.event_id for e in healed if e.kind == chaos.KIND_SENSOR and e.event_id in chaos_injected and e.event_id not in chaos_seen)
+    missed = tuple(e.event_id for e in healed if e.event_id in chaos_injected and e.event_id not in chaos_seen)
     for event in healed:
         if event.event_id in missed:
-            log.warning("chaos_event_missed", event_id=event.event_id, scenario=event.scenario, target_id=event.target_id, injected_at=event.injected_at.isoformat(), expired_at=event.expires_at.isoformat(), hint="healed without its sensor ever being read: TTL shorter than the sweeps that actually ran, or the sweep was in backoff")
+            log.warning("chaos_event_missed", event_id=event.event_id, scenario=event.scenario, kind=event.kind, target_id=event.target_id, injected_at=event.injected_at.isoformat(), expired_at=event.expires_at.isoformat(), hint="healed without its subject ever being read: TTL shorter than the sweeps that actually ran, or the sweep was in backoff")
     state.chaos_missed = missed
     planned = chaos.plan(seed=settings.chaos_seed, catalog=catalog.sensors, ticks=tick, cohort=settings.chaos_cohort, ticks_between_events=settings.chaos_ticks_between_events)
     fired = await chaos.inject_for_tick(session, tick=tick, planned=planned, run_id=state.run_id)
@@ -384,8 +390,34 @@ async def run_tick(
             # Found by asking what a dead upstream looks like from here before killing one live.
             raise RuntimeError(f"sweep read nothing: all {len(swept.errors)} reads failed ({', '.join(sorted({e.category for e in swept.errors}))})")
 
+        # M7A. The second free sweep, and the only path an animal finding has. It returns errors
+        # as data and never raises, so a Farm or Care outage is `herd_error` on the line and an
+        # empty `answered` set, not a failed tick: the tanks are still watched while the herd is
+        # not. The same stage observes chaos's animal events for the miss check.
+        state.failed_stage = "herd"
+        try:
+            # The animals already being watched are read directly, whatever roster they are or are
+            # not on. A ledger that cannot be read here is the reconcile stage's failure to report,
+            # two stages down; the sweep just goes without a watch list.
+            try:
+                async with store_session(url=target.url, schema=target.schema) as session:
+                    watching = await live_animal_subjects(session)
+            except Exception as exc:
+                log.warning("herd_watch_unavailable", error=f"{type(exc).__name__}: {exc}", hint="sweeping without the ledger's live animal subjects")
+                watching = frozenset()
+            herd = await sweep_herd(watch=watching)
+        except Exception as exc:
+            # `sweep_herd` returns its failures as data; reaching here is a bug in it or in a test's
+            # mock, and the rule still holds: the sensor half of the ranch is watched regardless.
+            herd = HerdSweepResult(failure=f"raised: {type(exc).__name__}: {exc}")
+            log.error("herd_sweep_raised", error=herd.failure, hint="the herd stage returns errors as data; this is a defect, and the tick continues without the herd")
+        state.herd_animals, state.herd_errors, state.herd_error = len(herd.animals), len(herd.errors), herd.failure or None
+        if settings.chaos_enabled and herd.animals:
+            animal_events = await chaos.active_overlay(kind=chaos.KIND_ANIMAL)
+            state.chaos_observed = (*state.chaos_observed, *(e.event_id for e in animal_events if e.target_id in herd.animal_ids))
+
         state.failed_stage = "triage"
-        state.findings = tuple(triage_sweep(swept.readings))
+        state.findings = tuple(triage_sweep(swept.readings, herd=herd, now=now))
 
         state.failed_stage = "reconcile"
         owners = owners_for(state.findings)
@@ -395,10 +427,12 @@ async def run_tick(
                 state.findings,
                 tick=tick,
                 run_id=state.run_id,
-                # The sensors that actually answered. A sensor that did not answer resolves
-                # nothing: "no finding" and "no reading" are different facts, and conflating
-                # them lets one upstream outage close every incident and report an all-clear.
-                read_sensor_ids={r.sensor_id for r in swept.readings},
+                # The subjects that actually answered: the sensors the sweep read and the animals
+                # the herd stage vouches for. A subject that did not answer resolves nothing: "no
+                # finding" and "no reading" are different facts, and conflating them lets one
+                # upstream outage close every incident and report an all-clear. A Care API outage
+                # therefore resolves no cow, because `herd.answered` is empty when it failed.
+                read_subject_ids={r.sensor_id for r in swept.readings} | herd.answered,
                 now=now,
                 owners=owners,
             )
@@ -442,7 +476,7 @@ async def run_tick(
             state.failed_stage = "evidence"
             # One assemble call for all four agents. The roster is fetched once per tick, so
             # four agents' packets cost the same HTTP as one agent's did.
-            packets = await assemble(newly_opened, readings=swept.readings, ranch_map=ranch_map)
+            packets = await assemble(newly_opened, readings=swept.readings, ranch_map=ranch_map, herd=herd)
 
             state.failed_stage = "fan_out"
             by_agent: dict[str, list[EvidencePacket]] = {agent: [] for agent in RESPONDERS}
@@ -509,6 +543,11 @@ async def run_tick(
         catalog_source=state.catalog_source,
         sensors_read=state.sensors_read,
         sensors_failed=state.sensors_failed,
+        # M7A, the herd stage. `herd_animals` is the changed set it read a record for; `herd_error`
+        # non-null means no animal answered this tick and the reason is right there.
+        herd_animals=state.herd_animals,
+        herd_errors=state.herd_errors,
+        herd_error=state.herd_error,
         findings=len(state.findings),
         critical=sum(1 for f in state.findings if f.severity == "critical"),
         opened=len(state.opened),
@@ -717,8 +756,9 @@ def summarize(state: RanchState) -> str:
     report = f", shift report {state.shift_report.source}" if state.shift_report else ""
     held = f", {len(state.held)} held" if state.held else ""
     debounce = f" (pending {len(state.pending)}, dismissed {len(state.dismissed)})" if state.pending or state.dismissed else ""
+    herd = f", herd FAILED ({state.herd_error})" if state.herd_error else f", herd {state.herd_animals} changed"
     return (
-        f"tick {state.tick} ok - {state.sensors_read} read ({state.sensors_failed} failed) via {state.catalog_source}, "
+        f"tick {state.tick} ok - {state.sensors_read} read ({state.sensors_failed} failed) via {state.catalog_source}{herd}, "
         f"{len(state.findings)} findings, opened {len(state.opened)} / ongoing {len(state.ongoing)} / resolved {len(state.resolved)}{debounce}, routed to {fan}{spend}{report}{held}"
     )
 

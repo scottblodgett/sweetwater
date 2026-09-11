@@ -101,15 +101,34 @@ from src.tools.evidence import (
     siblings_for,
     slugify,
 )
+from src.tools.herd import (
+    HERD_MAX_PAGES,
+    HERD_PAGE,
+    HERD_PAGE_CONCURRENCY,
+    AnimalRecord,
+    CareTask,
+    HerdError,
+    HerdSweepResult,
+    Observation,
+    parse_timestamp,
+    sweep_herd,
+)
 from src.tools.mcp_client import SensorRef, call_tool
 from src.tools.sensors import SensorReading, SweepError, parse_sensor_payload, read_sensor, sweep
 from src.tools.triage import (
     ALL_CATEGORIES,
+    ANIMAL_CATEGORIES,
+    CATEGORY_CARE_OVERDUE,
+    CATEGORY_DECEASED,
     CATEGORY_DEGRADED,
     CATEGORY_FAULT,
+    CATEGORY_INACTIVE,
+    CATEGORY_OBSERVATION_HIGH,
     CATEGORY_OFFLINE,
     CATEGORY_UNKNOWN_TYPE,
+    OBSERVATION_WINDOW,
     RULES,
+    triage_herd,
     triage_reading,
     triage_sweep,
 )
@@ -117,6 +136,8 @@ from src.tools.triage import reset_warn_once as _reset
 from src.utils.config import Settings
 
 BASE = "https://sensor.test"
+FARM = "https://farm.test"
+CARE = "https://care.test"
 FROZEN_TS = "2026-09-10T14:30:00.000Z"
 
 REF = SensorRef(sensor_id="alkali-flat-water", sensor_type="water-level", location="Alkali Flat", status="online")
@@ -126,8 +147,10 @@ REF = SensorRef(sensor_id="alkali-flat-water", sensor_type="water-level", locati
 def _fake_upstreams(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fake SENSOR_API, so a stray unmocked request fails loudly instead of quietly
     reaching the deployed ranch."""
-    settings = Settings(sensor_api=BASE, sweep_concurrency=4, upstream_timeout_ms=500, _env_file=None)
+    settings = Settings(sensor_api=BASE, farm_api=FARM, care_api=CARE, sweep_concurrency=4, upstream_timeout_ms=500, _env_file=None)
     monkeypatch.setattr("src.tools.sensors.get_settings", lambda: settings)
+    monkeypatch.setattr("src.tools.herd.get_settings", lambda: settings)
+    monkeypatch.setattr("src.tools.evidence.get_settings", lambda: settings)
     monkeypatch.setattr("src.utils.helpers.get_settings", lambda: settings)
 
 
@@ -501,7 +524,7 @@ def test_sweep_orders_critical_first_and_is_stable() -> None:
     ]
     findings = triage_sweep(readings)
     assert [f.severity for f in findings] == ["critical", "critical", "warning"]
-    assert [f.sensor_id for f in findings[:2]] == ["alkali-flat-water", "east-allotment-fence"]
+    assert [f.subject_id for f in findings[:2]] == ["alkali-flat-water", "east-allotment-fence"]
     assert triage_sweep(readings) == findings, "the same sweep must triage identically twice"
 
 
@@ -522,8 +545,8 @@ def test_every_category_triage_can_emit_is_registered() -> None:
 def _incident(**over: object) -> Incident:
     base: dict[str, object] = {
         "key": "alkali-flat-water:water_low",
-        "sensor_id": "alkali-flat-water",
-        "sensor_type": "water-level",
+        "subject_id": "alkali-flat-water",
+        "subject_type": "water-level",
         "location": "Alkali Flat",
         "category": "water_low",
         "severity": "critical",
@@ -663,6 +686,346 @@ async def test_assembling_nothing_costs_nothing() -> None:
     with respx.mock(assert_all_called=False) as mock:
         assert await assemble([]) == ()
         assert not mock.calls
+
+
+# =========================================================================== #
+# 3b. the herd sweep (M7A): three rules inherited from sensors.py, then the animal truth table,
+#     then the cow's packet. All against fake Farm and Care hosts; the wire facts these encode
+#     (per-animal observations, honoured status filter, roster with animalIds) are in STATE.md
+# =========================================================================== #
+HERD_NOW = datetime(2026, 9, 10, 14, 0, tzinfo=UTC)  # its own name: the chaos suite below rebinds NOW at import time
+OLD_ISO = "2026-08-09T09:00:00.000Z"  # cow-0777's real mobility note is this old; outside the window
+
+
+def animal(animal_id: str = "cow-0901", *, status: str = "deceased", pasture: str = "east-allotment", species: str = "cow") -> dict[str, object]:
+    return {"id": animal_id, "name": f"SW-{animal_id[-4:]}", "species": species, "sex": "female", "status": status, "pastureId": pasture, "shelterId": None, "createdAt": "2026-08-10T14:00:00.000Z", "updatedAt": "2026-09-10T13:58:00.000Z"}
+
+
+def obs(animal_id: str = "cow-0901", *, severity: str = "high", kind: str = "injury", at: str = "2026-09-10T13:58:00.000Z", note: str = "Found down at first light, throat and hindquarter torn, tracks and scat consistent with coyote.") -> dict[str, object]:
+    return {"id": f"obs-{animal_id}-{at}", "animalId": animal_id, "type": kind, "severity": severity, "note": note, "observedAt": at, "createdAt": at}
+
+
+def task(animal_id: str = "cow-0777", *, due: str = "2026-08-10T13:00:00.000Z", status: str = "pending", title: str = "Recheck down cow, call vet if not up by AM") -> dict[str, object]:
+    return {"id": f"task-{animal_id}-0001", "animalId": animal_id, "title": title, "dueAt": due, "status": status, "notes": "", "createdAt": "2026-08-10T14:00:00.000Z"}
+
+
+#: The wave the fakes see: `HERD_PAGE_CONCURRENCY` capped by the fixture's `sweep_concurrency=4`.
+WAVE = min(HERD_PAGE_CONCURRENCY, 4)
+
+HERD_ROSTER = {"data": [{"id": "east-allotment", "name": "East BLM Allotment", "acreage": 8800, "fenceType": "barbed-wire", "status": "open", "animalIds": ["cow-0901", "cow-0902", "cow-0903"]}, {"id": "home-place", "name": "Home Place", "acreage": 40, "fenceType": "pipe", "status": "open", "animalIds": ["cow-0777", "horse-01"]}], "meta": {"count": 2, "limit": 50, "offset": 0}}
+
+
+def page(rows: list[dict[str, object]]) -> dict[str, object]:
+    return {"data": rows, "meta": {"count": len(rows), "limit": 500, "offset": 0}}
+
+
+def serve_farm_and_care(mock: respx.MockRouter, *, non_active: dict[str, list[dict[str, object]]] | None = None, tasks: list[dict[str, object]] | None = None, observations: dict[str, list[dict[str, object]]] | None = None, records: dict[str, dict[str, object]] | None = None, roster: dict[str, object] | None = None, pages: dict[int, list[dict[str, object]]] | None = None) -> None:
+    """The Farm and Care routes the herd sweep reads. The herd **list** is served as pages at
+    `offset=0, 100, ...`: page 0 carries an active row for every roster id plus every `non_active`
+    row and every extra `records` row, later pages are empty, unless `pages` says otherwise."""
+    the_roster = roster if roster is not None else HERD_ROSTER
+    mock.get(f"{FARM}/pastures").respond(200, json=the_roster)
+    if pages is None:
+        given = [row for rows in (non_active or {}).values() for row in rows] + list((records or {}).values())
+        given_ids = {str(r["id"]) for r in given}
+        by_pasture = {str(p["id"]): list(p.get("animalIds") or []) for p in the_roster["data"]}  # type: ignore[index, union-attr]
+        actives = [animal(aid, status="active", pasture=pid, species="horse" if aid.startswith("horse") else "cow") for pid, ids in by_pasture.items() for aid in ids if aid not in given_ids]
+        pages = {0: actives + given}
+    for i in range(HERD_MAX_PAGES):
+        mock.get(f"{FARM}/animals", params__contains={"offset": str(i * HERD_PAGE)}).respond(200, json=page(pages.get(i * HERD_PAGE, [])))
+    mock.get(f"{CARE}/care-tasks").respond(200, json=page(tasks or []))
+    for animal_id, rows in (observations or {}).items():
+        mock.get(f"{CARE}/animals/{animal_id}/observations").respond(200, json=page(rows))
+    mock.route(method="GET", host="care.test", path__regex=r"^/animals/[^/]+/observations$").respond(200, json=page([]))
+
+
+# --- rule 1: errors are returned as data ------------------------------------------------------- #
+async def test_a_failed_read_for_one_animal_is_data_and_only_that_animal_stops_answering() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        # registered first: respx matches routes in registration order, and the helper ends with a catch-all
+        mock.get(f"{CARE}/animals/cow-0902/observations").respond(500, json={"error": "boom"})
+        serve_farm_and_care(mock, non_active={"deceased": [animal("cow-0901"), animal("cow-0902")]})
+        result = await sweep_herd()
+    assert result.ok and result.failure == ""
+    assert [e.subject for e in result.errors] == ["cow-0902"] and result.errors[0].category == "http_error" and result.errors[0].retriable
+    assert "cow-0901" in result.answered and "cow-0903" in result.answered, "the list answered for everyone on it"
+    assert "cow-0902" not in result.answered, "her own read failed, so she did not"
+    assert {a.animal_id for a in result.animals} == {"cow-0901", "cow-0902"}, "the finding is still made from the status the list carried"
+
+
+async def test_a_timeout_and_non_json_are_classified_never_raised() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(f"{CARE}/animals/cow-0901/observations").mock(side_effect=httpx.ReadTimeout("timed out"))
+        mock.get(f"{CARE}/animals/cow-0902/observations").respond(200, text="<html>gateway</html>")
+        serve_farm_and_care(mock, non_active={"deceased": [animal("cow-0901"), animal("cow-0902")]})
+        result = await sweep_herd()
+    assert sorted((e.subject, e.category) for e in result.errors) == [("cow-0901", "timeout"), ("cow-0902", "bad_response")]
+    assert result.ok and result.answered.isdisjoint({"cow-0901", "cow-0902"})
+
+
+# --- rule 2: an empty herd catalog fails the stage --------------------------------------------- #
+async def test_an_empty_herd_catalog_fails_the_stage_rather_than_reading_as_an_empty_herd() -> None:
+    """200 with a perfect empty envelope is the one failure no retry layer can see, and an empty
+    herd downstream reads exactly like every cow being fine. So it is a failed stage."""
+    with respx.mock(assert_all_called=False) as mock:
+        serve_farm_and_care(mock, pages={})
+        result = await sweep_herd()
+    assert not result.ok and result.failure.startswith("farm:") and "empty_catalog" in result.failure
+    assert result.answered == frozenset(), "nothing answered, so nothing resolves"
+
+
+async def test_a_herd_that_fills_every_page_was_not_read_whole_and_fails_the_stage() -> None:
+    """20 pages of 100 is the ceiling. A last page that comes back full means animals beyond it were
+    never read, and "not seen as deceased" is not "not deceased" for them, so nobody answered."""
+    with respx.mock(assert_all_called=False) as mock:
+        serve_farm_and_care(mock, pages={i * HERD_PAGE: [animal(f"cow-{i * HERD_PAGE + n:04d}", status="active") for n in range(HERD_PAGE)] for i in range(HERD_MAX_PAGES)})
+        result = await sweep_herd()
+    assert not result.ok and "ceiling" in result.failure and result.answered == frozenset()
+    assert result.requests == 1 + HERD_MAX_PAGES + 1, "every page was needed, in waves"
+
+
+async def test_paging_goes_out_in_waves_and_stops_at_the_first_short_page() -> None:
+    """The Farm API 500s at 12 pages in flight and is clean at 6, measured. So the pages go out six at
+    a time, and the wave after a short page is never sent: a 1,195-head herd is two waves, not twenty pages."""
+    def full(offset: int) -> list[dict[str, object]]:
+        return [animal(f"cow-{offset + n:04d}", status="active") for n in range(HERD_PAGE)]
+
+    with respx.mock(assert_all_called=False) as mock:
+        serve_farm_and_care(mock, pages={**{o: full(o) for o in range(0, 700, 100)}, 700: [animal("cow-0777", status="active")]})
+        result = await sweep_herd()
+        offsets = sorted(int(c.request.url.params["offset"]) for c in mock.calls if c.request.url.path == "/animals")
+    assert result.ok and len(result.answered) == 7 * HERD_PAGE + 1
+    assert offsets == [i * HERD_PAGE for i in range(WAVE * 2)], "two waves; the third wave was never sent"
+
+
+async def test_a_farm_page_failing_means_no_animal_answered_but_the_dead_one_is_still_reported() -> None:
+    """"Not on the list as deceased" only means "not deceased" if the whole list came back. One page
+    down and no animal can be vouched for; the animals the other pages carried are still findings,
+    because a dead cow is a dead cow whichever page was sick."""
+    with respx.mock(assert_all_called=False) as mock:
+        serve_farm_and_care(mock, non_active={"deceased": [animal("cow-0901")]})
+        mock.get(f"{FARM}/animals", params__contains={"offset": "300"}).respond(503, json={"error": {"category": "upstream"}})  # an identical pattern replaces the helper's route
+        result = await sweep_herd()
+    assert not result.ok and "page:300" in result.failure
+    assert result.answered == frozenset() and [a.animal_id for a in result.animals] == ["cow-0901"]
+
+
+async def test_the_roster_is_context_not_the_catalog() -> None:
+    """The first live kill showed the Farm API nulls a dead cow's pasture, so she leaves every roster.
+    The list vouches for her; the roster only decorates her packet, and a roster outage is a note."""
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(f"{FARM}/pastures").respond(503, json={"error": {"category": "upstream"}})
+        serve_farm_and_care(mock, non_active={"deceased": [animal("cow-0905", pasture="")]}, roster={"data": [{"id": "x", "animalIds": ["cow-0001"]}], "meta": {"count": 1}})
+        mock.get(f"{FARM}/pastures").respond(503, json={"error": {"category": "upstream"}})
+        result = await sweep_herd()
+    assert result.ok and "cow-0905" in result.answered and result.roster.error == "HTTP 503"
+    assert [e.subject for e in result.errors] == ["roster"]
+
+
+# --- rule 3: the stage returns the subjects that answered --------------------------------------- #
+async def test_a_care_api_outage_resolves_no_animal() -> None:
+    """The Farm reads all answered and every cow is active, which looks exactly like a healthy herd.
+    It is not evidence of one: an `ongoing` care_overdue or observation_high incident can only be
+    closed by a task list and an observation list that answered. `answered` is empty."""
+    with respx.mock(assert_all_called=False) as mock:
+        serve_farm_and_care(mock, non_active={"deceased": [animal("cow-0901")]})
+        mock.get(f"{CARE}/care-tasks").respond(503, json={"error": {"category": "upstream"}})
+        result = await sweep_herd()
+    assert not result.ok and result.failure.startswith("care:")
+    assert result.answered == frozenset()
+    assert [a.animal_id for a in result.animals] == ["cow-0901"], "the deceased finding still opens; only resolution is withheld"
+    assert result.observations == {}, "no observation was read for anyone, so the packet will state that absence"
+
+
+async def test_a_healthy_herd_answers_for_the_whole_list_and_reads_observations_only_for_the_changed_set() -> None:
+    """The request bill is the design. 1,195 head on the live ranch and observations list per animal,
+    so the sweep reads them only for animals whose state changed: the non-active set plus the animals
+    on a pending care task. Everything else answered through the list, and no per-animal Farm read."""
+    with respx.mock(assert_all_called=False) as mock:
+        serve_farm_and_care(mock, non_active={"deceased": [animal("cow-0901")], "sold": [animal("cow-0903", status="sold")]}, tasks=[task("cow-0777")], observations={"cow-0901": [obs()], "cow-0777": [obs("cow-0777", kind="mobility", at=OLD_ISO)]})
+        result = await sweep_herd()
+        observation_calls = [c for c in mock.calls if c.request.url.path.endswith("/observations")]
+        farm_calls = [c.request.url.path for c in mock.calls if c.request.url.host == "farm.test"]
+    assert result.ok
+    assert result.answered == frozenset({"cow-0901", "cow-0902", "cow-0903", "cow-0777", "horse-01"})
+    assert sorted(c.request.url.path for c in observation_calls) == ["/animals/cow-0777/observations", "/animals/cow-0901/observations", "/animals/cow-0903/observations"], "the changed set and nobody else"
+    assert set(farm_calls) == {"/pastures", "/animals"} and farm_calls.count("/animals") == WAVE, "the roster and one wave of pages (page 0 was short), and never a per-animal Farm read"
+    assert result.requests == 1 + WAVE + 1 + 3
+    assert {a.animal_id: a.status for a in result.animals} == {"cow-0901": "deceased", "cow-0903": "sold", "cow-0777": "active"}
+    assert result.herd_mates("east-allotment", excluding="cow-0901") == (result.record("cow-0903"),)
+
+
+async def test_a_watched_animal_off_every_roster_answers_through_the_list_and_one_off_the_list_does_not() -> None:
+    """Found on the first live kill: the Farm API nulls `pastureId` on a deceased PATCH, so the restored
+    cow is active and on no roster. The list still carries her and that is the vouching; her record is
+    in the changed set so her packet has one. A watched animal that is not on the list is gone, not fine."""
+    with respx.mock(assert_all_called=False) as mock:
+        serve_farm_and_care(mock, records={"cow-0905": animal("cow-0905", status="active", pasture="")})
+        result = await sweep_herd(watch=("cow-0905", "cow-0906"))
+    assert result.ok
+    assert "cow-0905" in result.answered and result.record("cow-0905") is not None, "on the list, so she answered clean"
+    assert "cow-0906" not in result.answered and [(e.subject, e.category) for e in result.errors] == [("cow-0906", "not_in_herd")], "gone from the ranch is not the same as fine"
+    assert triage_herd(result, now=HERD_NOW) == []
+
+
+# --- the animal truth table, one row per category --------------------------------------------- #
+def _herd(*records: AnimalRecord, observations: dict[str, tuple[Observation, ...]] | None = None, tasks: tuple[CareTask, ...] = ()) -> HerdSweepResult:
+    return HerdSweepResult(animals=tuple(records), observations=observations or {}, care_tasks=tasks, answered=frozenset(r.animal_id for r in records))
+
+
+def _rec(animal_id: str = "cow-0901", *, status: str = "deceased", pasture: str = "east-allotment") -> AnimalRecord:
+    return AnimalRecord(animal_id=animal_id, name=f"SW-{animal_id[-4:]}", species="cow", sex="female", status=status, pasture_id=pasture, shelter_id="", updated_at="2026-09-10T13:58:00.000Z")
+
+
+def _obs(animal_id: str = "cow-0901", *, severity: str = "high", kind: str = "injury", at: str = "2026-09-10T13:58:00.000Z") -> Observation:
+    return Observation(observation_id=f"o-{at}", animal_id=animal_id, type=kind, severity=severity, note="Found down at first light.", observed_at=at)
+
+
+def _task(animal_id: str = "cow-0777", *, due: str = "2026-08-10T13:00:00.000Z", status: str = "pending") -> CareTask:
+    return CareTask(task_id=f"task-{animal_id}", animal_id=animal_id, title="Recheck down cow", due_at=due, status=status, notes="")
+
+
+ANIMAL_TRUTH_TABLE = [
+    ("deceased", _herd(_rec(status="deceased")), [(CATEGORY_DECEASED, "critical")]),
+    ("inactive is unaccounted for", _herd(_rec(status="inactive")), [(CATEGORY_INACTIVE, "warning")]),
+    ("sold is a ranch running normally", _herd(_rec(status="sold")), []),
+    ("active with nothing else is nothing", _herd(_rec(status="active")), []),
+    ("high injury inside the window is critical", _herd(_rec(status="active"), observations={"cow-0901": (_obs(kind="injury"),)}), [(CATEGORY_OBSERVATION_HIGH, "critical")]),
+    ("high mobility inside the window is critical", _herd(_rec(status="active"), observations={"cow-0901": (_obs(kind="mobility"),)}), [(CATEGORY_OBSERVATION_HIGH, "critical")]),
+    ("high behavior inside the window is a warning", _herd(_rec(status="active"), observations={"cow-0901": (_obs(kind="behavior"),)}), [(CATEGORY_OBSERVATION_HIGH, "warning")]),
+    ("medium is not a finding", _herd(_rec(status="active"), observations={"cow-0901": (_obs(severity="medium"),)}), []),
+    ("high outside the 24h window is history, not a finding", _herd(_rec(status="active"), observations={"cow-0901": (_obs(at=OLD_ISO),)}), []),
+    ("a high note on a dead cow rides in the deceased packet, not a second incident", _herd(_rec(status="deceased"), observations={"cow-0901": (_obs(),)}), [(CATEGORY_DECEASED, "critical")]),
+    ("the newest of several notes decides", _herd(_rec(status="active"), observations={"cow-0901": (_obs(kind="behavior", at="2026-09-10T13:58:00.000Z"), _obs(kind="injury", at="2026-09-10T09:00:00.000Z"))}), [(CATEGORY_OBSERVATION_HIGH, "warning")]),
+    ("an overdue pending task is a warning", _herd(_rec("cow-0777", status="active", pasture="home-place"), tasks=(_task(),)), [(CATEGORY_CARE_OVERDUE, "warning")]),
+    ("a task not yet due is nothing", _herd(_rec("cow-0777", status="active"), tasks=(_task(due="2026-10-01T09:00:00.000Z"),)), []),
+    ("a completed task past its date is nothing", _herd(_rec("cow-0777", status="active"), tasks=(_task(status="completed"),)), []),
+    ("two overdue tasks on one animal are one finding", _herd(_rec("cow-0777", status="active"), tasks=(_task(), CareTask(task_id="task-2", animal_id="cow-0777", title="Second", due_at="2026-09-01T09:00:00.000Z", status="pending", notes=""))), [(CATEGORY_CARE_OVERDUE, "warning")]),
+    ("a task on an animal whose record failed still opens, with its pasture unknown", _herd(tasks=(_task(),)), [(CATEGORY_CARE_OVERDUE, "warning")]),
+    ("a dead cow with an overdue task is two different jobs", _herd(_rec(status="deceased"), tasks=(_task("cow-0901"),)), [(CATEGORY_DECEASED, "critical"), (CATEGORY_CARE_OVERDUE, "warning")]),
+]
+
+
+@pytest.mark.parametrize(("label", "herd", "expected"), ANIMAL_TRUTH_TABLE, ids=[row[0] for row in ANIMAL_TRUTH_TABLE])
+def test_animal_truth_table(label: str, herd: HerdSweepResult, expected: list[tuple[str, str]]) -> None:
+    findings = triage_herd(herd, now=HERD_NOW)
+    assert [(f.category, f.severity) for f in findings] == expected, label
+    for f in findings:
+        assert f.subject_type == "animal" and f.key.endswith(f":{f.category}") and f.subject_id in f.summary
+
+
+def test_deceased_is_critical_on_purpose_and_the_window_is_a_day() -> None:
+    """Under M7's predicate critical escalates to Tier 2, which is where a dead cow belongs. Do not
+    tune that down to save a call. And the window is what keeps the ranch's history (cow-0777's
+    August mobility note) from opening an incident on the first sweep, forever, because the debounce
+    does nothing against an observation that is stable across sweeps."""
+    assert triage_herd(_herd(_rec(status="deceased")), now=HERD_NOW)[0].severity == "critical"
+    assert OBSERVATION_WINDOW == timedelta(hours=24)
+    inside = triage_herd(_herd(_rec(status="active"), observations={"cow-0901": (_obs(at="2026-09-09T14:00:00.000Z"),)}), now=HERD_NOW)
+    outside = triage_herd(_herd(_rec(status="active"), observations={"cow-0901": (_obs(at="2026-09-09T13:59:59.000Z"),)}), now=HERD_NOW)
+    assert len(inside) == 1 and outside == []
+
+
+def test_the_care_overdue_sentence_names_the_task_the_animal_and_the_days() -> None:
+    [finding] = triage_herd(_herd(_rec("cow-0777", status="active", pasture="home-place"), tasks=(_task(),)), now=HERD_NOW)
+    assert finding.location == "home-place" and finding.observed_at == "2026-08-10T13:00:00.000Z"
+    assert "task-cow-0777" in finding.summary and "cow cow-0777" in finding.summary and "31 days overdue" in finding.summary and '"Recheck down cow"' in finding.summary
+
+
+def test_an_unknown_animal_status_opens_nothing_and_warns_once() -> None:
+    """Structurally unreachable (the sweep reads by status), kept explicit because a fall-through
+    that opens `inactive` on a status it does not understand would be a lie about the animal."""
+    from src.tools.triage import reset_warn_once
+
+    reset_warn_once()
+    with capture_logs() as logs:
+        assert triage_herd(_herd(_rec(status="quarantined")), now=HERD_NOW) == []
+        assert triage_herd(_herd(_rec(status="quarantined")), now=HERD_NOW) == []
+    assert [e["event"] for e in logs if e["event"] == "unknown_animal_status"] == ["unknown_animal_status"]
+
+
+def test_the_herd_findings_rank_into_one_list_with_the_sensor_findings() -> None:
+    herd = _herd(_rec(status="deceased"), _rec("cow-0777", status="active"), tasks=(_task(),))
+    findings = triage_sweep([reading("water-level", 1.4, sensor_id="alkali-flat-water"), reading("fuel-level", 18.0, sensor_id="home-place-diesel")], herd=herd, now=HERD_NOW)
+    assert [(f.subject_id, f.severity) for f in findings] == [("alkali-flat-water", "critical"), ("cow-0901", "critical"), ("cow-0777", "warning"), ("home-place-diesel", "warning")]
+
+
+def test_every_animal_category_is_registered_and_has_an_sop() -> None:
+    assert ANIMAL_CATEGORIES <= ALL_CATEGORIES
+    assert {SOP_FOR_CATEGORY[c] for c in ANIMAL_CATEGORIES} == {"herd.md"}
+    assert parse_timestamp("2026-09-10T13:58:00.000Z") == datetime(2026, 9, 10, 13, 58, tzinfo=UTC) and parse_timestamp("yesterday") is None
+
+
+# --- the cow's packet: the record, its pasture, its notes, its tasks, its herd-mates, and NO reading -- #
+def _animal_incident(**over: object) -> Incident:
+    base: dict[str, object] = {
+        "key": "cow-0901:deceased",
+        "subject_id": "cow-0901",
+        "subject_type": "animal",
+        "location": "east-allotment",
+        "category": "deceased",
+        "severity": "critical",
+        "status": "opened",
+        "summary": "east-allotment: cow cow-0901, tag SW-0901 is recorded deceased on the Farm API.",
+        "first_seen_at": datetime(2026, 9, 10, 14, 0, tzinfo=UTC),
+        "last_seen_at": datetime(2026, 9, 10, 14, 0, tzinfo=UTC),
+        "owner": "herd_health",
+    }
+    return Incident(**(base | over))  # type: ignore[arg-type]
+
+
+async def test_a_cows_packet_carries_no_sensor_reading_and_costs_no_http() -> None:
+    """The one line worth defending in the whole design. The pasture's tank is on the sweep, at the
+    same location, at 1.4 gal, and `evidence.py` already documents that a code-assembled packet may
+    cross an allowlist. The cow's packet still may not carry it: herd_health sees the dead cow,
+    water_feed sees the dry tank, and only the supervisor may fuse them. No route is mocked on the
+    sensor host, so any history or sibling read for the cow would raise here."""
+    herd = HerdSweepResult(
+        roster=PastureRoster(pastures=(PastureContext(pasture_id="east-allotment", name="East BLM Allotment", acreage=8800, fence_type="barbed-wire", status="open", head_count=111, animal_ids=tuple(f"cow-{i:04d}" for i in range(111))),)),
+        animals=(_rec(status="deceased"), _rec("cow-0903", status="sold")),
+        observations={"cow-0901": (_obs(), _obs(kind="general", severity="low", at="2026-08-05T09:00:00.000Z"))},
+        care_tasks=(_task("cow-0901"),),
+        answered=frozenset({"cow-0901", "cow-0903"}),
+    )
+    tank_here = reading("water-level", 1.4, sensor_id="east-allotment-water", location="east-allotment")
+    with respx.mock(assert_all_called=False) as mock:
+        [packet] = await assemble([_animal_incident()], readings=[tank_here], herd=herd)
+        assert not mock.calls, "an animal packet is built from what the sweep already read"
+
+    page = packet.render()
+    assert packet.history == () and packet.siblings == () and packet.animal is not None
+    assert "east-allotment-water" not in page and "1.4" not in page and "gal" not in page, "the tank stays in water_feed's packet"
+    assert "cow-0901" in page and "tag SW-0901" in page and "status: deceased" in page
+    assert "Found down at first light." in page and "[high] injury" in page, "the observation is quoted as written"
+    assert "task-cow-0901" in page and "Recheck down cow" in page
+    assert "111 head on it" in page, "the pasture from the roster the sweep already fetched"
+    assert "cow cow-0903: status sold" in page, "herd-mates whose state changed this sweep"
+    assert "No sensor reading is on this page by design" in page
+    assert packet.sop_name == "herd.md" and "HERD-01" in packet.sop_text
+
+
+async def test_a_cows_packet_states_every_absence() -> None:
+    """A Care outage left no observations and the Farm record read failed: the page says both, so
+    the model works around a stated gap instead of filling it."""
+    herd = HerdSweepResult(animals=(), observations={}, care_tasks=(_task("cow-0901"),), errors=(HerdError(subject="cow-0901", category="http_error", message="HTTP 503"),), failure="care: care_tasks http_error HTTP 503")
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(f"{FARM}/pastures").respond(200, json=HERD_ROSTER)
+        [packet] = await assemble([_animal_incident(category="care_overdue", key="cow-0901:care_overdue", severity="warning", location="")], herd=herd)
+    page = packet.render()
+    assert "record unavailable: HTTP 503" in page
+    assert "the Care API read for this animal failed (HTTP 503)" in page
+    assert "no pasture is recorded for this animal" in page
+    assert packet.sop_name == "herd.md"
+
+
+async def test_a_mixed_tick_reads_history_for_the_sensors_and_nothing_for_the_cow() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(f"{FARM}/pastures").respond(200, json=HERD_ROSTER)
+        mock.get(f"{BASE}/sensors/alkali-flat-water/readings").respond(200, json={"data": [{"value": 1.2, "recordedAt": FROZEN_TS}]})
+        packets = await assemble([_incident(), _animal_incident()], herd=_herd(_rec(status="deceased")))
+        paths = sorted(c.request.url.path for c in mock.calls)
+    assert paths == ["/pastures", "/sensors/alkali-flat-water/readings"]
+    assert [p.incident.is_animal for p in packets] == [False, True] and packets[0].history != () and packets[1].history == ()
 
 
 # =========================================================================== #
@@ -1531,9 +1894,9 @@ async def test_one_scenario_from_injection_through_a_resolved_incident(chaos_sto
 
     findings = triage_sweep(faulted.readings)
     assert [(f.category, f.severity, f.value) for f in findings] == [("water_low", "critical", 0.8)]
-    glimpsed = await reconcile(chaos_store, findings, tick=2, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=NOW)
+    glimpsed = await reconcile(chaos_store, findings, tick=2, run_id="e2e", read_subject_ids=[tank.sensor_id], now=NOW)
     assert glimpsed.counts["pending"] == 1 and glimpsed.counts["opened"] == 0, "one bad sweep is pending, which is why every scenario's TTL is at least two ticks"
-    opened = await reconcile(chaos_store, findings, tick=3, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=NOW + timedelta(seconds=300))
+    opened = await reconcile(chaos_store, findings, tick=3, run_id="e2e", read_subject_ids=[tank.sensor_id], now=NOW + timedelta(seconds=300))
     assert opened.counts == {"opened": 1, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}, "the fault is still there on the next sweep, so it opens"
 
     # --- tick 5: the TTL is up, the overlay is gone, and the same honest sweep reads nominal --
@@ -1547,6 +1910,6 @@ async def test_one_scenario_from_injection_through_a_resolved_incident(chaos_sto
 
     assert clean.overlay_events == 0 and [r.value for r in clean.readings] == [16.4]
     assert triage_sweep(clean.readings) == []
-    resolved = await reconcile(chaos_store, [], tick=5, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=later)
+    resolved = await reconcile(chaos_store, [], tick=5, run_id="e2e", read_subject_ids=[tank.sensor_id], now=later)
     assert resolved.counts == {"opened": 0, "ongoing": 0, "resolved": 1, "pending": 0, "dismissed": 0}
-    assert resolved.resolved[0].sensor_id == tank.sensor_id
+    assert resolved.resolved[0].subject_id == tank.sensor_id
