@@ -57,7 +57,7 @@ sweetwater/                                lands at
 ├── alembic.ini                     M1    points at alembic/; the URL comes from env, never from this file
 ├── alembic/
 │   ├── env.py                      M1    resolves the target through the same resolver main.py uses
-│   └── versions/0001_*.py          M1    creates the sw_ops schema and incidents
+│   └── versions/000N_*.py          M1+   0001 sw_ops + incidents, 0002 chaos_events, 0003 debounce, 0004 gate, 0005 held; 0006 subject_id / subject_type (M7A)
 ├── .claude/rules/                  M0    path-globbed rules for anything too long for a CLAUDE.md
 ├── src/
 │   ├── agent/
@@ -73,6 +73,7 @@ sweetwater/                                lands at
 │   │   ├── mcp_client.py           M0    connect to the deployed Function URL; read ranch://sensors/map
 │   │   ├── allowlists.py          (M3)   the five tool slices, enforced in code
 │   │   ├── sensors.py              M1    the free-pass sweep (direct httpx, bounded concurrency)
+│   │   ├── herd.py                (M7A)  the second free sweep: herd catalog, observations, care tasks, off Farm and Care, same three rules
 │   │   ├── evidence.py            (M2)   assemble the packet in CODE (see Model routing)
 │   │   ├── triage.py               M1    per-type thresholds; severity is CODE's, not the model's
 │   │   └── chaos.py               (M5)   the fifth agent's hands: inject, heal, expire
@@ -100,7 +101,7 @@ sweetwater/                                lands at
 │   └── test_api.py                (M8)   envelope shape, gate endpoints
 ├── data/
 │   ├── examples.json              (M5)   chaos scenario catalog + golden fixtures
-│   └── knowledge_base/            (M2)   the SOPs. Six files, not four: infrastructure splits into plant / wellhead / sensors, because a packet is billed for every rule in the file it carries (see SOP_FOR_CATEGORY)
+│   └── knowledge_base/            (M2)   the SOPs, plus herd.md at M7A. Six files, not four: infrastructure splits into plant / wellhead / sensors, because a packet is billed for every rule in the file it carries (see SOP_FOR_CATEGORY)
 ├── docs/
 │   ├── Plan.md                     M1    this file. Tracked in git at the M1 boundary; the tree above is the authority
 │   ├── STATE.md                    M0    the session-start briefing, refreshed at every boundary
@@ -410,6 +411,8 @@ Each ends runnable and verifiable. **M0 through M9 need no containers and no new
 **M6 Gate and validation.** LangGraph Postgres checkpointer so a pause outlives the process, `interrupt()` on the write tools (**eight, not four**: the four in a responder's slice plus the four animal-placement writes that arrive with `chaos` at M5; all eight are in `WRITE_TOOLS` from M3 and `assert_callable` already refuses them), and three level-3 return-path checks: **shape**, **key**, **grounding**. The key match is on a real incident key, never on a model-written index. _Verify:_ let a tick pause on a `create_observation`, kill the process, restart, resume with reject and then approve; a planted-bad-response suite asserts _which_ check fires.
 
 **M7 Model routing, one job at a time.** `models/routing.py` and the escalation predicate. Move the cheapest job to local first (chaos observation prose), confirm the rails hold, then the work-order write, then packet-judging. Each move gets a row in `docs/model-routing.md` with the before and after numbers. **The all-clear rail goes in before the first job moves down**, not after. _Verify:_ a calm tick costs $0.00 and logs `tier: 1`; a critical incident escalates and logs `escalation_reasons: ["critical"]`; a planted local-model all-clear on a code-flagged incident is rejected and escalated rather than believed.
+
+**M7A The herd sweep, the coyote gap.** Added at the M7 boundary rather than planned, because nothing in the tick read the Care API: the free pass was a sensor sweep, triage a sensor truth table, and `herd_health` cannot read a sensor, so a dead cow written by chaos was invisible to the monitor. **No new endpoint and no MCP change.** `GET /animals` on the Farm API already carries the `status` field chaos patches, and observations and care tasks are on the Care API. `tools/herd.py` is a second free sweep, direct over httpx like `sensors.py` and under the same three rules: herd catalog once, care tasks once, observations bounded by `SWEEP_CONCURRENCY` and fetched only for animals whose state changed, inside a 24-hour window so the ranch's history does not open an incident per old note; errors returned as data; an empty herd catalog is a failed stage, not an empty herd; the stage returns the animals that actually answered. Animal categories land in `triage.py`, in code: `deceased` critical, `inactive` warning with `sold` ruled out explicitly because one of those is a ranch running normally, a `high` observation critical for `injury` / `mobility` and warning otherwise, `care_overdue` warning. Deceased is critical on purpose: under M7's predicate it escalates to Tier 2, which is where a dead cow belongs. Migration `0006` renames `incidents.sensor_id` / `sensor_type` to `subject_id` / `subject_type` (`sensor` rows and `animal` rows), the key stays `subject:category` (`cow-0903:deceased`), and `reconcile` takes the *subjects* that answered so a Care API outage resolves no animal. `ROUTES` gains the animal categories for `herd_health`, and STATE.md decision 5 is rewritten: `herd_health` owns animals and nothing else. An evidence packet for a cow: the record, its pasture, its recent observations, its open care tasks, its herd-mates in that pasture, and **no sensor readings**, so the dead cow and the dry tank stay in two packets and fusion stays the supervisor's job. `knowledge_base/herd.md`, derived from the canon and nothing else, because the citation rail needs it before the first packet ships. _Read over the wire before the sweep is written:_ the herd count, and whether observations list ranch-wide with a since filter or only per animal; that decides the request bill, not whether an endpoint is missing. _Verify:_ one paid run on the test ledger with `CHAOS_ENABLED=1 CHAOS_ALLOW_WRITES=1`, seed advanced to `coyote_kill` on the cohort: the next tick opens `cow-090x:deceased`, `herd_health` names the animal and quotes the observation, proposes `create_observation`, and the gate pauses for real, which closes `docs/issues.md` #1, #11, and #15; `chaos restore` puts the cohort back to `active` and the incident resolves; then `storm_front` fuses into one report with `linked` naming both worlds, closing #2.
 
 **M8 The read API.** `api/routes.py`: `/ops/incidents`, `/ops/report`, `/ops/stream` (SSE), `/ops/gate` for approve/reject, `/health`. Same envelope conventions as the ranch APIs so the whole system reads consistently.
 

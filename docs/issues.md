@@ -15,6 +15,8 @@ Plain-language rule for reading this: **"owed" means we said we would prove it a
 
 ### 1. `herd_health` discovering the coyote kill through its own tools
 
+**Scheduled: M7A**, inserted before M8 at the M7 boundary. Design is the M7A paragraph in `docs/Plan.md`. Closes with #2, #11, and #15 in one paid run.
+
 **Where it came from.** M5 built the `coyote_kill` scenario and the guarded animal write path, and
 deferred the check to "the first phase with a supervisor." M3 built the supervisor. M4 was the
 first phase that could run chaos and the supervisor in one tick, and found the check cannot run
@@ -33,6 +35,8 @@ where it lives before building it. Until then `docs/STATE.md` decision 5 stands:
 idle is correct, not a gap.
 
 ### 2. A chaos storm front fusing into one shift report
+
+**Scheduled: M7A.** "Cattle through the gap" is an animal event, so the storm front has both halves only once the herd sweep exists.
 
 **Where it came from.** M5 deferred it to M3. M3 verified fusion live, but on natural churn across
 three sensing worlds, not on the chaos `storm_front` group. The specific claim that four correlated
@@ -70,6 +74,8 @@ gets there for free, since the API is the loop's process), or the receipt moves 
 file becomes a projection of it. Decide at M8, when the second writer becomes the API.
 
 ### 11. The gate's interrupt is verified on `restock_feed`, not `create_observation`
+
+**Scheduled: M7A.** The live `create_observation` pause is M7A's headline verification.
 
 **Where it came from.** The plan's M6 verification says "let a tick pause on a `create_observation`."
 That needs `herd_health` to propose one, and `herd_health` is handed nothing because no stage reads
@@ -163,6 +169,8 @@ public Bedrock pricing page did not render an Opus 5 row when checked. Verify ag
 for the M7 run (about $0.75 of Opus on 2026-09-11) and correct the one row if it differs.
 
 ### 15. The M6 live pause is still owed
+
+**Scheduled: M7A**, with #11.
 
 Carried from M6. Three more paid ticks at M7 and the local model proposed writes readily
 (`restock_feed` with `quantity: "unknown"`, tools outside its slice), every one stripped by the

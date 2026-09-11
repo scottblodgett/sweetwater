@@ -127,7 +127,7 @@ SIGBREAK go through `signal.signal` and set the stop event, which also wakes the
 is the event ids whose sensor the sweep read; at heal time an event this run injected that was
 never in that set logs `chaos_event_missed` and lands in `chaos_missed` on the line. Animal
 events are excluded because nothing observes them yet: no stage reads the Care API, which is
-the owed `herd_health` verification and its own scoped item.
+the owed `herd_health` verification and its own scoped item, **M7A**, which adds the herd sweep and puts animal events into the observed set.
 
 ## Escalation (see also `src/models/CLAUDE.md`)
 

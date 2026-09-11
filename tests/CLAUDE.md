@@ -94,7 +94,7 @@ pass is the failure mode this file exists to prevent.
 | one **agent** raising is not an outage for the other three | a tick survives a whole slice failing, not just one packet | `fan_out` stopped catching per-agent exceptions, or dropped the packets it was carrying |
 | the concurrency ceiling is global across four agents | `AGENT_CONCURRENCY = 4` means four Opus calls in flight, not sixteen | the shared semaphore stopped being passed down and each agent bounds only itself |
 | every routed incident produces a work order | nothing that reached the fan-out is silently dropped | a grouping step lost a key, or an error path returned fewer orders than packets |
-| `herd_health` returns empty and logs nothing | the routing table working, not a gap (`docs/STATE.md` decision 5) | an idle agent started warning once per tick, which trains everyone to ignore the log |
+| `herd_health` returns empty and logs nothing | the routing table working, not a gap (`docs/STATE.md` decision 5). **M7A retires this rail**: once the herd sweep lands, `herd_health` handed nothing on a tick with a `deceased` animal is the failure | an idle agent started warning once per tick, which trains everyone to ignore the log |
 | one world reporting costs zero tokens | the supervisor's cost lever is the `if`, not the model | the `FUSION_THRESHOLD` check moved below the call |
 | a shift report linking an incident nobody handed over is thrown away | the fusion claim is checkable data rather than prose | `linked` stopped being compared against the keys the page carried |
 | a rejected shift report is replaced, never retried | the rail stays a rail instead of becoming a sampler | somebody added a second attempt to get a cleaner page |

@@ -141,6 +141,6 @@ plain strings, never foreign keys, and orphans are allowed on purpose.
 
 M0 skeleton + logging + handshake · M1 the free pass · M2 one agent, Opus only · M3 the
 four responders · M4 the continuous loop · M5 chaos · M6 gate and validation · M7 model
-routing · M8 the read API · M9 the window · M10 dockerize and close the docs.
+routing · M7A the herd sweep, the coyote gap · M8 the read API · M9 the window · M10 dockerize and close the docs.
 
 Progress and divergence: `docs/JOURNEY.md`.
