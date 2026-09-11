@@ -49,10 +49,12 @@ from src.tools.allowlists import (
     SLICES,
     UNASSIGNED_TOOLS,
     WRITE_TOOLS,
+    Approval,
     WriteGateError,
     assert_callable,
     bound_tools_for,
     is_allowed,
+    proposable_tools_for,
     tools_for,
 )
 from src.tools.chaos import (
@@ -733,21 +735,35 @@ def test_the_four_placement_tools_belong_to_nobody() -> None:
     assert UNASSIGNED_TOOLS <= WRITE_TOOLS, "an unassigned tool that is not covered by the write guard is the one a future edit gets wrong"
 
 
-def test_no_write_tool_is_ever_handed_to_a_model_before_m6() -> None:
-    """The seam. If this fails, either the gate landed or somebody reached for tools_for."""
-    assert not GATE_LANDED, "GATE_LANDED is M6's to flip, with interrupt() and the checkpointer actually in place"
+def test_after_the_flip_a_write_is_proposable_but_never_performable_without_an_approval() -> None:
+    """The seam, after M6. The flip changed what a model may be handed and may propose; it did
+    not change who may perform. A write still raises without an `Approval`, and the only thing
+    that mints one is `src/agent/gate.py` after a human resumed the pause with `approve`."""
+    assert GATE_LANDED, "M6 flipped it, after the pause and the audit stream were proven"
     for agent in SLICES:
-        assert bound_tools_for(agent) & WRITE_TOOLS == frozenset(), f"{agent} would be handed an ungated write tool; the gate arrives in M6"
-    assert len(bound_tools_for("water_feed")) == 5
-    assert len(bound_tools_for("herd_health")) == 4
+        assert bound_tools_for(agent) == tools_for(agent)
+        assert proposable_tools_for(agent) == tools_for(agent) & WRITE_TOOLS
+    assert proposable_tools_for("water_feed") == {"consume_feed", "restock_feed"}
+    assert proposable_tools_for("herd_health") == {"create_observation", "update_care_task"}
+    assert proposable_tools_for("infrastructure") == proposable_tools_for("compliance") == proposable_tools_for("chaos") == frozenset()
+    for tool in sorted(WRITE_TOOLS):
+        with pytest.raises(WriteGateError, match="Approval"):
+            assert_callable(tool)
+        assert_callable(tool, approval=Approval(audit_id="a" * 32, decided_by="scooter"))  # no raise
 
 
-def test_withholding_a_write_says_so_out_loud() -> None:
-    """A silent subtraction is indistinguishable from a slice that was never right."""
+def test_before_the_flip_nothing_was_handed_over_and_it_said_so_out_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kept as the description of the M3-to-M6 seam, because `GATE_LANDED` is one name and the
+    day somebody flips it back to debug something, this is what the rails should say."""
+    monkeypatch.setattr("src.tools.allowlists.GATE_LANDED", False)
     with capture_logs() as logs:
-        bound_tools_for("water_feed")
-    assert [entry["event"] for entry in logs] == ["write_tools_withheld"]
-    assert logs[0]["arrives_in"] == "M6"
+        for agent in SLICES:
+            assert bound_tools_for(agent) & WRITE_TOOLS == frozenset()
+            assert proposable_tools_for(agent) == frozenset()
+    assert len(bound_tools_for("water_feed")) == 5 and len(bound_tools_for("herd_health")) == 4
+    assert [entry["event"] for entry in logs] == ["write_tools_withheld", "write_tools_withheld"], "a silent subtraction is indistinguishable from a slice that was never right"
+    with pytest.raises(WriteGateError, match="GATE_LANDED is False"):
+        assert_callable("restock_feed", approval=Approval(audit_id="a" * 32, decided_by="scooter"))
 
 
 def test_a_read_only_slice_is_withheld_from_nothing() -> None:
@@ -757,7 +773,7 @@ def test_a_read_only_slice_is_withheld_from_nothing() -> None:
 def test_calling_a_write_tool_raises_rather_than_returning_an_error_envelope() -> None:
     """The belt behind the filtered list. Every MCP call goes through `assert_callable`."""
     for tool in sorted(WRITE_TOOLS):
-        with pytest.raises(WriteGateError, match="M6"):
+        with pytest.raises(WriteGateError, match="Approval"):
             assert_callable(tool)
 
 
@@ -776,6 +792,8 @@ async def test_call_tool_refuses_a_write_before_it_reaches_the_wire() -> None:
 
     with pytest.raises(WriteGateError):
         await call_tool(ExplodingSession(), "create_observation", {"animalId": "cow-0777"})  # type: ignore[arg-type]
+    with pytest.raises(AssertionError, match="reached the deployed ranch"):
+        await call_tool(ExplodingSession(), "create_observation", {"animalId": "cow-0777"}, approval=Approval(audit_id="a" * 32, decided_by="scooter"))  # type: ignore[arg-type]
 
 # =========================================================================== #
 # 5. chaos: the guard, the catalog, the seed, and the overlay

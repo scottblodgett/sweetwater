@@ -126,10 +126,19 @@ class WorkOrder(BaseModel):
     escalate: bool = False
     escalate_reason: str = ""
     unknowns: tuple[str, ...] = ()
+    #: The one thing in a work order that could change the ranch rather than describe it, and
+    #: it is a **proposal**: `{"tool": ..., "args": {...}}`, naming a write tool in this agent's
+    #: slice. Arrives at M6. `None` is the usual answer. A proposal that survived the three
+    #: return-path checks pauses in `src/agent/gate.py` for a human; one that did not is
+    #: stripped here and its violation recorded, and the prose still ships.
+    proposed_write: dict[str, Any] | None = None
 
     status: WorkOrderStatus = "ok"
     violations: tuple[str, ...] = ()
     severity_echo: str = ""
+    #: The gate's receipt for `proposed_write`: the `audit_id` under which it is paused (or was
+    #: decided), or empty when nothing was proposed or the proposal was rejected before pausing.
+    audit_id: str = ""
 
     provider: str = ""
     model: str = ""
@@ -152,9 +161,13 @@ class WorkOrder(BaseModel):
             lines.extend(["", "Not known from the sensors:", *(f"  - {u}" for u in self.unknowns)])
         if self.escalate:
             lines.extend(["", f"ESCALATE: {self.escalate_reason or 'no reason given'}"])
+        if self.proposed_write:
+            args = ", ".join(f"{k}={v!r}" for k, v in sorted(self.proposed_write.get("args", {}).items()))
+            where = f" (paused as {self.audit_id[:8]}, waiting for a human)" if self.audit_id else ""
+            lines.extend(["", f"PROPOSED WRITE: {self.proposed_write.get('tool')}({args}){where}"])
         lines.extend(["", f"Rules: {', '.join(self.rules_cited) or 'none cited'}"])
         if self.violations:
-            lines.append(f"REJECTED ({self.status}): {', '.join(self.violations)}")
+            lines.append(f"{'REJECTED' if self.status != 'ok' else 'NOTED'} ({self.status}): {', '.join(self.violations)}")
         return "\n".join(lines)
 
 
@@ -267,6 +280,14 @@ class RanchState(BaseModel):
     #: next tick, which re-routes them; a rail rejection is NOT in here, because retrying a
     #: rejected answer turns a rail into a sampler.
     held: tuple[str, ...] = ()
+    #: The gate, from M6. `writes_proposed` is the audit ids this tick paused for a human;
+    #: `writes_duplicate` is proposals suppressed because the same incident already has the same
+    #: write waiting; `writes_failed` is proposals the gate could not persist (their incidents
+    #: are held); `writes_pending` is everything waiting across the ledger after this tick.
+    writes_proposed: tuple[str, ...] = ()
+    writes_duplicate: int = 0
+    writes_failed: int = 0
+    writes_pending: int | None = None
     #: Upstreams whose stage this tick skipped because they were inside a backoff window.
     skipped_upstreams: tuple[str, ...] = ()
     #: Chaos, when armed: events injected this tick, events healed this tick, the overlay events

@@ -1,7 +1,9 @@
-"""The continuous loop. One tick, all nine stages of it, and from M4 the loop that runs them.
+"""The continuous loop. One tick, all ten stages of it, and from M4 the loop that runs them.
 
     catalog -> chaos -> sweep -> triage -> reconcile -> route      free
-      -> evidence -> fan_out -> synthesize                         spends
+      -> evidence -> fan_out                                       spends
+      -> gate                                                      pauses a proposed write for a human, never the tick (M6)
+      -> synthesize                                                decides for itself
 
 Five stages, zero tokens, and they are what narrows 160 sensors down to what is actually
 wrong. Only what comes out of `route` reaches a model. `run_tick` returns a `RanchState`
@@ -47,8 +49,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from src.agent.agent import RESPONDERS, owners_for, route, synthesize
-from src.agent.memory import StoreTarget, counts_by_status, reconcile, resolve_store, store_session
-from src.agent.state import RanchState
+from src.agent.gate import WriteProposal, build_gate, pending, propose
+from src.agent.memory import (
+    StoreTarget,
+    checkpointer,
+    counts_by_status,
+    held_incident_keys,
+    reconcile,
+    record_held,
+    resolve_store,
+    store_session,
+)
+from src.agent.state import RanchState, WorkOrder
 from src.agent.workers import fan_out
 from src.models.llm_client import cost_usd
 from src.tools import chaos
@@ -154,7 +166,99 @@ class Backoff:
                 self.record_success(UPSTREAM_MODEL)
 
 
-_STAGE_ORDER = ("catalog", "sweep", "triage", "reconcile", "route", "evidence", "fan_out", "synthesize")
+_STAGE_ORDER = ("catalog", "sweep", "triage", "reconcile", "route", "evidence", "fan_out", "gate", "synthesize")
+
+#: Why an incident is being held, written to `incidents.held_reason` so the reason survives a
+#: restart with the key. The gate's own reason is the one the orders' violations cannot carry.
+HELD_UPSTREAM_BACKOFF = "upstream_backoff"
+HELD_GATE_UNAVAILABLE = "gate_unavailable"
+
+
+@dataclass(frozen=True)
+class GateOutcome:
+    """What the gate stage did with this tick's proposals. `pending` is `None` when the gate
+    was never opened, because a count nobody measured must not read as zero."""
+
+    orders: tuple[WorkOrder, ...]
+    proposed: tuple[str, ...] = ()
+    duplicate: int = 0
+    failed: int = 0
+    pending: int | None = None
+    held: frozenset[str] = frozenset()
+
+
+async def _gate_step(target: StoreTarget, orders: tuple[WorkOrder, ...], *, routed_keys: frozenset[str], tick: int, run_id: str) -> GateOutcome:
+    """Hand every surviving `proposed_write` to the gate. The tick does not wait for an answer.
+
+    The key check lives here and not in `workers.check` because the key is code's: a proposal
+    is born inside the work order for one packet and never names an incident, so the only way
+    it can carry a foreign key is a bug on this side of the model. Checked anyway, as
+    `write_key_unknown`, because "cannot happen" is what a future path that builds a work order
+    by hand will say too.
+
+    **The gate never fails the tick.** A checkpointer that cannot be reached drops nothing on
+    the floor: each proposal that could not pause is counted in `failed`, its incident is held
+    so the next tick re-judges and re-proposes it, and the shift report still gets written.
+    """
+    candidates = [o for o in orders if o.shippable and o.proposed_write]
+    if not candidates:
+        return GateOutcome(orders=orders)
+
+    updated = {o.incident_key: o for o in orders}
+    to_pause: list[WorkOrder] = []
+    for order in candidates:
+        if order.incident_key not in routed_keys:
+            log.error("write_key_unknown", incident=order.incident_key, agent=order.agent, tool=(order.proposed_write or {}).get("tool"), routed=sorted(routed_keys), hint="a proposal for an incident this tick never routed; dropped before the gate")
+            updated[order.incident_key] = order.model_copy(update={"proposed_write": None, "violations": (*order.violations, "write_key_unknown")})
+            continue
+        to_pause.append(order)
+
+    proposed: list[str] = []
+    duplicate = failed = 0
+    held: set[str] = set()
+    pending_count: int | None = None
+    try:
+        async with checkpointer(target) as saver:
+            gate = build_gate(saver)
+            for order in to_pause:
+                assert order.proposed_write is not None
+                outcome = await propose(gate, WriteProposal(incident_key=order.incident_key, agent=order.agent, tool=str(order.proposed_write["tool"]), args=dict(order.proposed_write["args"]), tick=tick, run_id=run_id))
+                if outcome.duplicate_of:
+                    duplicate += 1
+                    updated[order.incident_key] = order.model_copy(update={"audit_id": outcome.duplicate_of})
+                elif outcome.dropped:
+                    failed += 1
+                    held.add(order.incident_key)
+                    updated[order.incident_key] = order.model_copy(update={"audit_id": outcome.audit_id})
+                else:
+                    proposed.append(outcome.audit_id)
+                    updated[order.incident_key] = order.model_copy(update={"audit_id": outcome.audit_id})
+            pending_count = len(await pending(gate))
+    except Exception as exc:
+        unpaused = [o.incident_key for o in to_pause if o.incident_key not in held and not updated[o.incident_key].audit_id]
+        failed += len(unpaused)
+        held.update(unpaused)
+        log.error("gate_unavailable", error=f"{type(exc).__name__}: {exc}", proposals=len(to_pause), held=sorted(held), hint="the checkpointer could not be opened; the incidents are held and re-proposed next tick")
+
+    return GateOutcome(orders=tuple(updated[o.incident_key] for o in orders), proposed=tuple(proposed), duplicate=duplicate, failed=failed, pending=pending_count, held=frozenset(held))
+
+
+async def _write_held(target: StoreTarget, *, reasons: dict[str, str], released: frozenset[str]) -> None:
+    """Persist the held set (migration 0005). Never fails the tick: the in-process set still
+    carries the keys for this run, and a restart is the only thing that would notice."""
+    if not reasons and not released:
+        return
+    try:
+        async with store_session(url=target.url, schema=target.schema) as session:
+            await record_held(session, reasons=reasons, released=released)
+    except Exception as exc:
+        log.warning("held_not_persisted", error=f"{type(exc).__name__}: {exc}", held=sorted(reasons), hint="the held set is still carried in-process for this run; it will not survive a restart")
+
+
+async def restore_held(target: StoreTarget) -> frozenset[str]:
+    """What the previous run was carrying, read before the loop's first tick."""
+    async with store_session(url=target.url, schema=target.schema) as session:
+        return await held_incident_keys(session)
 
 
 def _stage_ran(state: RanchState, stage: str) -> bool:
@@ -324,14 +428,14 @@ async def run_tick(
         # incident nobody was handed is an incident nobody is paged about.
         routed_keys = {key: agent for agent, keys in state.routed.items() for key in keys}
         newly_opened = tuple(inc for inc in to_work if inc.key in routed_keys)
-        held_out: set[str] = set()
+        held_out: dict[str, str] = {}
         spend_blocked = skipping & {UPSTREAM_EVIDENCE, UPSTREAM_MODEL}
         if newly_opened and spend and spend_blocked:
             # The ranch is readable but the expensive half is not. Hold every routed incident
             # and try again when the window closes, rather than paying for packets nobody can
             # judge or asking a model that is not answering.
             state.skipped_upstreams = tuple(sorted(spend_blocked))
-            held_out.update(inc.key for inc in newly_opened)
+            held_out.update({inc.key: HELD_UPSTREAM_BACKOFF for inc in newly_opened})
             log.warning("spend_skipped", skipped=state.skipped_upstreams, held=len(held_out))
         elif newly_opened and spend:
             state.failed_stage = "evidence"
@@ -346,10 +450,25 @@ async def run_tick(
             orders = await fan_out({agent: tuple(group) for agent, group in by_agent.items()})
             state.work_orders = tuple(o for agent in RESPONDERS for o in orders[agent])
             state.worlds = tuple(agent for agent in RESPONDERS if orders[agent])
-            held_out.update(o.incident_key for o in state.work_orders if o.status == "no_answer" and set(o.violations) & RETRIABLE_VIOLATIONS)
+            for order in state.work_orders:
+                retriable = sorted(set(order.violations) & RETRIABLE_VIOLATIONS)
+                if order.status == "no_answer" and retriable:
+                    held_out[order.incident_key] = retriable[0]
+
+            # The gate. Every proposal that survived the three checks pauses for a human here,
+            # and the tick moves on: a pending write does not block the watch. A duplicate of a
+            # write already waiting is suppressed, not asked twice.
+            state.failed_stage = "gate"
+            gated = await _gate_step(target, state.work_orders, routed_keys=frozenset(routed_keys), tick=tick, run_id=state.run_id)
+            state.work_orders = gated.orders
+            state.writes_proposed, state.writes_duplicate, state.writes_failed, state.writes_pending = gated.proposed, gated.duplicate, gated.failed, gated.pending
+            held_out.update({key: HELD_GATE_UNAVAILABLE for key in gated.held})
         state.held = tuple(sorted(held_out))
         if state.held:
             log.warning("incidents_held", count=len(state.held), keys=list(state.held), hint="no agent answered for a retriable reason; re-routed next tick")
+        # Durable from M6 (migration 0005): the reasons on what is held, null on what was held
+        # and no longer is, so a restart carries the same set this process does.
+        await _write_held(target, reasons=held_out, released=held_in)
 
         # Outside the spend block, and on every tick, because it is free unless it has
         # something to fuse. `synthesize` calls a model only when two or more worlds opened
@@ -412,6 +531,12 @@ async def run_tick(
         # and, worst, healed unseen.
         held=len(state.held),
         skipped_upstreams=list(state.skipped_upstreams),
+        # The gate's fields, M6. `writes_pending` is everything waiting for a human across the
+        # ledger, or null when this tick had nothing to propose and did not open the gate.
+        writes_proposed=len(state.writes_proposed),
+        writes_duplicate=state.writes_duplicate,
+        writes_failed=state.writes_failed,
+        writes_pending=state.writes_pending,
         chaos_fired=state.chaos_fired,
         chaos_healed=state.chaos_healed,
         chaos_missed=list(state.chaos_missed),
@@ -438,6 +563,7 @@ async def run_loop(
     tick_fn: TickFn = run_tick,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] | None = None,
+    restore: Callable[[StoreTarget], Awaitable[frozenset[str]]] | None = None,
 ) -> int:
     """Run ticks at a fixed cadence until stopped, halted, or broken. Returns an exit code.
 
@@ -470,10 +596,19 @@ async def run_loop(
 
     spent = 0.0
     tick = 0
-    held: frozenset[str] = frozenset()
     chaos_seen: set[str] = set()
     chaos_injected: set[str] = set()
-    log.info("loop_start", store=target.name, interval_s=interval, spend=spend, ceiling_usd=ceiling if spend else None, max_ticks=max_ticks)
+    # M6: what the previous run was carrying. Read once, and a ledger that cannot be read here
+    # starts the loop with an empty set rather than refusing to start: the first tick will hit
+    # the same ledger and back off properly if it is really down.
+    held: frozenset[str] = frozenset()
+    try:
+        held = await (restore or restore_held)(target)
+        if held:
+            log.info("held_restored", count=len(held), keys=sorted(held), hint="carried from a previous run; re-routed on the first tick they are still open")
+    except Exception as exc:
+        log.warning("held_restore_failed", error=f"{type(exc).__name__}: {exc}", hint="starting with an empty held set")
+    log.info("loop_start", store=target.name, interval_s=interval, spend=spend, ceiling_usd=ceiling if spend else None, max_ticks=max_ticks, held=len(held))
 
     next_at = clock()
     while not stop.is_set():

@@ -47,17 +47,37 @@ resulting shift report. About $3. Cheap, and worth doing before M7 changes which
 
 ## Needs a yes: Supabase migrations that are designed but not run
 
-### 3. Make the held set survive a restart
+### 3. Make the held set survive a restart. **Closed at M6, 2026-09-11.**
 
-**What it is.** At M4 an incident whose agent raised, or whose model call died in transport, is
-*held* and re-routed on the next tick. The held set lives in the loop's memory. Restart the process
-and those incidents come back as plain `ongoing`, which means they are never re-routed and never
-get a work order.
+**What it was.** At M4 an incident whose agent raised, or whose model call died in transport, was
+*held* and re-routed on the next tick, and the held set lived in the loop's memory, so a restart
+turned those incidents back into plain `ongoing` rows nobody re-asked about.
 
-**What it would take.** One nullable column on `incidents` (a `held_reason` text, or a boolean),
-written where `run_tick` computes `state.held`, read where the next tick builds its re-route list.
-Migration `0004`. Small. Wants a rail that a held incident is still held after a fresh process
-starts against the same ledger.
+**What closed it.** Migration `0005`, `incidents.held_reason`, a nullable text: `run_tick` writes
+the reason on every key it holds and nulls it on every key it released, `run_loop` reads the live
+held keys before its first tick, and the rail is `test_the_held_set_survives_a_restart`. It went
+in as `0005` rather than `0004` because the gate's checkpointer tables took `0004`.
+
+### 10. Two processes append to `audit.jsonl`, and daily rotation could collide
+
+**Where it came from.** M6. The loop writes `proposed` and the CLI writes `decided`, each through
+its own `TimedRotatingFileHandler` on the same file. A one-line append is fine in practice and both
+halves read back intact on the first live run. A rotation at midnight fired by the long-lived loop
+while a CLI decision is mid-write, or the reverse, is the unlikely case nobody has exercised.
+
+**What it would take.** Either the CLI writes its `decided` line through the loop (M8's `/ops/gate`
+gets there for free, since the API is the loop's process), or the receipt moves to a table and the
+file becomes a projection of it. Decide at M8, when the second writer becomes the API.
+
+### 11. The gate's interrupt is verified on `restock_feed`, not `create_observation`
+
+**Where it came from.** The plan's M6 verification says "let a tick pause on a `create_observation`."
+That needs `herd_health` to propose one, and `herd_health` is handed nothing because no stage reads
+the Care API: issue 1, the coyote gap. M6 did not absorb it. The mechanics were verified with a
+planted `restock_feed` on `sw_ops_test` (kill mid-pause, restart, reject, approve) and the
+proposal channel was verified live on whatever `water_feed` actually proposed. The care write's
+three checks are covered by the planted suite, not by a live pause. When issue 1 closes, run the
+`create_observation` pause live and strike this item.
 
 ### 4. Make the chaos miss check work across runs
 
@@ -138,7 +158,8 @@ for them lands.
 ## By design, not open. Easy to mistake for gaps
 
 - `herd_health` gets no sensor incidents (decision 5). `chaos` has zero tools and no brief.
-- `GATE_LANDED` is False and no write tool reaches a model until M6.
+- `GATE_LANDED` is True from M6, and that made writes **proposable**, not callable. A model never
+  calls a write tool; a human performs an approved proposal through the gate CLI.
 - Tier 1 does not exist until M7; every model job is Opus.
 - A calm tick costs exactly $0.00, and `synthesize` assembles in code below two worlds.
 - The loop's held set and miss check being in-process is a scoped choice (issues 3 and 4), not an

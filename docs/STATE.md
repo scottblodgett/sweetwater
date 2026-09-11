@@ -4,9 +4,10 @@ The session-start briefing. **Read this one file, then the nested `CLAUDE.md` fo
 
 Refreshed at every milestone boundary, same step as `JOURNEY.md`. If it disagrees with the code, the code wins and this file is stale, say so.
 
-**Last refreshed:** 2026-09-10, at the **M4** boundary. M3 and M5 were built in parallel
-sessions on one `master` and M5 closed first, so the phase numbers are not the commit order.
-`git log` is the authority on what landed when.
+**Last refreshed:** 2026-09-11, at the **M6** boundary. M3 and M5 were built in parallel
+sessions on one `master` and M5 closed first, so the phase numbers are not the commit order;
+the debounce landed between M4 and M6 as its own commit. `git log` is the authority on what
+landed when.
 
 ---
 
@@ -14,11 +15,11 @@ sessions on one `master` and M5 closed first, so the phase numbers are not the c
 
 | | |
 | --- | --- |
-| Done | **M0**: tree, three log streams, `config.py`, `mcp_client.py`, live handshake. **M1**: the free pass, `catalog -> sweep -> triage -> reconcile -> route`, five stages and zero tokens, plus the `sw_ops` store and Alembic. **M2**: the first phase that spends. `evidence.py`, `llm_client.py`, `system_prompts.py`, `workers.py`, the water and feed SOPs, and one agent (`water_feed`) writing a real work order per newly-opened incident. **M3**: the four responders and the supervisor. `allowlists.py` and the five tool slices, `agent_prompts.py` and the five briefs, `workers.fan_out` under one global ceiling, `agent.synthesize` and the shift report, and the four remaining SOPs. **M5**: chaos. The seeded overlay in `sw_ops.chaos_events` applied inside `sweep()`, the guarded animal write path, migration `0002`, the `python -m src.tools.chaos` CLI, and 64 new rails. Built beside M3, not after it. **M4**: the continuous loop. `run_loop` in `executor.py` with a start-to-start cadence, a spend ceiling that halts (exit 4), per-upstream backoff, a held set for unanswered incidents, chaos wired into the tick with a miss check, and a drain-on-interrupt shutdown that works on Windows. `cost_usd` on the tick line. `--no-spend`. |
-| Gate | **306 tests**, `ruff check .` clean, `mypy` clean on 29 files, one alembic head, and every command in root `CLAUDE.md` re-run. M4's live checks: a **30-tick, 30-minute free run** at 60s cadence through a proxy that was killed and restored mid-run (backoff 60s then 120s, three skipped ticks each with a line, recovery on its own, two real log rotations, one real `chaos_event_missed`, SIGBREAK drain, exit 0, $0.00), then a **paid run on the prod ledger** that shipped 26/26 work orders over two fused ticks and **halted itself at the $3 ceiling with exit 4.** |
-| Next | **M6, the gate and validation.** `GATE_LANDED` flips, `interrupt()` plus the Postgres checkpointer, and the held set's durable form if it is wanted. Or the debounce conversation first (see the M4 section), because it changes the bill more than anything M6 or M7 does. |
-| HEAD | The M4 boundary on `master`. A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. |
-| Owed | **The coyote verification is still owed, and it is bigger than it was written up as.** Nothing in the tick reads the Care API: no stage produces an animal finding, so `herd_health` has no discovery path regardless of chaos or the supervisor. That is a new free stage (an animal sweep) plus a triage category, its own scoped item, not three lines. The three lines that *were* owed (`inject_for_tick` in the tick, `chaos_fired` on the line) landed at M4. Also owed, and needing an explicit yes: a column on `incidents` to make the held set survive a restart. |
+| Done | **M0**: tree, three log streams, `config.py`, `mcp_client.py`, live handshake. **M1**: the free pass, `catalog -> sweep -> triage -> reconcile -> route`, five stages and zero tokens, plus the `sw_ops` store and Alembic. **M2**: the first phase that spends. `evidence.py`, `llm_client.py`, `system_prompts.py`, `workers.py`, the water and feed SOPs, and one agent (`water_feed`) writing a real work order per newly-opened incident. **M3**: the four responders and the supervisor. `allowlists.py` and the five tool slices, `agent_prompts.py` and the five briefs, `workers.fan_out` under one global ceiling, `agent.synthesize` and the shift report, and the four remaining SOPs. **M5**: chaos. The seeded overlay in `sw_ops.chaos_events` applied inside `sweep()`, the guarded animal write path, migration `0002`, the `python -m src.tools.chaos` CLI, and 64 new rails. Built beside M3, not after it. **M4**: the continuous loop. `run_loop` in `executor.py` with a start-to-start cadence, a spend ceiling that halts (exit 4), per-upstream backoff, a held set for unanswered incidents, chaos wired into the tick with a miss check, and a drain-on-interrupt shutdown that works on Windows. `cost_usd` on the tick line. `--no-spend`. **The debounce** (2026-09-10, own commit): `INCIDENT_CONFIRM_SWEEPS`, migration `0003`. **M6**: the gate. `proposed_write` on the work order, three code checks on it (`workers.check_write_proposal`), `src/agent/gate.py` (one LangGraph `interrupt()` graph per proposal, checkpointed in Postgres), `python -m src.agent.gate` for the human, `Approval` in `assert_callable`, migrations `0004` (the checkpointer's tables) and `0005` (`incidents.held_reason`), and `GATE_LANDED` flipped last. |
+| Gate | **353 tests**, `ruff check .` clean, `mypy` clean on 30 files, one alembic head at `0005`, and every command in root `CLAUDE.md` re-run including the gate CLI. M6's live checks: two proposals **planted** on `sw_ops_test`, the real loop run and killed with `CTRL_BREAK_EVENT` mid-pause (exit 0, both pauses still listed by a new process, one audit line each, nothing answered by the drain), then reject and approve from the CLI with both `decided` lines landing and a second answer refused by name; then **two paid `--once` ticks on the prod ledger** ($0.17 and $0.32, 3/3 work orders shipped, 0 violations, **0 proposals**; see the M6 section). |
+| Next | **M7, model routing.** Tier 1 on Ollama, the cascade, the real pricing table, one job moved down at a time with a rail and a row in `docs/model-routing.md`. The first row to beat is now roughly $0.16 per work order after the debounce. |
+| HEAD | The M6 boundary on `master`. A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. |
+| Owed | **The coyote verification is still owed, and it is bigger than it was written up as.** Nothing in the tick reads the Care API: no stage produces an animal finding, so `herd_health` has no discovery path regardless of chaos or the supervisor. That is a new free stage (an animal sweep) plus a triage category, its own scoped item, not three lines. The three lines that *were* owed (`inject_for_tick` in the tick, `chaos_fired` on the line) landed at M4. The held column landed at M6 (`0005`). **Still owed from M6:** a live pause on a real proposal. Two paid ticks proposed nothing (the model returned `tool: ""` on two feed-low packets with `restock_feed` in its brief), and the prompt was not steered; the first real `write_paused` is the verification, and `create_observation` specifically waits on the coyote gap (`docs/issues.md` #11). |
 
 Everything still open across phases, with what each would take: `docs/issues.md`. Milestone list and the shape: `docs/architecture.md`. The layout, the milestone order, and which leaf lands when: `docs/Plan.md`, which is the authority the tree matches. What happened and what diverged: `docs/JOURNEY.md`. Phase-close ritual: root `CLAUDE.md`.
 
@@ -30,12 +31,13 @@ Everything still open across phases, with what each would take: `docs/issues.md`
 
 | Module | Holds | Grows |
 | --- | --- | --- |
-| `src/agent/executor.py` | `run_tick` (nine stages, the `spend` flag, `held` / `skip` / chaos inputs, the one `tick.jsonl` line), `run_loop` (cadence, ceiling, shutdown), `Backoff`, the exit codes, `STAGE_UPSTREAM`, `RETRIABLE_VIOLATIONS` | nothing structural. The LangGraph wiring, if it ever earns its place, wraps `run_tick` here |
-| `src/agent/agent.py` | `ROUTES` (all 18 categories to an owner), `AGENTS` / `RESPONDERS`, and the supervisor's own stage: `render_shift_page`, `assemble_shift_report`, `check_shift_report`, `synthesize` | the checkpointer hooks at M6 |
-| `src/agent/workers.py` | the rails (`check`), `to_work_order`, `judge_packet`, `run_agent` for any of the four, `fan_out` under one shared semaphore | nothing structural |
-| `src/tools/allowlists.py` | `DEPLOYED_TOOLS` (all 19), `WRITE_TOOLS` (all 8), `SLICES`, `tools_for` / `bound_tools_for` / `assert_callable`, and `GATE_LANDED` | **M6 flips `GATE_LANDED`, and only M6 may** |
+| `src/agent/executor.py` | `run_tick` (ten stages, the `spend` flag, `held` / `skip` / chaos inputs, the one `tick.jsonl` line), `_gate_step` (the key check, the hand-off to the gate, `writes_*`), `_write_held` / `restore_held`, `run_loop` (cadence, ceiling, shutdown, the held restore), `Backoff`, the exit codes, `STAGE_UPSTREAM`, `RETRIABLE_VIOLATIONS` | nothing structural. The tick is deliberately **not** a graph: one waiting proposal must not stop the watch, and `interrupt()` blocks the graph it is in |
+| `src/agent/gate.py` | **M6.** `GateState`, `build_gate` (ask -> execute, `interrupt()` in `ask`), `propose` / `pending` / `decide`, `perform_write` (the one path that performs an agent's write), `unpaired_audit_ids` (the rail), and the CLI `python -m src.agent.gate list / approve / reject` | `/ops/gate` at M8 wraps `decide` and adds nothing |
+| `src/agent/agent.py` | `ROUTES` (all 18 categories to an owner), `AGENTS` / `RESPONDERS`, and the supervisor's own stage: `render_shift_page`, `assemble_shift_report`, `check_shift_report`, `synthesize` | nothing structural |
+| `src/agent/workers.py` | the rails (`check`, `check_write_proposal` with the three write checks), `to_work_order`, `judge_packet`, `run_agent` for any of the four, `fan_out` under one shared semaphore | nothing structural |
+| `src/tools/allowlists.py` | `DEPLOYED_TOOLS` (all 19), `WRITE_TOOLS` (all 8), `WRITE_TOOL_ARGS` (per-argument kinds, read off the wire 2026-09-11), `SLICES`, `tools_for` / `bound_tools_for` / `proposable_tools_for` / `assert_callable(approval=)`, `Approval`, and `GATE_LANDED` (**True since M6**) | a new deployed tool, which is a conversation with the upstream first |
 | `src/agent/state.py` | `RanchState`, `Finding`, `Incident`, `WorkOrder`, `ShiftReport` | |
-| `src/agent/memory.py` | `sw_ops` only: reconcile, the engine allowlist, and the chaos-event store (`insert_chaos_events`, `active_chaos_events`, `expire_chaos_events`, `chaos_counts_by_status`) | the checkpointer at M6 |
+| `src/agent/memory.py` | `sw_ops` only: reconcile, the engine allowlist, the chaos-event store, the held column (`held_incident_keys`, `record_held`), and the checkpointer (`checkpointer()`, `ThreadedPostgresSaver`, `assert_checkpointer_migrated`, `psycopg_url`) | nothing structural |
 | `src/tools/chaos.py` | the scenario catalog, the pure seeded `plan()`, `inject_for_tick`, `apply_overlay`, the guarded animal write path, and the CLI | more scenarios; nothing structural |
 | `src/tools/evidence.py` | `assemble`, `EvidencePacket.render`, `SOP_FOR_CATEGORY` covering all 18 categories | nothing structural |
 | `src/models/llm_client.py` | `resolve_provider`, `build_client`, `call_tier2`, `ModelResponse`, `THINKING_BUDGET`, `ASSUMED_RATE_USD_PER_M` and `cost_usd` | Tier 1 and the real pricing table at M7, and **not before** |
@@ -63,7 +65,7 @@ Seven other leaves are docstring-only placeholders naming the milestone that fil
 9. **Structured output is a forced tool call, not a "reply in JSON" instruction.** The schema is enforced by the API, and - the reason that actually matters - `finish_reason` stays honest: `tool_use` is a real answer, `max_tokens` is a config bug. With free-form JSON both arrive as text and the distinction is gone.
 10. **Thinking is off for the work-order job, and `reasoning_effort` is an explicit per-call argument.** Turning thinking off is free exactly when the model is not the one classifying, and `triage.py` classified. Per-call rather than ambient so turning it on for one job later does not touch any other call site.
 11. **A work order is never dropped.** A model that never answered, timed out, or got truncated still produces a `WorkOrder` with `status="no_answer"` and the reason in `assessment`. A tick that silently loses an incident is indistinguishable from a ranch with nothing wrong.
-12. **A write tool is declared, withheld from the model, and refused at runtime, all three, until M6 flips `GATE_LANDED`.** A declared-but-withheld tool is a documented seam; a live write tool with no gate is a bug waiting for a demo. `GATE_LANDED` is a boolean in one module and not a config value, because an env var is something somebody sets on a laptop at 11pm to make a demo work.
+12. **A model never performs a write. From M6 it may propose one, and a human performs it.** `GATE_LANDED` (True since 2026-09-11, flipped last, after the pause and the audit stream were proven) made writes proposable, not callable: `assert_callable` still refuses any write without an `Approval`, which only `gate.py` mints after a human resumed the pause with `approve`. Still a boolean in one module and not a config value, because an env var is something somebody sets on a laptop at 11pm to make a demo work. The gate is for agent writes; `CHAOS_ALLOW_WRITES` is a different switch for a different actor and the two are not unified.
 13. **Severity ownership extends to the shift report.** The supervisor may not restate a severity, and `linked` - its only causal claim - is checked in code against the incident keys the page actually carried. This is why `reasoning_effort` stays off even for fusion: the claim is verified rather than trusted.
 14. **`ruff format` is deliberately not in the gate.** `E501` is ignored on purpose so a long line may stay long; the formatter hard-wraps at 140 with no escape hatch, so the two contradict. `ruff check` is the lint gate. Do not add the formatter back.
 15. **The loop's spend ceiling halts; it never skips a tick and carries on.** `SPEND_CEILING_USD`, default $10, no unlimited value, exit **4**. Overshoot is one tick by design. Decided before the loop body was written, because M4 is the first phase where the money runs with nobody watching.
@@ -71,6 +73,14 @@ Seven other leaves are docstring-only placeholders naming the milestone that fil
 17. **A `no_answer` for a retriable reason is held and re-routed; a rail rejection never is.** The held set is in-process until a column on `incidents` gets an explicit yes.
 18. **`cost_usd` is on the tick line from M4 at a stated assumed rate**, one constant in `llm_client.py`. M7 replaces the constant, not the field.
 19. **Shutdown is written for Windows.** No `add_signal_handler`; the Runner's Ctrl+C handling plus `signal.signal` for SIGTERM/SIGBREAK, and the in-flight tick drains.
+20. **The gate is one LangGraph `interrupt()` graph per proposal, checkpointed in Postgres, and the tick is not a graph.** Scott's default was a pending-writes table; the library was chosen because learning it is part of the project's purpose, and per-proposal graphs keep both requirements: the pause outlives the process, and one waiting question does not stop the watch. Code owns the checks, the key, the audit lines, and the duplicate suppression. LangGraph holds the pause and decides nothing.
+21. **The checkpointer is the sync `PostgresSaver` in a worker thread.** The async saver refuses Windows' default event loop, and changing the loop policy for one driver is a change every component and test inherits. Its tables are created by alembic (`0004`) from the library's own `MIGRATIONS` list, never by `setup()`, and `memory.checkpointer()` refuses a database behind the installed library rather than upgrading it silently.
+22. **A proposal is checked in code before it may pause, and none of the three checks blocks the work order.** Shape (`WRITE_TOOL_ARGS`, read off the wire), tool (`proposable_tools_for`), grounding (every id and quantity on the page, numbers compared as numbers). The failed part is stripped and recorded; the prose ships. The incident key is code's and re-checked in `executor` as `write_key_unknown`.
+23. **The same write for the same incident is asked once.** A held incident is re-judged every tick until answered, so `propose()` looks for an open pause on the same key and tool and suppresses the duplicate, with no audit line. Two ticks, one pending write, and a test says so.
+24. **The gate never fails the tick.** A checkpointer that cannot be opened counts `writes_failed`, holds the incident with reason `gate_unavailable`, and the shift page ships. A pause that could not be written after its `proposed` line is completed with `decision="dropped"`, so a dangling `proposed` keeps its one meaning.
+25. **The audit rail is twice, or once while pending.** `gate.unpaired_audit_ids` minus `gate.pending` is empty. Only lines whose `phase` is `proposed` or `decided` count; a console line that mentions an id is commentary.
+26. **The held set is durable** (`0005`, `incidents.held_reason`). Written and cleared by `run_tick`, read by `run_loop` before its first tick. `docs/issues.md` #3 closed.
+27. **The proposal field is described neutrally and the brief paragraph about it is rendered from the allowlist.** None is the usual answer and the description says so. Two paid ticks proposed nothing and the prompt was not steered to make the demo pause; that is the recorded result, not a defect.
 
 ## The boundary rule, sharpened
 
@@ -87,7 +97,7 @@ Learned the hard way on 2026-09-10, in this repo, by doing exactly that and retr
 - **`ANTHROPIC_API_KEY` is still empty, and M4's paid run shipped on Bedrock anyway.** This machine authenticates to **AWS Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`, `us-east-1`, session-scoped temporary credentials), and `resolve_provider()` in `llm_client.py` picks first-party Anthropic when a key exists and Bedrock otherwise. Session credentials expire, so a loop meant to run for days needs a real key. From M4 an expiry mid-run is survivable: `ExpiredTokenException` becomes a `transport_error` no-answer, the incident is **held**, and the `model` upstream backs off; nothing is lost and nothing retries on a cadence against a dead credential.
 - **`anthropic[bedrock]` is a first-order dependency now.** It was absent from `requirements.txt` and arrived transitively through `langchain-anthropic` without the extra, so the first live call failed on `No module named 'botocore'`. `llm_client.py` calls the raw SDK, not `ChatAnthropic`, because `langchain-anthropic` has no Bedrock path and M2 has no tool loop.
 - **Ollama is up** on `localhost:11434`. Not needed until M7.
-- **Supabase**: PostgreSQL 17.6, connects as `postgres`, can create schemas. **`sw_ops` now exists**, migrated to `0003`, with `alembic_version` inside it. The connection also has write access to `farm`, `feed`, `animal_care`, and `sensor`, and must never use it. The engine pins `search_path` to the target schema, and a test fails if any SQL in this repo names a ranch schema.
+- **Supabase**: PostgreSQL 17.6, connects as `postgres`, can create schemas. **`sw_ops` now exists**, migrated to `0005`, with `alembic_version` inside it. The connection also has write access to `farm`, `feed`, `animal_care`, and `sensor`, and must never use it. The engine pins `search_path` to the target schema, and a test fails if any SQL in this repo names a ranch schema.
 - **Local Postgres**: 16.4, database **`farm_systems_test`**, connects as `postgres` with no password. It already holds the upstream project's `farm`, `feed`, `animal_care`, and `sensor` schemas, so **`sw_ops_test` is the only schema this repo may create or drop.** A two-value allowlist in `memory.py` refuses anything else, and the store tests skip rather than fail when no local Postgres answers. This is the exact accident that cost three answer keys in a previous life of the project.
 - Both database URLs in `.env` use the bare `postgresql://` scheme. `config.py` upgrades them to `postgresql+asyncpg://` in a validator, since SQLAlchemy otherwise reaches for psycopg2, which is not installed. Supabase's pooler additionally needs `statement_cache_size=0`, set once in the engine factory with the reason in a comment. Do not clean either of those up.
 - **`SW_OPS_TARGET`** picks the store: unset or `prod` is Supabase, `test` is the local `sw_ops_test`. Prod is the default on purpose, because a default that quietly writes somewhere harmless is a default that ships.
@@ -253,6 +263,57 @@ run's miss to report. Both durable forms are columns, and columns are a Supabase
 **Nothing in the tick reads the Care API.** Chaos's animal events are real writes, and the loop
 fires them when armed and permitted, but no stage produces an animal finding, so `herd_health`
 is handed nothing and the coyote verification cannot run in any tick yet. Its own item.
+
+---
+
+## What M6 actually produces, so a new session does not re-derive it
+
+The tick has **ten** stages. `gate` sits between `fan_out` and `synthesize`, costs no tokens, and
+never fails the tick. A work order may carry `proposed_write` (`{"tool", "args"}`, `tool` empty
+meaning none); `workers.check_write_proposal` runs shape, tool, and grounding on it; a survivor is
+handed to `gate.propose`, which writes the `proposed` audit line, then pauses one LangGraph
+`interrupt()` graph in the checkpointer's tables in `sw_ops`. The tick moves on. The four fields on
+the line are `writes_proposed`, `writes_duplicate`, `writes_failed`, and `writes_pending` (`null`
+when the gate was never opened).
+
+The human half, the same shape as the chaos CLI. `SW_OPS_TARGET` picks the ledger as everywhere:
+
+```bash
+python -m src.agent.gate list                                  # every proposal still waiting, oldest first
+python -m src.agent.gate approve <audit_id> --by scooter       # performs the write over MCP with an Approval; exit 1 if the ranch refused it
+python -m src.agent.gate reject  <audit_id> --by scooter --reason "tank 2 is fine"   # --reason is required
+```
+
+`approve` and `reject` both write the `decided` line with `decision`, `decided_by`, `result`,
+`latency_to_decision_ms`, `reason`, and `upstream`. A second answer on a decided id is refused
+naming the first. `write_paused` in the console stream, with the audit id and the CLI hint, is the
+line that says a human is needed.
+
+**What the live checks measured, 2026-09-11.** Planted on `sw_ops_test`: two pauses, the loop
+killed with `CTRL_BREAK_EVENT` mid-pause, exit 0, both pauses listed by a new process with one
+audit line each, reject then approve landing their `decided` lines (72s and 74s to decision), a
+second answer refused. The pre-flip approve came back `transport_McpUnavailableError` because
+`ranch_session` wrapped the belt's `WriteGateError`; `perform_write` now checks the belt before it
+opens a session. Paid, on the prod ledger after the Supabase migration:
+
+| | attempt 1 | attempt 2 |
+| --- | --- | --- |
+| opened / pending / dismissed | 1 / 12 / 20 | 2 / 17 / 10 |
+| routed | `infrastructure` 1 | `water_feed` 2, both `feed_low` |
+| shipped / violations | 1/1, 0 | 2/2, 0 |
+| cost | $0.17 | $0.32 |
+| `writes_proposed` | 0 | 0 |
+
+**No live tick proposed a write.** `water_feed` had `restock_feed` and `consume_feed` in its brief
+with their arguments and returned `tool: ""` on both feed-low packets. The prompt was not steered.
+The channel is verified (the schema is accepted, three real answers parsed with the field present,
+the fields are on the line); the live pause on a real proposal is the piece still owed, and the
+`create_observation` pause specifically waits on the coyote gap.
+
+**Two things a new session will trip on.** `AsyncPostgresSaver` does not run on Windows' default
+event loop; use `memory.checkpointer()`, which is the sync saver in a thread. And never call
+`saver.setup()`: the checkpointer's tables are alembic's (`0004`), and a newer library is a new
+revision, which `memory.checkpointer()` will tell you by refusing to open.
 
 ---
 

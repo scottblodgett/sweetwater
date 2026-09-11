@@ -722,5 +722,133 @@ that has never been tested; SIGBREAK made it scriptable.
 
 ---
 
-_Candidates still known from the design and not yet paid for: the `num_ctx` shim trap, and why a
-gate must outlive its process._
+## 29. Code before `interrupt()` runs twice
+
+**Pain.** The obvious shape of a human gate node is: write the `proposed` audit line, then
+`interrupt()`. The first spike counted the node's runs across one propose and one resume and got
+two. LangGraph does not freeze a node mid-line; it re-executes the node from its first statement
+when the graph resumes, and `interrupt()` returns the human's answer the second time through.
+Anything above it with a side effect happens twice, and for an audit stream that means a
+`proposed` line per proposal plus one more per decision, which reads as a second proposal nobody
+answered.
+
+**Fix.** The node does nothing but ask. The `proposed` line is written by `propose()` outside the
+graph, before `ainvoke`; the `decided` line is written by the node after the interrupt, which runs
+exactly once per decision.
+
+**Lesson.** An `interrupt()` is a re-entry point, not a pause button. Treat everything above it in
+the node as idempotent or move it out. Measure the run count in the spike before building on it.
+
+**Found:** M6, first spike, on `sw_ops_test`.
+
+---
+
+## 30. The async Postgres checkpointer refuses Windows' default event loop
+
+**Pain.** `AsyncPostgresSaver` is the documented pairing for an async graph. On Windows it raises
+`Psycopg cannot use the 'ProactorEventLoop'` on connect, and the Proactor loop is what asyncpg,
+httpx, and the MCP client in this process already run on. The obvious fix, switching the whole
+process to the selector loop, is a policy change every other component and every test inherits to
+please one driver.
+
+**Fix.** The sync `PostgresSaver`, driven from the async graph through a worker thread:
+`memory.ThreadedPostgresSaver` runs each sync method under `asyncio.to_thread` behind one lock,
+because a psycopg connection is not safe for concurrent use. The sync saver has no loop affinity
+at all, which also sidesteps the "engine bound to the loop it connected on" problem the store
+fixtures already work around. The sync saver's own async methods raise `NotImplementedError`
+rather than doing this, which is how the second spike found out.
+
+**Lesson.** When a library's async variant fights the platform, the sync variant in a thread is
+usually the smaller change than bending the platform to the library. Twenty lines of adapter
+versus a process-wide event loop policy.
+
+**Found:** M6, first and second spikes.
+
+---
+
+## 31. A library that creates its own tables is a migration you did not review
+
+**Pain.** `saver.setup()` creates the checkpointer's four tables at first use, on whichever
+database the process is pointed at, silently. Decision 1 says every Supabase migration is one
+alembic revision Scott has seen in full before it touches prod. Those two facts cannot both hold
+if the loop calls `setup()`.
+
+**Fix.** Migration `0004` reads the library's own `MIGRATIONS` list at migration time (not copied
+into the file, so it cannot drift from the installed version), strips `CONCURRENTLY` because alembic
+runs in a transaction and the tables are empty, and writes the version rows `setup()` would have
+written so a later `setup()` is a no-op. `memory.checkpointer()` then refuses a database whose
+`checkpoint_migrations` is behind the installed library, naming the next alembic revision as the
+fix, and never calls `setup()` itself.
+
+**Lesson.** "The library manages its own schema" means the library runs DDL on prod when it
+feels like it. Run its DDL through your migration path, and turn "the library got upgraded" into
+an error that names the migration rather than a schema change nobody reviewed.
+
+**Found:** M6, reading `setup()`'s source before deciding who runs it.
+
+---
+
+## 32. A rail that counts log lines has to know which lines are receipts
+
+**Pain.** The audit rail is "every `audit_id` appears exactly twice." Its first implementation
+counted every captured log line carrying an `audit_id`, and the first run against real logs
+reported a `dropped` proposal at count three. The extra line was `write_proposal_dropped`, a
+console line that mentions the id so a human can find it, not a receipt. The rail would have
+flagged every `write_paused` line the same way.
+
+**Fix.** The rail counts only lines whose `phase` is `proposed` or `decided`. Commentary may
+mention an id; only the two audit phases are receipts.
+
+**Lesson.** When a field is useful in two streams for two reasons, the check has to name the
+stream it is checking. Otherwise the more you log for humans, the more the rail lies.
+
+**Found:** M6, first run of the rail against real lines.
+
+---
+
+## 33. The first `configure_logging` in a process decides where every test writes
+
+**Pain.** Nine `proposed` lines with a test fixture's `run_id`, and six orphaned `decided` lines,
+in the real `logs/audit.jsonl`, each one a pause nobody would ever answer and a false positive for
+the rail above. `configure_logging` is idempotent, `alembic/env.py` calls it, and the session-scoped
+`migrated_store` fixture runs the migration before any function-scoped fixture can patch the log
+directory. From then on every file handler in the process pointed at the repo's `logs/`, and any
+audit line a test wrote outside `capture_logs` landed in the receipt file.
+
+**Fix.** `migrated_store` runs the migration under a patched `get_settings` whose `log_dir` is a
+temp directory, the autouse `settings` fixture patches the same for every test, and a rail asserts
+that no configured file handler points inside the repo's `logs/`. The leaked lines were removed by
+hand, once, because a fixture is not a receipt.
+
+**Lesson.** Idempotent process-wide configuration is decided by whoever calls it first, and in a
+test suite that is a session-scoped fixture, not the test you are looking at. A receipt file that
+a test can reach is a receipt file that will eventually carry a test.
+
+**Found:** M6, running the audit rail over the real file after the suite.
+
+---
+
+## 34. Measure the library's behaviour in a spike before writing the module around it
+
+**Pain.** Five questions about LangGraph's checkpointer had no reliable answer from memory:
+whether `interrupt()` survives a new connection, whether `config["metadata"]` reaches the
+checkpoint row so a filter can find gate threads, what a resume on a finished thread does, what
+an unknown thread returns, and how many times the node runs. Any one of them wrong would have
+been discovered in the tests, after the module was written around the wrong assumption.
+
+**Fix.** A sixty-line script on `sw_ops_test` answered all five in one run before `gate.py`
+existed: the pause survives a new connection; the metadata filter finds the proposal's
+checkpoints but not the resume's unless the resume passes the same metadata; a second resume is a
+silent no-op returning the final state, so `decide()` has to check for a live interrupt itself;
+an unknown thread is empty `values`, not an error; the node runs twice (#29). The module was
+written to those measurements.
+
+**Lesson.** For a library feature you have not used, the spike is cheaper than the second draft
+of the module. Write down what it measured, because the docstrings that follow are claims and the
+spike is the evidence.
+
+**Found:** M6, before the first line of `gate.py`.
+
+---
+
+_Candidates still known from the design and not yet paid for: the `num_ctx` shim trap._

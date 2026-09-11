@@ -64,7 +64,8 @@ sweetwater/                                lands at
 │   │   ├── CLAUDE.md               M0    the graph, the tick contract, the escalation tiers
 │   │   ├── agent.py                M1    the routing table; the LangGraph supervisor + the five worker factories (M3)
 │   │   ├── workers.py              M2    what a worker's ANSWER must satisfy: the rails, to_work_order, the fan-out
-│   │   ├── executor.py             M1    THE CONTINUOUS LOOP: the tick body; cadence, backoff, shutdown (M4)
+│   │   ├── executor.py             M1    THE CONTINUOUS LOOP: the tick body; cadence, backoff, shutdown (M4); the gate stage (M6)
+│   │   ├── gate.py                 M6    the human gate: one interrupt() graph per proposed write, propose / pending / decide, and the CLI (`python -m src.agent.gate`)
 │   │   ├── state.py                M1    RanchState (LangGraph), Finding, Incident, WorkOrder
 │   │   └── memory.py               M1    sw_ops persistence: incidents; chaos events (M5); checkpointer (M6)
 │   ├── tools/

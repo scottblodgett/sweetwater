@@ -37,11 +37,20 @@ container). Files are **always** JSON regardless of environment.
   "input_tokens":50385,"output_tokens":7954,"cost_usd":1.35,
   "worlds":["infrastructure","water_feed"],"shift_report":"model","shift_report_violations":[],
   "ledger":{"opened":9,"ongoing":8,"resolved":4},
-  "held":0,"skipped_upstreams":[],"chaos_fired":0,"chaos_healed":0,"chaos_missed":[] }
+  "held":0,"skipped_upstreams":[],
+  "writes_proposed":1,"writes_duplicate":0,"writes_failed":0,"writes_pending":1,
+  "chaos_fired":0,"chaos_healed":0,"chaos_missed":[] }
 ```
 
-The M4 shape. A field is added to this line when the stage that produces it exists, not
+The M6 shape. A field is added to this line when the stage that produces it exists, not
 before, so a `null` here always means the stage ran and had nothing to say.
+
+**The gate's four fields, M6.** `writes_proposed` is how many proposals paused for a human this
+tick; `writes_duplicate` is how many were suppressed because the same write for the same incident
+was already waiting; `writes_failed` is how many the gate could not persist (their incidents are
+held with reason `gate_unavailable`); `writes_pending` is everything waiting across the ledger after
+this tick, **or `null` when the tick had nothing to propose and never opened the gate**, because a
+count nobody measured must not read as zero.
 
 **`cost_usd` arrived at M4, not M7 as planned**, because the loop's spend ceiling is
 denominated in dollars and a ceiling in tokens is a multiplication somebody does wrong at 2am.
@@ -131,17 +140,37 @@ retry.
 ## `logs/audit.jsonl` - the receipt, one line per side effect
 
 ```jsonc
-{ "ts":"…","run_id":"…","tick":42,"audit_id":"7f3c…","phase":"proposed",
-  "tool":"create_observation","args":{"animalId":"cow-0777"},
-  "proposed_by":"herd_health","incident_key":"cow-0777:down" }
-{ "ts":"…","run_id":"…","tick":42,"audit_id":"7f3c…","phase":"decided",
-  "decision":"approve","decided_by":"scott","result":"201","latency_to_decision_ms":94000 }
+{ "ts":"…","run_id":"…","tick":42,"audit_id":"2f7c…","phase":"proposed",
+  "tool":"restock_feed","args":{"sku":"alkali-flat-water-2","quantity":16.7},
+  "proposed_by":"water_feed","incident_key":"alkali-flat-water:water_low" }
+{ "ts":"…","run_id":"…","tick":0,"audit_id":"2f7c…","phase":"decided",
+  "decision":"approve","decided_by":"scooter","result":"written","latency_to_decision_ms":73991,
+  "tool":"restock_feed","incident_key":"alkali-flat-water:water_low","reason":"","upstream":"{…first 200 chars of the upstream body…}" }
 ```
+
+**Confirmed against real lines on 2026-09-11**, M6, with two corrections to what this file used
+to promise. The `decided` line repeats `tool` and `incident_key`, because it is written by a
+different process (the CLI) hours later and a reader grepping one id should not have to join two
+lines to know what was decided; and it carries `reason` (required on a reject, empty on an
+approve) and `upstream` (the first 200 characters of what the ranch answered, or the exception).
+Its `tick` is the deciding process's tick, which for the CLI is `0`; the proposing tick is on the
+`proposed` line. `result` is a short code, not a status number: `written`,
+`upstream_error_<category>`, `transport_<ExceptionName>`, `not_executed` on a reject, and
+`checkpointer_unavailable` on a `dropped`.
+
+`decision` takes five values across two writers. From the gate: `approve` and `reject` (a human,
+`decided_by` is their name), and `dropped` (`decided_by:"gate"`, the pause could not be persisted
+after the `proposed` line was written; the incident is held and the write is proposed again).
+From chaos, below: `blocked` and `auto_allowed`.
 
 **Two lines per side effect, correlated by `audit_id`.** Deliberately two rather than
 one: a `proposed` with no matching `decided` is a pause nobody ever answered, and that
 should read as a dangling record you can grep for, not as an absence you have to already
-suspect.
+suspect. From M6 that dangling record is the **normal** shape of an open pause: the gate writes
+`proposed` when the work order proposes and `decided` only when a person answers, and
+`python -m src.agent.gate list` is how a person finds the ones still waiting. A duplicate
+proposal (same incident, same tool, already waiting) writes no line at all, because it is not a
+new side effect.
 
 This is the file that makes "we watch your ranch" a defensible claim rather than a
 pitch.
@@ -228,12 +257,14 @@ job: a finding that reads wrong and a log that cannot say why.
 ```bash
 jq -r '[.tick,(.input_tokens//0),(.output_tokens//0),(.work_orders_shipped//0),(.escalated//0)]|@tsv' logs/tick.jsonl
 jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl
-jq -r '.audit_id' logs/audit.jsonl | sort | uniq -c | awk '$1!=2'   # should be empty
+jq -r '.audit_id' logs/audit.jsonl | sort | uniq -c | awk '$1!=2'   # every id here must be in `python -m src.agent.gate list`
 ```
 
 Cost flat on calm ticks, spiking only where an escalation is logged beside it. Anything
 in the second query is a config bug, not a weak model. Anything in the third is a pause
-nobody answered.
+nobody answered: from M6 that is a legitimate open pause **only if** the same id is in the gate
+CLI's `list`, and anything else in that query is a decision path that skipped its log line
+(`gate.unpaired_audit_ids` is the same check in code, and the rail in `tests/`).
 
 The first query's field names are `input_tokens` and `output_tokens`, matching the model
 API and `agent.jsonl` rather than the `tokens_in` / `tokens_out` this file used to print,
@@ -245,7 +276,19 @@ The loop's own lines, in the main stream rather than `tick.jsonl`: `loop_start`,
 (clean drain, exit 0), `loop_halted` (`reason=spend_ceiling`, exit 4), `loop_unrecoverable`
 (exit 1), `loop_draining` on the first interrupt, `stop_requested` with the signal name,
 `upstream_backoff` / `upstream_recovered` per upstream, `tick_overran`, `incidents_held`,
-`held_rerouted`, and `chaos_event_missed`.
+`held_rerouted`, and `chaos_event_missed`. M6 adds `held_restored` / `held_restore_failed` at loop
+start and `held_not_persisted` when the column could not be written; and the gate's own:
+`write_paused` (the one to watch for, with the audit id and the CLI hint), `write_decided`,
+`write_proposal_duplicate`, `write_proposal_dropped`, `write_key_unknown`, `write_proposal_shape` /
+`write_proposal_ungrounded` when a check fired, and `gate_unavailable` when the checkpointer could
+not be opened at all.
+
+**Two processes append to `audit.jsonl`**: the loop writes `proposed`, the CLI writes `decided`,
+each through its own handler on the same file. A one-line append is atomic enough for a receipt
+on Windows in practice, and both lines were read back intact on the first live run. What is not
+safe is the daily rotation firing in both at once: the loop holds the file open across midnight
+and the CLI is short-lived, so the collision is unlikely but not impossible. The checkpointer
+row is the durable truth and the line is the receipt; `docs/issues.md` carries it.
 
 `logs/*.jsonl` is gitignored; `logs/.gitkeep` is not. A captured run worth keeping goes
 into `docs/` next to the finding it supports.

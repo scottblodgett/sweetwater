@@ -77,7 +77,8 @@ counted by a test. `create_react_agent` receives a **filtered** list.
 | `compliance` | `list_sensors` `read_sensor` `get_sensor_readings` `list_pastures` `list_animals` | AUM stocking, habitat, keep the payments |
 | `chaos` | **empty at M3**, by construction. Its surface is the Care API and the four placement writes, and it arrives with it at M5 | breaks the ranch on purpose |
 
-`*` = write, withheld from the model until M6 lands the gate.
+`*` = write. Never called by a model. From M6 a responder may **propose** one in its work order
+(`proposed_write`), the proposal pauses in the gate, and a human performs it or refuses it.
 
 **There are eight write tools on the deployed surface, not four.** The four marked above are the
 ones inside a responder's slice. The other four - `assign_to_pasture`, `remove_from_pasture`,
@@ -93,25 +94,26 @@ Routing it through the MCP write tools would put it behind the M6 gate for no be
 make the one component whose job is to break things the hardest one to run. `CHAOS_ALLOW_WRITES`
 is its gate, and `CHAOS_ANIMAL_COHORT` is its blast radius.
 
-**How the gate is faked before it exists.** Writes reach the real ranch and `interrupt()` is M6,
-so between M3 and M6 there are two independent boundaries, and they are not redundant:
+**How the gate works (M6).** A model still drives no tool loop; it judges one assembled packet
+in one call. What M6 added is one optional field on the work order, `proposed_write`, naming a
+write tool from the agent's slice with its arguments, and three code checks on it (shape, tool,
+grounding of every id and quantity against the page). A proposal that survives pauses in a
+LangGraph `interrupt()` checkpointed in `sw_ops`, one tiny graph per proposal, so the pause
+outlives the process and the tick does not wait for it. A human resumes it from
+`python -m src.agent.gate` with approve or reject, the write is performed through
+`mcp_client.call_tool` carrying an `Approval`, and both halves leave an `audit.jsonl` line
+correlated by `audit_id`. Three boundaries remain, and they are not redundant:
 
 - `tools_for(agent)` is the **declaration**, writes included, and it is what the count tests
-  assert against. A slice that quietly omits its writes to look safe makes the counts lie about
-  the real surface, and the day the gate lands nobody knows what to widen back.
-- `bound_tools_for(agent)` is what a model may be handed, and it subtracts `WRITE_TOOLS` while
-  `GATE_LANDED` is False. It logs `write_tools_withheld` when it removes something.
-- `assert_callable` is the belt behind the filter, raising `WriteGateError` from inside
-  `mcp_client.call_tool`. The filtered list only protects the code paths that remember to use it;
-  a test fixture or an M4 edit in a hurry are both paths that might not.
+  assert against.
+- `bound_tools_for(agent)` / `proposable_tools_for(agent)` are what a model may be handed and may
+  propose: empty of writes while `GATE_LANDED` is False.
+- `assert_callable(tool, approval=...)` is the belt behind both, raising `WriteGateError` from
+  inside `mcp_client.call_tool` for any write without a human's `Approval`. The filtered lists only
+  protect the paths that remember to use them; a helper written in a hurry is a path that might not.
 
-A declared-but-withheld tool is a documented seam. A live write tool with no gate is a bug waiting
-for a demo. **M6 is the only thing that may set `GATE_LANDED`.**
-
-Nothing at M3 binds tools at all: the workers judge a packet `evidence.py` already assembled, in
-one call, with nothing to navigate. `bound_tools_for` exists now so that the M4 or M6 wiring has
-one obvious place to get its list from rather than reaching for `tools_for` because it was
-shorter.
+**`GATE_LANDED` was flipped by M6 on 2026-09-11 and by nothing else.** It made writes proposable,
+not callable. Detail: `src/agent/CLAUDE.md` (the gate) and `src/tools/CLAUDE.md` (the allowlists).
 
 **The line worth defending: `herd_health` cannot read a sensor, and nothing but
 `water_feed` can touch feed.** That is what makes the supervisor real rather than

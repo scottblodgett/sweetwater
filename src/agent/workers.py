@@ -61,6 +61,7 @@ from src.agent.agent import WATER_FEED
 from src.agent.state import Incident, Severity, WorkOrder
 from src.models.llm_client import ModelResponse, call_tier2
 from src.prompts.system_prompts import WORK_ORDER_SCHEMA, WORK_ORDER_TOOL, WORK_ORDER_TOOL_DESCRIPTION, system_prompt
+from src.tools.allowlists import WRITE_TOOL_ARGS, proposable_tools_for
 from src.tools.evidence import EvidencePacket
 from src.utils.helpers import as_strings, gather_bounded, has_no_real_instruction
 from src.utils.logger import get_logger
@@ -93,18 +94,113 @@ _ALL_CLEAR_HEADLINE = re.compile(r"\b(all clear|no action (required|needed)|noth
 
 BLOCKING_VIOLATIONS = frozenset({"severity_mismatch", "all_clear", "invented_rule", "no_payload", "schema_invalid"})
 
+#: The three return-path checks on a `proposed_write`, M6. **None of them blocks the work
+#: order.** The prose is still a defensible answer about the incident; what fails is the one
+#: part of it that would have changed the ranch, so that part is stripped and its code is
+#: recorded, and the proposal never reaches the gate. Mapped onto the plan's three names:
+#:
+#:   * shape:     `write_shape_invalid`     not `{tool, args}`, an unknown or missing argument,
+#:                                          a bad enum, an unparseable timestamp
+#:   * key:       `write_tool_not_allowed`  a tool outside this agent's proposable set. (The
+#:                                          incident key itself is code's: a proposal lives
+#:                                          inside the work order for one packet and never
+#:                                          names an incident, so the model has no index to
+#:                                          get wrong. `executor` re-checks the code-attached
+#:                                          key against the routed set as `write_key_unknown`.)
+#:   * grounding: `ungrounded_write_arg`    an id or a quantity that is not on the page
+WRITE_VIOLATIONS = frozenset({"write_shape_invalid", "write_tool_not_allowed", "ungrounded_write_arg"})
+
+_NUMBER_TOKEN = re.compile(r"-?\d+(?:\.\d+)?")
+_ISO_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$")
+
 
 def citable_rules(sop_text: str) -> frozenset[str]:
     """Every rule id the packet actually contained. Empty when it carried no SOP."""
     return frozenset(_RULE_HEADING.findall(sop_text))
 
 
-def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket) -> tuple[list[str], dict[str, Any]]:
+def page_numbers(page: str) -> frozenset[float]:
+    """Every number token on the page, as floats, so `12` grounds `12.0` and not `120`."""
+    return frozenset(float(tok) for tok in _NUMBER_TOKEN.findall(page))
+
+
+def check_write_proposal(raw: object, *, agent: str, page: str) -> tuple[list[str], dict[str, Any] | None]:
+    """`(violations, proposal)`. The proposal comes back cleaned, or `None` when there is none
+    or when it failed a check. The order of the checks is the order of the plan's three names,
+    and each one fires on its own so the planted suite can assert WHICH one did.
+
+    `{"tool": "", "args": {}}` is the model saying "nothing", and it is the usual answer. It
+    is not a violation and it produces no proposal.
+    """
+    if raw is None or raw == {} or raw == "":
+        return [], None
+    if not isinstance(raw, dict):
+        return ["write_shape_invalid"], None
+    tool = str(raw.get("tool") or "").strip()
+    args = raw.get("args")
+    if not tool and not args:
+        return [], None
+    if not tool or not isinstance(args, dict):
+        return ["write_shape_invalid"], None
+
+    if tool not in proposable_tools_for(agent):
+        return ["write_tool_not_allowed"], None
+
+    spec = {a.name: a for a in WRITE_TOOL_ARGS.get(tool, ())}
+    unknown = sorted(set(args) - set(spec))
+    missing = sorted(name for name, a in spec.items() if a.required and name not in args)
+    if unknown or missing:
+        log.warning("write_proposal_shape", agent=agent, tool=tool, unknown_args=unknown, missing_args=missing)
+        return ["write_shape_invalid"], None
+
+    cleaned: dict[str, Any] = {}
+    ungrounded: list[str] = []
+    numbers = page_numbers(page)
+    lowered = page.lower()
+    for name, value in args.items():
+        arg = spec[name]
+        if arg.kind == "text":
+            cleaned[name] = str(value)
+            continue
+        if arg.kind == "enum":
+            if str(value) not in arg.choices:
+                log.warning("write_proposal_shape", agent=agent, tool=tool, arg=name, value=value, choices=list(arg.choices))
+                return ["write_shape_invalid"], None
+            cleaned[name] = str(value)
+            continue
+        if arg.kind == "timestamp":
+            if not isinstance(value, str) or not _ISO_TIMESTAMP.match(value):
+                log.warning("write_proposal_shape", agent=agent, tool=tool, arg=name, value=value, expected="ISO 8601")
+                return ["write_shape_invalid"], None
+            cleaned[name] = value
+            continue
+        if arg.kind == "number":
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                return ["write_shape_invalid"], None
+            if float(value) not in numbers:
+                ungrounded.append(name)
+            cleaned[name] = value
+            continue
+        # id: a string that appears on the page, case-insensitively, because the page spells a
+        # sensor id the way the map does and a model may not preserve case.
+        text = str(value).strip()
+        if not text or text.lower() not in lowered:
+            ungrounded.append(name)
+        cleaned[name] = text
+
+    if ungrounded:
+        log.warning("write_proposal_ungrounded", agent=agent, tool=tool, args=ungrounded, hint="an id or a quantity the page never printed; the proposal is dropped and the prose ships")
+        return ["ungrounded_write_arg"], None
+    return [], {"tool": tool, "args": cleaned}
+
+
+def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket, agent: str = WATER_FEED) -> tuple[list[str], dict[str, Any]]:
     """`(violations, cleaned)`. The only place a model's answer is judged.
 
     Returns the violations rather than raising them, and returns the cleaned fields even
     when it is rejecting, because a rejected work order is a record worth keeping.
     """
+    write_violations, proposal = check_write_proposal(payload.get("proposed_write"), agent=agent, page=packet.render())
     cleaned: dict[str, Any] = {
         "headline": str(payload.get("headline") or "").strip(),
         "assessment": str(payload.get("assessment") or "").strip(),
@@ -114,6 +210,7 @@ def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket
         "escalate_reason": str(payload.get("escalate_reason") or "").strip(),
         "unknowns": as_strings(payload.get("unknowns")),
         "severity_echo": str(payload.get("severity_echo") or "").strip().lower(),
+        "proposed_write": proposal,
     }
 
     violations: list[str] = []
@@ -135,6 +232,7 @@ def check(payload: dict[str, Any], *, incident: Incident, packet: EvidencePacket
 
     if invented:
         log.warning("invented_rule_ids", incident=incident.key, cited=cleaned["rules_cited"], citable=sorted(citable), sop=packet.sop_name)
+    violations.extend(write_violations)
     return violations, cleaned
 
 
@@ -167,7 +265,7 @@ def to_work_order(*, packet: EvidencePacket, agent: str, response: ModelResponse
         log.error("work_order_no_answer", incident=incident.key, agent=agent, finish_reason=response.finish_reason, detail=detail)
         return WorkOrder(incident_key=incident.key, agent=agent, severity=severity, status="no_answer", violations=("no_payload", response.finish_reason), assessment=detail, **receipt)
 
-    violations, cleaned = check(response.payload, incident=incident, packet=packet)
+    violations, cleaned = check(response.payload, incident=incident, packet=packet, agent=agent)
     blocking = [v for v in violations if v in BLOCKING_VIOLATIONS]
     if violations:
         log.warning("work_order_violations", incident=incident.key, agent=agent, violations=violations, blocking=bool(blocking))
@@ -331,4 +429,4 @@ async def fan_out(
     return orders
 
 
-__all__ = ["AGENT_CONCURRENCY", "BLOCKING_VIOLATIONS", "MAX_OUTPUT_TOKENS", "check", "citable_rules", "fan_out", "judge_packet", "run_agent", "run_water_feed", "to_work_order"]
+__all__ = ["AGENT_CONCURRENCY", "BLOCKING_VIOLATIONS", "MAX_OUTPUT_TOKENS", "WRITE_VIOLATIONS", "check", "check_write_proposal", "citable_rules", "fan_out", "judge_packet", "page_numbers", "run_agent", "run_water_feed", "to_work_order"]

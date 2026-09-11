@@ -18,6 +18,14 @@ reaching the wire.
 The store tests skip rather than fail when no local Postgres answers, for the same
 plane-must-pass reason. That is the one conditional skip here.
 
+**And never let a test write the real log files.** `configure_logging` is idempotent, so the first
+call in the process decides where every file handler points for the rest of it, and
+`alembic/env.py` calls it from the session-scoped `migrated_store` fixture before any function-scoped
+patch runs. Found at M6 as fixture `proposed` lines in the real `logs/audit.jsonl`, each one a pause
+nobody would ever answer. Both `migrated_store` and the autouse `settings` fixture point `log_dir` at a
+temp directory now, and a rail in the gate section asserts that every file handler the suite configured
+points outside the repo's `logs/`.
+
 ## And never point a test at a model
 
 Same rule, other expensive mistake. `conftest.no_model_calls` is **autouse** and replaces
@@ -36,7 +44,10 @@ tree matches it. Suites inside a file are separated by a section banner, not by 
 the file, because one rail per module produced seven modules by the end of M1 and the plan
 had drifted from the tree without a single gate noticing. `conftest.py` holds the
 `sw_ops_test` fixtures. A new rail goes in the file that owns its subject; if that reads
-wrong, the argument is with the plan, not with the layout.
+wrong, the argument is with the plan, not with the layout. The gate (M6) is section 8 of
+`test_agent.py`: the audit rail, the planted-bad-proposal suite, the pause on Postgres across two
+connections, the tick-level rails, the held column, and the CLI. The allowlist half of it, the
+seam after the flip, stays in `test_tools.py` with the slice counts.
 
 ## What each rail is actually protecting
 
@@ -58,8 +69,17 @@ pass is the failure mode this file exists to prevent.
 | only `sw_ops_test` is creatable or droppable | the answer-key accident cannot happen twice | the engine allowlist grew a third value |
 | chaos replay under a fixed seed | chaos is a **fixture**, not a flake | a `random` call bypassed the seeded instance |
 | a Tier-1 all-clear on a flagged incident is rejected | the cheap model cannot produce the worst possible output | **do not relax this one.** Escalate instead. |
-| gate survives a process restart | a pause is a gate, not a delay | the checkpointer is not actually writing |
-| every `audit_id` appears twice | no side effect is proposed without a recorded decision | a decision path skipped its log line |
+| a paused write is listed by a **new connection** with the same `audit_id` | a pause is a gate, not a delay: it lives in the checkpointer's tables, not in the process | the checkpointer is not actually writing, or `pending()` stopped confirming the interrupt |
+| every `audit_id` appears twice, **or once while its pause is still open** | no side effect is proposed without a recorded decision, and an open pause is visible as a dangling record | a decision path skipped its log line, or a console line grew an `audit_id` and got counted as a receipt |
+| a bad proposal fires **exactly** the check that owns it | shape, key, and grounding are three rails with three owners | two rails swapped jobs, or one started firing on the other's input. **Assert the code, never "any violation"** |
+| a proposal that failed a check is stripped and the prose still ships | the write is the only part of a work order that can hurt the ranch; the answer about the incident is still an answer | a write check joined `BLOCKING_VIOLATIONS`, or the proposal reached `_gate_step` with its violation attached |
+| two ticks, one pending write | the same write for the same incident is asked once | `propose()` stopped looking for an existing pause, or the filter lost `tool` |
+| the gate being unreachable holds the incident and the tick still reports | the gate never fails the tick | `_gate_step` let an exception out, or stopped holding what it could not pause |
+| a proposal the checkpointer could not persist is `dropped`, not dangled | a `proposed` with no `decided` has exactly one meaning | the `dropped` line was removed as redundant |
+| a second answer on a decided pause is refused | a resume on a finished thread is a silent no-op that looks like a decision | `decide()` stopped checking for a live interrupt first |
+| the held set survives a restart | `docs/issues.md` #3 | `record_held` stopped being called, or `run_loop` stopped restoring |
+| the checkpointer refuses a database behind the installed library | a library upgrade is an alembic revision Scott has seen, never a silent `setup()` on prod | somebody called `setup()` |
+| every file handler the suite configured points outside `logs/` | a receipt file never carries a test | `alembic/env.py` or a CLI configured logging before the log directory was patched |
 | `finish_reason` present on every model call | "too weak" stays distinguishable from "never answered" | a call path bypassed `llm_client.py` |
 | `finish_reason` logged **before** validation | a rejected answer still leaves a receipt | the log line moved below the parse |
 | the recorded Opus answer passes every rail | the rails are calibrated against real prose | a prompt change made the answer worse, or a rail got stricter without meaning to |

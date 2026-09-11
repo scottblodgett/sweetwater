@@ -27,7 +27,7 @@ flat tool names**, no namespaces. Consequences that are easy to get wrong:
   bogus path to `MCP_URL` does not produce a failure. Test failure paths with an
   unreachable host instead.
 
-## allowlists.py, and the gate that does not exist yet
+## allowlists.py: declared, proposable, performable
 
 The counts are the spec: **7 / 6 / 5 / 5 / 0**, and a test asserts each one exactly, so a
 slice cannot grow by one tool without a deliberate edit to a number a human reads. If a
@@ -39,25 +39,41 @@ exclusivity would mean editing a frozen server. `herd_health` has no sensor read
 which is design and not omission: it cannot see a sensor, so no sensor incident can route to
 it (`src/agent/agent.py`).
 
-**No write tool reaches a model before M6.** Three functions, and none of them is redundant:
+**A model never calls a write tool. From M6 it may propose one, and a human performs it.** Four
+names, and none of them is redundant:
 
 - `tools_for(agent)` is the **declaration**. It includes the writes, so the counts the tests
-  assert are the real counts. A declared-but-withheld tool is a documented seam.
-- `bound_tools_for(agent)` is what a model may be handed, and it subtracts `WRITE_TOOLS`
-  while `GATE_LANDED` is False. It logs `write_tools_withheld` when it removes something.
-- `assert_callable(tool)` is the belt behind that filter, raising `WriteGateError` from inside
-  `mcp_client.call_tool`. **This one covers us, not the model.** The next person to write a
-  helper that calls `consume_feed` directly is not a model.
+  assert are the real counts.
+- `bound_tools_for(agent)` is what a model may be handed and `proposable_tools_for(agent)` is
+  what it may name in `WorkOrder.proposed_write`: the slice restricted to `WRITE_TOOLS`. Both are
+  empty of writes while `GATE_LANDED` is False, and `bound_tools_for` logs
+  `write_tools_withheld` when it subtracts something.
+- `WRITE_TOOL_ARGS` is the argument contract per write tool, **read off the wire** from
+  `tools/list` on 2026-09-11 the way `DEPLOYED_TOOLS` was. Each argument has a kind: `id` and
+  `number` are graded against the evidence page (grounding), `enum` and `timestamp` against
+  themselves (shape), `text` is not graded. The brief renders this table into words and
+  `workers.check_write_proposal` validates against the same table, so what the model is told and
+  what code checks cannot drift.
+- `assert_callable(tool, approval=...)` is the belt, raising `WriteGateError` from inside
+  `mcp_client.call_tool`. **This one covers us, not the model**, before and after the flip: a write
+  needs an `Approval`, which only `src/agent/gate.py` mints after a human resumed the pause with
+  `approve`. The next person to write a helper that calls `consume_feed` directly is not a model,
+  and after M6 they are also not a human who said yes.
 
 `WRITE_TOOLS` names all **eight** deployed writes, not the four that appear in a slice. The
 four placement tools are in no slice and belong in none: moving an animal between places is a
 crew decision, not an inference from a sensor. They are named anyway, because the unassigned
 ones are exactly what somebody reaches for later while chasing one read out of the same API.
 
-**`GATE_LANDED` is a boolean in one module, and M6 is the only thing that may flip it.** Not a
-config value: an env var is something somebody sets on a laptop at 11pm to make a demo work.
-The gate is `interrupt()` plus the LangGraph Postgres checkpointer, so a pause outlives the
-process.
+**`GATE_LANDED` is a boolean in one module. M6 flipped it on 2026-09-11, last, after the pause
+and the audit stream were proven on `sw_ops_test`.** Not a config value: an env var is something
+somebody sets on a laptop at 11pm to make a demo work. Flipping it made writes proposable, not
+callable. The gate itself, `interrupt()` plus the LangGraph Postgres checkpointer, is described in
+`src/agent/CLAUDE.md`.
+
+**The gate is for agent writes. `CHAOS_ALLOW_WRITES` is a different switch for a different
+actor**, and the two are not unified: chaos is supposed to mutate the ranch when armed, and an
+agent is never supposed to without a human.
 
 `DEPLOYED_TOOLS` is all 19, **read off the wire and never copied out of the upstream's
 source.** `--handshake` compares the live list against it and fails on drift in either

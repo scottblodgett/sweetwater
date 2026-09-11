@@ -33,8 +33,8 @@ reconcile into sw_ops  free   pending / opened / ongoing / resolved / dismissed
 route new incidents    free
   -> evidence          SPEND  HTTP, not tokens: ~4 extra calls per newly-opened incident
   -> fan out           SPEND  only newly-opened incidents reach a model
+gate on writes         free   a proposed write pauses for a human; the tick does not. M6, see below
 synthesize             maybe  one call, or zero. Runs on every tick, see below
-gate on writes         pause  M6
 ```
 
 Five stages cost zero tokens. That is not an optimization, it is the architecture: 160
@@ -110,8 +110,11 @@ re-routed. `held` is the fix: keys whose order carried `agent_raised`, `worker_r
 `transport_error` (or whose spend stage was skipped) come out of the tick, go onto the line,
 and are re-routed on the next tick until answered or resolved. **A rail rejection is never
 held**, and neither is `max_tokens`: one is a sampler, the other buys the same truncation twice.
-In-process only for now; the durable version is a column on `incidents`, which is a Supabase
-migration and Scott's explicit yes.
+**Durable from M6** (migration `0005`, `incidents.held_reason`): `run_tick` writes the reason on
+every key it holds and nulls it on every key it released, and `run_loop` reads the live held keys
+before its first tick, so a restart re-routes what the previous run could not get answered. A
+ledger that cannot be read at start begins with an empty set and says so, rather than refusing
+to start; the first tick will hit the same ledger and back off properly if it is really down.
 
 **Shutdown drains, on Windows.** `loop.add_signal_handler` raises `NotImplementedError` there
 and SIGTERM never arrives, so neither is relied on. Python 3.11's `asyncio.Runner` turns the
@@ -165,6 +168,23 @@ finding. Reject it and escalate. Do not relax this to make a test pass.
 | `no_rule_cited` | no | quality, not safety. A truck going to the right tank without a citation is still going to the right tank |
 | `sensor_not_named` | no | prose that never names the sensor behind the number |
 
+Three more on `proposed_write`, M6, in `workers.py::check_write_proposal`. **None of them blocks
+the work order**: the prose is still a defensible answer about the incident, so it ships, and the
+one part of it that would have changed the ranch is stripped and its code recorded. A proposal
+that failed a check never reaches the gate. They are the plan's shape / key / grounding, fired one
+at a time in that order, so the planted suite can assert which one:
+
+| Rail | Reads |
+| --- | --- |
+| `write_shape_invalid` | not `{tool, args}`; an argument the tool does not take or a required one missing; a value outside an enum; a timestamp that is not ISO 8601 (`allowlists.WRITE_TOOL_ARGS`, read off the wire) |
+| `write_tool_not_allowed` | the tool against `proposable_tools_for(agent)`: this agent's slice, restricted to `WRITE_TOOLS`, and empty while `GATE_LANDED` is False |
+| `ungrounded_write_arg` | every `id` and `number` argument against the rendered page. Number tokens compared as numbers, so `16.7` grounds `16.7` and not `6.7`; free-text `note` and `reason` are not graded because they cannot be on the page verbatim |
+
+The key itself is code's: a proposal is born inside the work order for one packet and never names
+an incident, so the model has no index to get wrong. `executor._gate_step` re-checks the
+code-attached key against the routed set anyway, as `write_key_unknown`, because "cannot happen"
+is what a future path that builds a work order by hand will say too.
+
 Two more on the shift report, in `agent.py::check_shift_report`. Both block, and blocking here
 means the code-assembled page ships instead:
 
@@ -203,7 +223,52 @@ recorded rather than smoothed over.
 `memory.py` owns `sw_ops` and nothing else. Incidents are keyed on **sensor plus
 category**, so the same tank going dry twice in one afternoon is one incident.
 
-## Gates outlive the process
+## The gate (M6): a proposed write pauses for a human, and the pause outlives the process
 
-`interrupt()` plus the LangGraph Postgres checkpointer, so a pause survives a restart.
-A human gate that evaporates when the process dies is not a gate, it is a delay.
+A human gate that evaporates when the process dies is not a gate, it is a delay. `gate.py`:
+
+    propose  ->  [ ask: interrupt() ]  ...hours, a restart...  ->  [ execute ]  ->  END
+
+**One tiny LangGraph per proposal, checkpointed in Postgres.** `ask` calls `interrupt()` with the
+proposal and stops; the LangGraph Postgres checkpointer writes the paused graph into `sw_ops`
+(migration `0004`, the library's own four tables); the tick moves on. A human runs
+`python -m src.agent.gate list | approve | reject`, which resumes that one graph with
+`Command(resume=...)`, and `execute` performs the write or records the refusal and writes the
+`decided` audit line. The whole tick is **not** a graph and does not pause: one waiting proposal
+must not stop the ranch being watched, and `interrupt()` blocks the graph it is in, which is why
+the graph is per proposal and the loop stays hand-wired.
+
+**Code owns everything but the pause.** The three checks run before a proposal gets near the gate,
+the incident key is code's, the audit lines are code's, the duplicate suppression is code's, and
+the decision is a person's. LangGraph holds the pause and decides nothing.
+
+Rules enforced in `gate.py` and `executor._gate_step`, each because a spike or a rail found the
+other way wrong:
+
+- **Nothing with a side effect runs before `interrupt()`.** A node restarts from its first line on
+  resume; the first spike measured `ask` running twice. The `proposed` line is written by
+  `propose()` outside the graph.
+- **The same write for the same incident is asked once.** A held incident is re-judged every tick
+  until answered, so each judgment could propose the same restock again. `propose()` looks for a
+  pause on the same `incident_key` and `tool` first and suppresses the duplicate, with no audit
+  line, because it is not a new side effect. The tick line counts it as `writes_duplicate`.
+- **The gate never fails the tick.** A checkpointer that cannot be opened counts each proposal as
+  `writes_failed`, holds the incident with reason `gate_unavailable` so the next tick re-proposes
+  it, and the shift page still ships. A proposal whose pause could not be written after its
+  `proposed` line was logged is completed with `decision="dropped"`, `decided_by="gate"`, so a
+  dangling `proposed` keeps its one meaning: a pause nobody has answered.
+- **A write is performed by exactly one path.** `perform_write` checks `assert_callable` with the
+  `Approval` before it opens an MCP session, because `ranch_session` wraps anything raised inside
+  it as an outage and a refused write is not an outage. The result is written whatever the wire
+  did, and never retried.
+- **A second answer is refused, not absorbed.** A resume on a finished thread is a silent no-op in
+  LangGraph that looks exactly like a decision, so `decide()` checks the thread is actually sitting
+  on an interrupt first and raises `GateError` naming the earlier decision.
+- **The checkpointer is the sync saver in a worker thread**, `memory.ThreadedPostgresSaver`,
+  because psycopg's async connection refuses Windows' default event loop and the sync saver's own
+  async methods raise `NotImplementedError`. One lock, because a psycopg connection is not safe for
+  concurrent use. Its tables are created by alembic from the library's own `MIGRATIONS` list, never
+  by `setup()`, and `memory.checkpointer()` refuses a database that is behind the installed library.
+
+The audit rail: every `audit_id` in `audit.jsonl` appears exactly twice, **or once while its pause
+is still open**, and `gate.unpaired_audit_ids` minus `gate.pending` must be empty.

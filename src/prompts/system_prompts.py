@@ -32,6 +32,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.prompts.agent_prompts import MANDATES
+from src.tools.allowlists import WRITE_TOOL_ARGS, WriteArg, proposable_tools_for
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -112,8 +113,29 @@ WORK_ORDER_SCHEMA: dict[str, Any] = {
             "maxItems": 4,
             "description": "Facts you needed and the packet does not contain. This is the place for anything you would otherwise have estimated. Only the ones that would change what the crew does; a list of everything a sensor cannot see is not useful. Empty is fine when the page was genuinely enough.",
         },
+        # M6. A proposal, never an action: it pauses for a human, who may say no. Described
+        # neutrally on purpose. "The usual answer is none" is the truth about this ranch, and a
+        # description that leaned the other way would manufacture proposals for the demo and
+        # bill a human's attention for each one. The tools an agent may name, with their
+        # arguments, are rendered into its brief from `allowlists.WRITE_TOOL_ARGS`.
+        "proposed_write": {
+            "type": "object",
+            "properties": {
+                "tool": {
+                    "type": "string",
+                    "description": "Empty string when no change to the ranch's own records is warranted, which is the usual answer. Otherwise the exact name of one write tool listed in your brief. Anything you name here is a proposal a person approves or rejects before it runs; it is not something you have done.",
+                },
+                "args": {
+                    "type": "object",
+                    "description": "The tool's arguments, exactly as your brief names them, and empty when tool is empty. Every id and every quantity must appear on the page; a value that is not on the page is rejected in code.",
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["tool", "args"],
+            "additionalProperties": False,
+        },
     },
-    "required": ["severity_echo", "headline", "assessment", "actions", "rules_cited", "escalate", "escalate_reason", "unknowns"],
+    "required": ["severity_echo", "headline", "assessment", "actions", "rules_cited", "escalate", "escalate_reason", "unknowns", "proposed_write"],
     "additionalProperties": False,
 }
 
@@ -187,4 +209,32 @@ def system_prompt(agent: str, *, mandate: str = "") -> str:
     patch = mandate or MANDATES.get(agent, "")
     if not patch:
         log.error("no_mandate_for_agent", agent=agent, known=sorted(MANDATES), hint="add the brief in src/prompts/agent_prompts.py; the inherited rules alone are not a brief")
-    return f"{INHERITED_RULES}\n\n{patch}".strip()
+    return f"{INHERITED_RULES}\n\n{patch}\n\n{write_proposal_brief(agent)}".strip()
+
+
+def write_proposal_brief(agent: str) -> str:
+    """The one paragraph about `proposed_write`, rendered from the allowlist rather than written.
+
+    Empty while `GATE_LANDED` is False, and empty for an agent with no write in its slice, so a
+    brief never mentions a tool a proposal check would reject. Rendered from
+    `WRITE_TOOL_ARGS` rather than hand-written so the names the model is told and the names
+    `workers.check` validates cannot drift apart. Deliberately neutral: it says what the field
+    is for and that none is the usual answer, and it does not suggest that proposing one is
+    good work. Steering a model toward a write so the demo pauses is how a gate becomes a
+    formality.
+    """
+    tools = sorted(proposable_tools_for(agent))
+    if not tools:
+        return ""
+    lines = [
+        "THE `proposed_write` FIELD. Almost always leave `tool` as an empty string with empty `args`. Use it only when a change to the ranch's own records is the correct next step and the standing orders support it, and know that it is a proposal: a person reads it and approves or rejects it before anything runs, and the crew's actions in your list do not depend on it. If you do name one, every id and every quantity must be on this page exactly, and an argument that is not on the page is rejected in code. The tools you may name, and nothing else:",
+    ]
+    for tool in tools:
+        args = ", ".join(_describe_arg(a) for a in WRITE_TOOL_ARGS.get(tool, ()))
+        lines.append(f"- {tool}({args})")
+    return "\n".join(lines)
+
+
+def _describe_arg(arg: WriteArg) -> str:
+    kind = {"id": "an id printed on this page", "number": "a number printed on this page", "enum": "one of " + "/".join(arg.choices), "timestamp": "ISO 8601 timestamp", "text": "free text"}[arg.kind]
+    return f"{arg.name}: {kind}{'' if arg.required else ', optional'}"

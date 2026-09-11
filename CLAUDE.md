@@ -114,7 +114,15 @@ ruff check .                 # the whole lint gate; `ruff format` is not used, s
 mypy src main.py
 
 python -m src.tools.chaos status   # M5. Also plan / inject / expire / restore, recipe in docs/STATE.md
+python -m src.agent.gate list      # M6. The writes agents proposed and nobody has answered. Also approve <audit_id> --by NAME, reject <audit_id> --by NAME --reason TEXT
 ```
+
+**A model never performs a write. From M6 it may propose one, and a human answers.** A work order
+may carry `proposed_write`; three code checks (shape, tool, grounding against the page) decide
+whether it pauses at all; the pause is a LangGraph `interrupt()` checkpointed in `sw_ops`, so it
+outlives the process and the loop keeps ticking; `python -m src.agent.gate` is where a person says
+yes or no, and both halves land in `logs/audit.jsonl` under one `audit_id`. The gate is for agent
+writes. `CHAOS_ALLOW_WRITES` is a different switch for a different actor and stays one.
 
 An unbuilt mode exits **3** with a `not_implemented` line naming the milestone that
 brings it, rather than failing as if it were broken. The loop's other exits: **0** is a clean

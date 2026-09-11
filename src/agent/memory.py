@@ -18,6 +18,7 @@ goes wrong:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
@@ -25,6 +26,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import ChannelVersions, Checkpoint, CheckpointMetadata, CheckpointTuple
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.base import BasePostgresSaver
+from psycopg import Connection, errors
+from psycopg.rows import dict_row
 from sqlalchemy import BigInteger, Column, DateTime, Float, Index, Integer, MetaData, Table, Text, select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -123,6 +130,11 @@ incidents = Table(
     Column("tick_last_seen", Integer, nullable=False, server_default="0"),
     Column("run_id", Text, nullable=False, server_default=""),
     Column("owner", Text, nullable=True),
+    # Migration 0005. Non-null means the loop is carrying this incident unanswered and will
+    # re-route it; the value says why (`agent_raised`, `transport_error`, ...). Written and
+    # cleared by `run_tick`, read by `run_loop` before its first tick, so a restart does not
+    # turn a held incident back into a plain `ongoing` one nobody re-asks about.
+    Column("held_reason", Text, nullable=True),
     # At most one live incident per `sensor:category`, enforced by the database rather
     # than by this module remembering to check. Partial rather than plain unique so the
     # history survives: a tank that dries out in March and again in July is two rows and
@@ -436,6 +448,119 @@ async def counts_by_status(session: AsyncSession) -> dict[IncidentStatus, int]:
     """Used by the live verification and, at M8, by the read API's summary endpoint."""
     rows = (await session.execute(select(incidents.c.status, text("count(*)")).group_by(incidents.c.status))).all()
     return {str(status): int(n) for status, n in rows}  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# the held set, durable from M6 (migration 0005)
+# --------------------------------------------------------------------------- #
+async def held_incident_keys(session: AsyncSession) -> frozenset[str]:
+    """Every live incident the loop was carrying unanswered when it last wrote. Read once, by
+    `run_loop` before its first tick, so a restart re-routes what the previous run could not
+    get answered instead of leaving it `ongoing` forever."""
+    rows = (await session.execute(select(incidents.c.incident_key).where(incidents.c.held_reason.is_not(None), incidents.c.status.in_(LIVE_STATUSES)))).scalars().all()
+    return frozenset(str(k) for k in rows)
+
+
+async def record_held(session: AsyncSession, *, reasons: dict[str, str], released: Iterable[str]) -> None:
+    """Write this tick's held set: a reason on every key still held, null on every key that
+    was held and is not any more. Only live rows are touched; a resolved incident keeps a
+    stale reason as history, which is harmless because `held_incident_keys` reads live rows only."""
+    freed = sorted(set(released) - set(reasons))
+    if freed:
+        await session.execute(incidents.update().where(incidents.c.incident_key.in_(freed), incidents.c.status.in_(LIVE_STATUSES)).values(held_reason=None))
+    for key, reason in sorted(reasons.items()):
+        await session.execute(incidents.update().where(incidents.c.incident_key == key, incidents.c.status.in_(LIVE_STATUSES)).values(held_reason=reason))
+    await session.commit()
+
+
+# --------------------------------------------------------------------------- #
+# the checkpointer, M6: where a paused write waits for a human
+# --------------------------------------------------------------------------- #
+class CheckpointerNotMigratedError(RuntimeError):
+    """The database is behind the installed LangGraph checkpointer, or has no tables for it."""
+
+
+class ThreadedPostgresSaver(PostgresSaver):
+    """The library's **sync** Postgres saver, driven from an async graph through one worker thread.
+
+    Why not `AsyncPostgresSaver`: psycopg's async connection refuses Windows' default
+    `ProactorEventLoop`, which is the loop everything else in this process (asyncpg, httpx, the
+    MCP client) already runs on. Switching the process to the selector loop to please one
+    driver is a policy change every other component and every test would inherit. The sync
+    saver has no loop affinity at all, so the async half is written here: each async method
+    runs its sync twin in a thread, and one lock serializes them because a psycopg connection
+    is not safe for concurrent use. `langgraph-checkpoint`'s `PostgresSaver` raises
+    `NotImplementedError` from its async methods rather than doing this itself, which is how
+    the first spike found out.
+    """
+
+    def __init__(self, conn: Connection[Any]) -> None:
+        super().__init__(conn)
+        self._lock = asyncio.Lock()
+
+    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        async with self._lock:
+            return await asyncio.to_thread(self.get_tuple, config)
+
+    async def alist(self, config: RunnableConfig | None, *, filter: dict[str, Any] | None = None, before: RunnableConfig | None = None, limit: int | None = None) -> AsyncIterator[CheckpointTuple]:
+        async with self._lock:
+            items = await asyncio.to_thread(lambda: list(self.list(config, filter=filter, before=before, limit=limit)))
+        for item in items:
+            yield item
+
+    async def aput(self, config: RunnableConfig, checkpoint: Checkpoint, metadata: CheckpointMetadata, new_versions: ChannelVersions) -> RunnableConfig:
+        async with self._lock:
+            return await asyncio.to_thread(self.put, config, checkpoint, metadata, new_versions)
+
+    async def aput_writes(self, config: RunnableConfig, writes: Sequence[tuple[str, Any]], task_id: str, task_path: str = "") -> None:
+        async with self._lock:
+            await asyncio.to_thread(self.put_writes, config, writes, task_id, task_path)
+
+
+def psycopg_url(url: str) -> str:
+    """`config.py` upgrades both URLs to `postgresql+asyncpg://` for SQLAlchemy; psycopg wants
+    the bare scheme back. One place, so nobody strips it by hand twice."""
+    return url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def assert_checkpointer_migrated(conn: Connection[Any]) -> None:
+    """Refuse a database whose checkpointer tables are missing or behind the installed library.
+
+    The alternative is `saver.setup()`, which would create or upgrade the tables silently on
+    whichever database the process is pointed at. Decision 1 in `docs/STATE.md` says a Supabase
+    migration is an alembic revision Scott has seen. So migration 0004 runs the library's own
+    DDL, and this check is what turns a newer library into an error naming the next revision
+    rather than an unreviewed schema change on prod.
+    """
+    expected = len(BasePostgresSaver.MIGRATIONS) - 1
+    try:
+        row = conn.execute("SELECT max(v) AS v FROM checkpoint_migrations").fetchone()
+    except errors.UndefinedTable as exc:
+        raise CheckpointerNotMigratedError("no checkpoint_migrations table: run `alembic upgrade head` (migration 0004 creates the checkpointer's tables) before starting a loop or the gate CLI") from exc
+    applied = int((row or {}).get("v") or -1)
+    if applied < expected:
+        raise CheckpointerNotMigratedError(f"checkpoint_migrations is at v{applied} and the installed langgraph-checkpoint-postgres expects v{expected}. The library was upgraded; write the next alembic revision from its MIGRATIONS list rather than calling setup() against this database")
+
+
+@asynccontextmanager
+async def checkpointer(target: StoreTarget) -> AsyncIterator[ThreadedPostgresSaver]:
+    """One checkpointer for one gate action, on the same schema the ledger uses.
+
+    `search_path` is set on the session the same way the asyncpg engine pins it, so the
+    checkpointer's unqualified table names can only land in the schema this repo owns.
+    `prepare_threshold=0` for the same reason `statement_cache_size=0` is on the engine: the
+    Supabase pooler and prepared statements do not mix. Opened per use rather than held,
+    because a tick proposes a write on a minority of ticks and a connection held open between
+    them is one Supabase counts against us for nothing.
+    """
+    schema = assert_agent_schema(target.schema)
+    conn = await asyncio.to_thread(lambda: Connection.connect(psycopg_url(target.url), autocommit=True, prepare_threshold=0, row_factory=dict_row))
+    try:
+        await asyncio.to_thread(conn.execute, f'SET search_path TO "{schema}"')
+        await asyncio.to_thread(assert_checkpointer_migrated, conn)
+        yield ThreadedPostgresSaver(conn)
+    finally:
+        await asyncio.to_thread(conn.close)
 
 
 # --------------------------------------------------------------------------- #

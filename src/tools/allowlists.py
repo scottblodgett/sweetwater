@@ -10,21 +10,23 @@ can touch feed. That is what makes the supervisor real rather than decorative.
 A test counts each set rather than asserting its contents, so widening a slice to fix a
 symptom fails loudly. See `tests/CLAUDE.md` for what that rail proves.
 
-## Declared is not the same as handed over, and that gap is the M3-to-M6 seam
+## Declared, proposable, and performable are three different things
 
-Eight of the 19 tools mutate the ranch. Four of them sit in a slice, and until M6 lands
-`interrupt()` there is no human gate in front of them. So this module keeps two answers to
-two different questions:
+Eight of the 19 tools mutate the ranch. Four of them sit in a slice. This module keeps three
+answers to three different questions, and M6 is what made the third one real:
 
   * `tools_for(agent)` is the **declaration**. It includes the writes, because the counts
     the tests assert have to be the real counts. A slice that quietly omits its write tools
     is a slice whose test proves nothing about the shape that eventually ships.
-  * `bound_tools_for(agent)` is **what a model may actually be handed**. It subtracts every
-    write while `GATE_LANDED` is False.
+  * `bound_tools_for(agent)` and `proposable_tools_for(agent)` are **what a model may be
+    handed, and what it may propose**. Both are empty of writes while `GATE_LANDED` is False.
+    From M6 a model never calls a write; it may *propose* one in its work order
+    (`WorkOrder.proposed_write`), and the proposal pauses in `src/agent/gate.py` for a human.
+  * `assert_callable(tool, approval=...)` is **who may perform**. A write needs an `Approval`,
+    minted only by the gate after a human resumed the pause with `approve`.
 
-A declared-but-withheld tool is a documented seam. A live write tool with no gate is a bug
-waiting for a demo. `GATE_LANDED` is one name in one place, and flipping it is M6's job,
-not a knob to reach for when something else is failing.
+`GATE_LANDED` is one name in one place. M6 flipped it, after the pause and the audit stream
+were proven, and it is not a knob to reach for when something else is failing.
 
 ## The four tools nobody gets, and why they are named here anyway
 
@@ -47,6 +49,9 @@ is the sync mechanism; the import would only have been a shorter way to write it
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
 
 from src.utils.logger import get_logger
 
@@ -107,7 +112,83 @@ WRITE_TOOLS: frozenset[str] = frozenset(
 #: LangGraph Postgres checkpointer, so a pause outlives the process; see
 #: `src/agent/CLAUDE.md`. A boolean rather than a config value on purpose - an env var is a
 #: thing somebody can set on a laptop at 11pm to make a demo work.
-GATE_LANDED = False
+#:
+#: Flipping it does NOT make a write callable. It makes a write **proposable**: the tool
+#: appears in `bound_tools_for`, a work order may carry a `proposed_write`, and the proposal
+#: pauses in `src/agent/gate.py` until a human answers. `assert_callable` still refuses a write
+#: that arrives without an `Approval`, so the runtime belt covers us after the flip exactly as
+#: it did before it.
+GATE_LANDED = True  # flipped 2026-09-11, M6, after the pause and the audit stream were proven on sw_ops_test
+
+
+@dataclass(frozen=True)
+class Approval:
+    """A human's yes, carried to the one call that performs the write.
+
+    Minted only by `src/agent/gate.py` after a resumed `interrupt()` came back `approve`. It
+    is the thing `assert_callable` asks for on a write once `GATE_LANDED` is True, so the
+    path that performs a mutation cannot be reached by a helper that merely knows the tool's
+    name. Not a token to be checked against a store: the checkpointer already holds the
+    decision, and this object exists to make the call site say who decided.
+    """
+
+    audit_id: str
+    decided_by: str
+
+
+#: How a write tool's arguments are validated before a proposal may pause for a human, and
+#: how each is rendered into a brief. **Read off the wire on 2026-09-11** from `tools/list`
+#: on the deployed MCP server, the same way `DEPLOYED_TOOLS` was; never from the upstream's
+#: source. The kinds decide which return-path check applies to a value the model wrote:
+#:
+#:   * `id`        must appear on the evidence page the model was handed (grounding)
+#:   * `number`    must appear on the page as a number token (grounding)
+#:   * `enum`      must be one of the listed values (shape)
+#:   * `timestamp` must parse as ISO 8601 (shape)
+#:   * `text`      free prose a human reads; not graded
+#:
+#: A `reason` or a `note` cannot be on the page verbatim, so grading it as an id would reject
+#: every honest proposal. An id or a quantity that is NOT on the page is the invented number
+#: the whole design exists to keep out of the ranch's records.
+WriteArgKind = Literal["id", "number", "enum", "timestamp", "text"]
+
+
+@dataclass(frozen=True)
+class WriteArg:
+    name: str
+    kind: WriteArgKind
+    required: bool = True
+    choices: tuple[str, ...] = ()
+
+
+WRITE_TOOL_ARGS: dict[str, tuple[WriteArg, ...]] = {
+    "consume_feed": (WriteArg("sku", "id"), WriteArg("quantity", "number"), WriteArg("reason", "text", required=False)),
+    "restock_feed": (WriteArg("sku", "id"), WriteArg("quantity", "number"), WriteArg("reason", "text", required=False)),
+    "create_observation": (
+        WriteArg("animalId", "id"),
+        WriteArg("type", "enum", choices=("behavior", "appetite", "mobility", "appearance", "injury", "general")),
+        WriteArg("severity", "enum", choices=("low", "medium", "high")),
+        WriteArg("note", "text"),
+        WriteArg("observedAt", "timestamp"),
+    ),
+    "update_care_task": (WriteArg("taskId", "id"), WriteArg("status", "enum", required=False, choices=("pending", "completed", "cancelled")), WriteArg("notes", "text", required=False)),
+    "assign_to_pasture": (WriteArg("pastureId", "id"), WriteArg("animalId", "id")),
+    "remove_from_pasture": (WriteArg("pastureId", "id"), WriteArg("animalId", "id")),
+    "assign_to_shelter": (WriteArg("shelterId", "id"), WriteArg("animalId", "id")),
+    "remove_from_shelter": (WriteArg("shelterId", "id"), WriteArg("animalId", "id")),
+}
+
+
+def proposable_tools_for(agent: str) -> frozenset[str]:
+    """The writes this agent may propose: its declared slice, restricted to the write set.
+
+    Empty for every agent while `GATE_LANDED` is False, because a proposal with nowhere to
+    pause is a write with no gate. The brief renders this set, and `workers.check` rejects a
+    proposal naming anything outside it as `write_tool_not_allowed`.
+    """
+    if not GATE_LANDED:
+        return frozenset()
+    return tools_for(agent) & WRITE_TOOLS
 
 #: Three agents legitimately share the sensor read tools, and that is not carved up here.
 #: The isolation that matters is the brief, the SOP set, and which sensor types each agent
@@ -180,7 +261,7 @@ def bound_tools_for(agent: str) -> frozenset[str]:
         return declared
     withheld = declared & WRITE_TOOLS
     if withheld:
-        log.info("write_tools_withheld", agent=agent, withheld=sorted(withheld), arrives_in="M6", reason="no interrupt() gate exists yet")
+        log.info("write_tools_withheld", agent=agent, withheld=sorted(withheld), reason="GATE_LANDED is False: no interrupt() gate to pause a proposal in")
     return declared - WRITE_TOOLS
 
 
@@ -189,16 +270,22 @@ def is_allowed(agent: str, tool: str) -> bool:
     return tool in tools_for(agent)
 
 
-def assert_callable(tool: str, *, agent: str = "") -> None:
-    """The runtime belt behind the withheld list. Raises on an ungated write.
+def assert_callable(tool: str, *, agent: str = "", approval: Approval | None = None) -> None:
+    """The runtime belt behind the withheld list. Raises on an ungated or unapproved write.
 
     `bound_tools_for` is the boundary for the model; this is the boundary for us. The two
     are not redundant: the filtered list only protects the paths that remember to use it,
     and a test fixture, a debugging script, or an M4 edit in a hurry are all paths that
     might not. Called from `mcp_client.call_tool`, which every MCP invocation goes through.
+
+    From M6 a write needs an `Approval`, which only `src/agent/gate.py` mints and only after a
+    human resumed the pause with `approve`. The flip of `GATE_LANDED` changed what a model may
+    propose; it did not change who may perform.
     """
     if tool in WRITE_TOOLS and not GATE_LANDED:
-        raise WriteGateError(f"{tool} writes to the live ranch and the human gate arrives in M6. Set allowlists.GATE_LANDED only when interrupt() and the checkpointer are actually in place.")
+        raise WriteGateError(f"{tool} writes to the live ranch and GATE_LANDED is False. Set allowlists.GATE_LANDED only when interrupt() and the checkpointer are actually in place (M6).")
+    if tool in WRITE_TOOLS and approval is None:
+        raise WriteGateError(f"{tool} writes to the live ranch and needs a human's Approval. Propose it through the gate (src/agent/gate.py) and perform it from an approved decision; nothing else may call a write tool directly.")
     if agent and tool not in tools_for(agent):
         raise WriteGateError(f"{agent} has no {tool} in its slice. Widen the slice deliberately in src/tools/allowlists.py, or call the tool as the agent that owns it.")
 
@@ -209,9 +296,13 @@ __all__ = [
     "SLICES",
     "UNASSIGNED_TOOLS",
     "WRITE_TOOLS",
+    "WRITE_TOOL_ARGS",
+    "Approval",
+    "WriteArg",
     "WriteGateError",
     "assert_callable",
     "bound_tools_for",
     "is_allowed",
+    "proposable_tools_for",
     "tools_for",
 ]

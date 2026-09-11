@@ -1019,3 +1019,172 @@ nothing that is supposed to be found is lost; the chaos end-to-end rail in `test
 shows the fault pending on its first sweep and opened on its second, which is the honest shape.
 
 Gate after the change: **310 tests**, `ruff` clean, `mypy` clean, one alembic head at `0003`.
+
+
+## M6 - The gate and validation
+
+**Landed 2026-09-11.** A work order may now carry a `proposed_write`; three code checks decide
+whether it pauses at all; the pause is a LangGraph `interrupt()` checkpointed in `sw_ops` so it
+outlives the process; a human answers from `python -m src.agent.gate`; both halves land in
+`audit.jsonl` under one `audit_id`; `GATE_LANDED` flipped last. Migrations `0004` (the
+checkpointer's tables) and `0005` (`incidents.held_reason`, closing `docs/issues.md` #3) ran on
+Supabase with an explicit yes. **353 tests**, `ruff` and `mypy` clean, one alembic head at `0005`.
+
+### The three questions, answered before code
+
+**The mechanism.** Scott's default was a pending-writes table: same durability, no graph runtime.
+The first answer agreed with it and argued the case: `interrupt()` resumes a computation, and there
+is nothing to resume, because the work order is one forced tool call already complete when the
+proposal arrives. Scott's reply was the one that mattered: part of the project's purpose is to learn
+LangGraph, and through M5 nothing in `src/` imported it. So the design became **one tiny graph per
+proposal** (`ask` interrupts, `execute` performs) rather than the whole tick as a graph, which
+keeps both requirements: the pause outlives the process, and one waiting question does not stop
+the ranch being watched. The tick stays hand-wired. Code owns the checks, the key, the audit lines,
+and the duplicate suppression; LangGraph holds the pause and decides nothing.
+
+**The verification.** "Let a tick pause on a `create_observation`" cannot run: `herd_health` is
+handed nothing because no stage reads the Care API, and M6 did not absorb that (issue 1, now also
+issue 11). The mechanics were verified with a planted `restock_feed` on `sw_ops_test`, and the
+channel live on whatever `water_feed` actually proposed, which was nothing. Below.
+
+**The migration.** Both, asked once with the full DDL, run after the tests were green.
+
+### What was found before the first line
+
+**There was no proposal channel.** `WORK_ORDER_SCHEMA` had no write field, `WorkOrder` had none,
+and `Finding.proposed_write` was set by nothing. The plan's M6 assumed a model could already say
+"someone should restock this," and it could not. The field was added to the schema as a required
+object with `tool` and `args`, `tool` empty meaning none, and described neutrally: none is the
+usual answer, it is a proposal a person approves, and every id and quantity must be on the page.
+The brief's paragraph about it is **rendered from the allowlist**, so the names the model is told
+and the names `check` validates cannot drift.
+
+**The write tools' argument shapes were not written down anywhere in this repo.** Read off the wire
+from `tools/list` on 2026-09-11, the way `DEPLOYED_TOOLS` was, into `WRITE_TOOL_ARGS` with a kind
+per argument: `id` and `number` graded against the page, `enum` and `timestamp` against
+themselves, `text` not graded because a `reason` cannot be on the page verbatim.
+
+### The spike, and what it measured
+
+Sixty lines against `sw_ops_test` before `gate.py` existed (`docs/cookbook.md` #34). The pause
+survives a new connection. `config["metadata"]` reaches the checkpoint row, so a filter finds gate
+threads, but only on the run that passed it, so the resume passes it too. A resume on a finished
+thread is a silent no-op that returns the final state, which is why `decide()` checks for a live
+interrupt itself and refuses by name. An unknown thread is empty `values`. And **the node runs
+twice**: everything above `interrupt()` re-executes on resume, so the `proposed` line is written
+outside the graph (#29).
+
+Two platform facts the spike also paid for. `AsyncPostgresSaver` refuses Windows' default event
+loop, so the checkpointer is the sync saver in a worker thread behind one lock
+(`memory.ThreadedPostgresSaver`, #30), and the sync saver's own async methods raise
+`NotImplementedError`. And `setup()` would create the checkpointer's tables silently on whichever
+database the loop was pointed at, which decision 1 forbids, so migration `0004` runs the library's
+own `MIGRATIONS` list through alembic and `memory.checkpointer()` refuses a database behind the
+installed library (#31).
+
+### The rails, in the order they were written
+
+The audit rail first: every `audit_id` appears exactly twice, **or once while its pause is still
+open**, and `gate.unpaired_audit_ids` minus `gate.pending` is empty. The plan's wording ("exactly
+twice") could not survive a visible open pause, and a visible open pause is the requirement.
+
+Then the planted-bad-proposal suite: twelve `water_feed` fixtures and five `herd_health` fixtures,
+each asserting **which** code fires, alone. `write_shape_invalid` (not an object, no args, unknown
+or missing argument, string quantity, bad enum, bad timestamp), `write_tool_not_allowed` (a read
+tool, another agent's write, a write in no slice), `ungrounded_write_arg` (an id the page never
+printed, a quantity it never printed, and `6.7` against a page that says `16.7`, because the grader
+compares number tokens, not substrings). A proposal wrong in two ways names the first wrong thing
+only. **None of the three blocks the work order**: the prose ships, the proposal is stripped, the
+code is recorded. `write_key_unknown` is checked in `executor._gate_step` against the routed set,
+with the checkpointer patched to explode so the rail proves the gate was never opened.
+
+Then the pause on Postgres: propose on one connection, list on another; the same write for the
+same incident asked once (and a different tool for the same incident asked separately); reject then
+approve with the `Approval` object arriving at the injected performer; a write that dies on the wire
+still gets its `decided` line and is not retried; a proposal the checkpointer cannot persist is
+`dropped` with a paired line rather than dangled; two ticks, one pending write; the gate
+unreachable holds the incident with reason `gate_unavailable` and the tick still reports; the held
+set survives a restart; the loop starts from what the previous run was carrying; the CLI lists,
+approves, rejects, and refuses a second answer.
+
+### The planted live check, on `sw_ops_test`
+
+Two proposals planted through `propose()`. `python main.py --no-spend` at a 15s cadence, two ticks,
+then `CTRL_BREAK_EVENT` from a driver process while asleep in the cadence: `stop_requested
+SIGBREAK`, `loop_stopped`, **exit 0**, and both pauses still listed by a new process with one audit
+line each. The drain answered nothing. Then `reject` with a reason (`not_executed`, 72s to
+decision) and `approve` before the flip, which came back **`transport_McpUnavailableError`**: the
+belt held, but `ranch_session` had wrapped the `WriteGateError` as an outage. `perform_write` now
+checks `assert_callable` before it opens a session, so a refused write reads as a refusal. A
+second `approve` on the rejected id was refused naming the earlier decision. `list` then read
+zero. `unpaired_audit_ids` over the real file, after the test-fixture lines below were removed,
+read empty.
+
+### The two paid attempts, prod ledger, chaos off, after the migration
+
+| | attempt 1 | attempt 2 |
+| --- | --- | --- |
+| opened / pending / dismissed | 1 / 12 / 20 | 2 / 17 / 10 |
+| routed | `infrastructure` 1 | `water_feed` 2, both `feed_low`, SOP `feed.md` |
+| work orders | 1/1 shipped, 0 violations | 2/2 shipped, 0 violations, both `escalate` |
+| tokens, cost | 6,929 + 834, $0.17 | 10,588 + 2,127, $0.32 |
+| `writes_proposed` | 0 | 0 |
+
+**No live tick proposed a write, and that is the recorded result.** Attempt 1 routed to an agent
+with no write in its slice, so its brief carried no proposal paragraph at all. Attempt 2 handed
+`water_feed` two feed-low incidents with `restock_feed` and `consume_feed` named in its brief with
+their arguments, and it returned `tool: ""` on both, with no shape, tool, or grounding violation
+logged. The prompt was not steered to change that. What the attempts did verify: the schema with
+the new required field is accepted by the API, three real answers parsed with the field present,
+the `writes_*` fields are on the line (`writes_pending: null`, the gate was never opened), and the
+per-order cost is unchanged from M3 at roughly $0.16 to $0.17. The live pause with a real
+proposal remains to be seen the first time an agent judges a packet where the standing orders
+call for a restock, and `write_paused` in the console stream is the line that will say so.
+
+### Divergences from the plan
+
+- **Per-proposal graphs, not the tick as a graph, and not a pending table.** Above.
+- **The audit rail's wording changed** from "exactly twice" to "twice, or once while pending."
+- **`create_observation` was not the verified write.** Issue 11.
+- **`gate.py` is a new leaf** the plan's tree did not have; the tree names it now.
+- **The held column is `0005`, not the `0004` issue 3 predicted**, because the checkpointer took `0004`.
+- **The `decided` line carries more than `docs/logging.md` promised**: `tool`, `incident_key`,
+  `reason`, `upstream`, and `result` is a code rather than a status number. Corrected there.
+
+### Six defects M6 caught in itself
+
+**1. The audit rail counted commentary as receipts.** `write_proposal_dropped` mentions the
+audit id; the rail read a `dropped` proposal at count three. Only `phase` in `{proposed, decided}`
+counts now (#32).
+
+**2. Nine fixture lines in the real `logs/audit.jsonl`.** `alembic/env.py` calls
+`configure_logging()`, the session-scoped `migrated_store` runs before any function-scoped patch,
+and `configure_logging` is idempotent, so every file handler in the test process pointed at the
+repo's `logs/` and any audit line written outside `capture_logs` landed in the receipt file. Both
+fixtures point `log_dir` at a temp directory now, a rail asserts no configured handler points inside
+`logs/`, and the leaked lines (nine `proposed`, six orphaned `decided`, two more on the next run)
+were removed by hand (#33).
+
+**3. The belt's refusal read as an MCP outage.** Above; `assert_callable` before `ranch_session`.
+
+**4. The loop's held restore broke a loop rail.** `run_loop` reading the ledger at start hit the
+loop rails' deliberately bogus URL and ate a two-second timeout. The restore is resolved at call
+time and the test module stubs it; the two rails about restoring pass their own.
+
+**5. `writes_pending: 0` would have lied.** A tick with nothing to propose never opens the gate, so
+it cannot count what is waiting. The field is `None` on that tick and the line says so.
+
+**6. `_Cli` and an unused import** left over from a first draft of the CLI, caught by ruff.
+
+### Work not asked for, and why each one is here
+
+| Added | Why it was not optional |
+| --- | --- |
+| `proposed_write` on the schema and `WorkOrder` | there was no channel; nothing could be gated |
+| `WRITE_TOOL_ARGS` and the rendered brief paragraph | the shape check needs a contract and the model needs the same names |
+| `Approval`, and `assert_callable(approval=...)` | otherwise the flip turned the runtime belt off for the next helper script |
+| `ThreadedPostgresSaver` | the async saver does not run on this platform's event loop |
+| migration `0004` from the library's own DDL, and the "behind the library" refusal | `setup()` is an unreviewed prod migration |
+| `write_key_unknown` in `_gate_step` | the key is code's, and "cannot happen" is what a hand-built work order will say |
+| the test-suite log directory fix | a receipt file must never carry a test |
+| `src/agent/gate.py` as a leaf | the tree had no home for a gate and its CLI |

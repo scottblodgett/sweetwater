@@ -27,6 +27,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ import httpx
 import pytest
 import respx
 import structlog
+from langgraph.checkpoint.postgres.base import BasePostgresSaver
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,31 +60,56 @@ from src.agent.agent import (
     synthesize,
     unrouted_categories,
 )
-from src.agent.executor import EXIT_OK, EXIT_SPEND_CEILING, EXIT_UNRECOVERABLE, Backoff, run_loop, run_tick, summarize
+from src.agent.executor import (
+    EXIT_OK,
+    EXIT_SPEND_CEILING,
+    EXIT_UNRECOVERABLE,
+    Backoff,
+    _gate_step,
+    restore_held,
+    run_loop,
+    run_tick,
+    summarize,
+)
+from src.agent.gate import GateError, WriteProposal, build_gate, decide, pending, propose, unpaired_audit_ids
+from src.agent.gate import main as gate_main
 from src.agent.memory import (
     ALLOWED_SCHEMAS,
     RANCH_SCHEMAS,
     SCHEMA,
     SCHEMA_TEST,
+    CheckpointerNotMigratedError,
     SchemaGuardError,
     StoreTarget,
     assert_agent_schema,
     assert_droppable_schema,
     assert_local_test_url,
     build_engine,
+    checkpointer,
     connect_args_for,
     counts_by_status,
     incidents,
     metadata,
     open_incidents,
+    psycopg_url,
     reconcile,
+    store_session,
 )
 from src.agent.state import Finding, Incident, RanchState, WorkOrder
-from src.agent.workers import AGENT_CONCURRENCY, citable_rules, fan_out, run_agent, run_water_feed, to_work_order
+from src.agent.workers import (
+    AGENT_CONCURRENCY,
+    BLOCKING_VIOLATIONS,
+    check_write_proposal,
+    citable_rules,
+    fan_out,
+    run_agent,
+    run_water_feed,
+    to_work_order,
+)
 from src.models.llm_client import ASSUMED_RATE_USD_PER_M, THINKING_BUDGET, ModelResponse, call_tier2, cost_usd, resolve_provider
 from src.prompts.agent_prompts import MANDATES, SUPERVISOR_MANDATE
 from src.prompts.system_prompts import SHIFT_REPORT_SCHEMA, WORK_ORDER_SCHEMA, system_prompt
-from src.tools.allowlists import DEPLOYED_TOOLS
+from src.tools.allowlists import DEPLOYED_TOOLS, GATE_LANDED, WRITE_TOOL_ARGS, WRITE_TOOLS, Approval
 from src.tools.chaos import KIND_ANIMAL, KIND_SENSOR, ChaosEvent
 from src.tools.evidence import EvidencePacket, HistoryPoint, PastureContext, SiblingReading
 from src.tools.mcp_client import RanchMap, SensorRef, flatten_exception, parse_ranch_map
@@ -123,6 +150,19 @@ def _fake_upstreams(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _fresh_warn_once() -> None:
     agent.reset_warn_once()
+
+
+@pytest.fixture(autouse=True)
+def _no_held_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From M6 `run_loop` reads the held set off the ledger before its first tick. The loop rails
+    hand it a fake tick and a bogus URL on purpose, so the default restore is stubbed to empty
+    here; the one rail about restoring passes its own `restore=`, and the tick-level rail calls
+    `restore_held` directly against `sw_ops_test`."""
+
+    async def _empty(_target: object) -> frozenset[str]:
+        return frozenset()
+
+    monkeypatch.setattr("src.agent.executor.restore_held", _empty)
 
 
 @pytest.fixture
@@ -2225,3 +2265,487 @@ async def test_chaos_disarmed_means_the_tick_never_touches_the_chaos_store(monke
     serve(respx.mock, CALM)
     state = await run_tick(tick=1, store=target, now=T0, spend=False)
     assert state.error is None and state.chaos_fired == 0
+
+
+# =========================================================================== #
+# 8. the gate: a proposed write pauses for a human, and the pause outlives the process. M6.
+# =========================================================================== #
+# Three layers, in the order they were built. The audit rail first, because it is what catches
+# a decision path that skipped its log line. Then the planted-bad-proposal suite, one fixture
+# per failure mode, asserting WHICH check fires: a suite that passes because any rail objected
+# lets two rails swap jobs without anyone noticing. Then the pause itself, on `sw_ops_test`
+# through the real LangGraph checkpointer, across two connections standing in for a restart.
+#
+# Nothing here reaches a model or the ranch. `perform` is injected, so an approve exercises the
+# whole graph and the `Approval` handoff without a write on the wire.
+
+
+@pytest.fixture
+def gate_landed() -> None:
+    """These rails were written before the flip with `GATE_LANDED` patched True. The flip landed
+    on 2026-09-11, so the fixture now only asserts the real state; `GATE_LANDED` is read at call
+    time everywhere it matters, which is what made the pre-flip patch (and this) the whole switch."""
+    assert GATE_LANDED
+
+
+@pytest.fixture
+async def gate_target(target: StoreTarget) -> StoreTarget:
+    """`target`, plus empty checkpointer tables, so one test's pause is not the next test's pending list."""
+    engine = build_engine(target.url, schema=SCHEMA_TEST)
+    try:
+        async with engine.begin() as conn:
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                await conn.execute(text(f"truncate table {table}"))
+    finally:
+        await engine.dispose()
+    return target
+
+
+async def _perform_ok(tool: str, args: dict[str, object], approval: Approval) -> tuple[str, str]:
+    return "written", json.dumps({"tool": tool, "args": args, "by": approval.decided_by})
+
+
+def _proposal(key: str = "alkali-flat-water:water_low", *, tool: str = "restock_feed", args: dict[str, object] | None = None, tick: int = 1) -> WriteProposal:
+    return WriteProposal(incident_key=key, agent="water_feed", tool=tool, args=args or {"sku": "alkali-flat-water-2", "quantity": 16.7}, tick=tick, run_id="run-1")
+
+
+def _audit(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [entry for entry in logs if entry.get("phase") in ("proposed", "decided")]
+
+
+# --- the rail ------------------------------------------------------------------------------ #
+def test_the_audit_rail_flags_anything_that_is_not_exactly_a_pair() -> None:
+    """Every `audit_id` appears twice, or once while its pause is still open. The helper
+    returns the exceptions; the rail is that its keys minus the pending ids is empty."""
+    lines = [{"audit_id": "a", "phase": "proposed"}, {"audit_id": "a", "phase": "decided"}, {"audit_id": "b", "phase": "proposed"}, {"audit_id": "c", "phase": "proposed"}, {"audit_id": "c", "phase": "decided"}, {"audit_id": "c", "phase": "decided"}, {"event": "tick"}]
+    assert unpaired_audit_ids(lines) == {"b": 1, "c": 3}
+    assert set(unpaired_audit_ids(lines)) - {"b"} == {"c"}, "b is a pause nobody answered yet; c is a decision logged twice"
+
+
+# --- the planted-bad-proposal suite ---------------------------------------------------------- #
+PAGE = TANK_PACKET.render()
+
+BAD_PROPOSALS: list[tuple[str, object, str]] = [
+    ("not an object at all", "restock_feed", "write_shape_invalid"),
+    ("a tool with no args", {"tool": "restock_feed"}, "write_shape_invalid"),
+    ("args that are not an object", {"tool": "restock_feed", "args": "sku=alkali-flat-water-2"}, "write_shape_invalid"),
+    ("an argument the tool does not take", {"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 16.7, "urgency": "high"}}, "write_shape_invalid"),
+    ("a required argument missing", {"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2"}}, "write_shape_invalid"),
+    ("a quantity written as a string", {"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": "16.7"}}, "write_shape_invalid"),
+    ("a read tool", {"tool": "read_sensor", "args": {"sensorId": "alkali-flat-water"}}, "write_tool_not_allowed"),
+    ("another agent's write", {"tool": "create_observation", "args": {"animalId": "cow-0901", "type": "injury", "severity": "high", "note": "x", "observedAt": "2026-09-10T14:00:00.000Z"}}, "write_tool_not_allowed"),
+    ("a write in no slice at all", {"tool": "assign_to_pasture", "args": {"pastureId": "alkali-flat", "animalId": "cow-0901"}}, "write_tool_not_allowed"),
+    ("an id the page never printed", {"tool": "restock_feed", "args": {"sku": "grass-hay", "quantity": 16.7}}, "ungrounded_write_arg"),
+    ("a quantity the page never printed", {"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 500}}, "ungrounded_write_arg"),
+    ("a quantity that is a substring of one on the page", {"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 6.7}}, "ungrounded_write_arg"),
+]
+
+
+@pytest.mark.parametrize(("why", "raw", "expected"), BAD_PROPOSALS, ids=[case[0] for case in BAD_PROPOSALS])
+def test_a_bad_proposal_fires_exactly_the_check_that_owns_it(gate_landed: None, why: str, raw: object, expected: str) -> None:
+    """One fixture per failure mode, and the assertion is WHICH code, alone. `16.7` grounds
+    `16.7` and `6.7` does not: the grader compares number tokens, not substrings, for the same
+    reason `ungrounded_numbers` above does."""
+    violations, proposal = check_write_proposal(raw, agent="water_feed", page=PAGE)
+    assert violations == [expected], why
+    assert proposal is None, "a proposal that failed a check never reaches the gate"
+
+
+@pytest.mark.parametrize(
+    ("why", "args", "expected"),
+    [
+        ("an observation type outside the enum", {"animalId": "cow-0901", "type": "limping", "severity": "high", "note": "x", "observedAt": "2026-09-10T14:00:00.000Z"}, ["write_shape_invalid"]),
+        ("a severity outside the enum", {"animalId": "cow-0901", "type": "injury", "severity": "critical", "note": "x", "observedAt": "2026-09-10T14:00:00.000Z"}, ["write_shape_invalid"]),
+        ("a timestamp that is not ISO 8601", {"animalId": "cow-0901", "type": "injury", "severity": "high", "note": "x", "observedAt": "yesterday"}, ["write_shape_invalid"]),
+        ("an animal the page never named", {"animalId": "cow-0777", "type": "injury", "severity": "high", "note": "x", "observedAt": "2026-09-10T14:00:00.000Z"}, ["ungrounded_write_arg"]),
+        ("a clean observation", {"animalId": "cow-0901", "type": "injury", "severity": "high", "note": "down in the draw, not rising", "observedAt": "2026-09-10T14:00:00.000Z"}, []),
+    ],
+)
+def test_the_care_write_is_checked_for_enum_timestamp_and_animal_id(gate_landed: None, why: str, args: dict[str, object], expected: list[str]) -> None:
+    """`herd_health`'s write, on a page that names one animal. The free-text `note` is never
+    graded: it cannot be on the page verbatim and grading it would reject every honest proposal."""
+    page = "## The incident\n- animal: cow-0901, a mother cow, last observed 2026-09-10T14:00:00.000Z\n"
+    violations, proposal = check_write_proposal({"tool": "create_observation", "args": args}, agent="herd_health", page=page)
+    assert violations == expected, why
+    assert (proposal is not None) == (expected == [])
+
+
+def test_no_proposal_is_the_usual_answer_and_not_a_violation(gate_landed: None) -> None:
+    for nothing in (None, {}, {"tool": "", "args": {}}, ""):
+        assert check_write_proposal(nothing, agent="water_feed", page=PAGE) == ([], None)
+
+
+def test_a_clean_proposal_survives_with_its_arguments_cleaned(gate_landed: None) -> None:
+    violations, proposal = check_write_proposal({"tool": "restock_feed", "args": {"sku": " alkali-flat-water-2 ", "quantity": 16.7, "reason": "tank 2 is the working tank"}}, agent="water_feed", page=PAGE)
+    assert violations == []
+    assert proposal == {"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 16.7, "reason": "tank 2 is the working tank"}}
+
+
+def test_the_checks_fire_one_at_a_time_in_the_plans_order(gate_landed: None) -> None:
+    """Shape, then key (the tool), then grounding. A proposal wrong in two ways names the first
+    wrong thing only, so a rail's owner is never ambiguous."""
+    both = {"tool": "create_observation", "args": {"animalId": "nobody", "type": "injury", "severity": "high", "note": "x", "observedAt": "2026-09-10T14:00:00.000Z"}}
+    assert check_write_proposal(both, agent="water_feed", page=PAGE)[0] == ["write_tool_not_allowed"]
+    shape_and_grounding = {"tool": "restock_feed", "args": {"sku": "grass-hay", "quantity": 500, "urgency": "now"}}
+    assert check_write_proposal(shape_and_grounding, agent="water_feed", page=PAGE)[0] == ["write_shape_invalid"]
+
+
+def test_a_failed_proposal_is_stripped_and_the_prose_still_ships(gate_landed: None) -> None:
+    """The work order is a defensible answer about the incident; the one part that would have
+    changed the ranch is what failed. Rejected with its violation, never retried, never blocking."""
+    order = _order(_answer(proposed_write={"tool": "restock_feed", "args": {"sku": "grass-hay", "quantity": 16.7}}))
+    assert order.status == "ok" and order.shippable
+    assert order.proposed_write is None and order.audit_id == ""
+    assert "ungrounded_write_arg" in order.violations
+    assert not (set(order.violations) & BLOCKING_VIOLATIONS)
+
+
+def test_a_clean_proposal_rides_the_work_order_to_the_gate(gate_landed: None) -> None:
+    order = _order(_answer(proposed_write={"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 16.7}}))
+    assert order.violations == () and order.proposed_write == {"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 16.7}}
+    assert "PROPOSED WRITE: restock_feed(quantity=16.7, sku='alkali-flat-water-2')" in order.render()
+    assert "PROPOSED WRITE" in render_shift_page([order]), "the person coming on shift sees what is waiting for a yes"
+
+
+def test_before_the_flip_no_proposal_is_allowed_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The seam, from the proposal side. With `GATE_LANDED` False there is nowhere to pause, so
+    even a perfect proposal is `write_tool_not_allowed` and the brief never mentions the field."""
+    assert GATE_LANDED, "M6 flipped it; this rail patches it back to describe the seam"
+    monkeypatch.setattr("src.tools.allowlists.GATE_LANDED", False)
+    assert check_write_proposal({"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 16.7}}, agent="water_feed", page=PAGE)[0] == ["write_tool_not_allowed"]
+    assert all("proposed_write" not in system_prompt(responder) for responder in RESPONDERS)
+
+
+def test_the_brief_lists_only_this_agents_writes_rendered_from_the_allowlist(gate_landed: None) -> None:
+    """Neutral, and generated: the names the model is told are the names `check` validates."""
+    water = system_prompt("water_feed")
+    assert "restock_feed(sku: an id printed on this page, quantity: a number printed on this page, reason: free text, optional)" in water
+    assert "consume_feed(" in water and "create_observation" not in water
+    herd = system_prompt("herd_health")
+    assert "create_observation(" in herd and "update_care_task(" in herd and "restock_feed" not in herd
+    assert "one of behavior/appetite/mobility/appearance/injury/general" in herd
+    for reader in ("infrastructure", "compliance"):
+        assert "proposed_write" not in system_prompt(reader), f"{reader} has no write in its slice and its brief must not invite one"
+    assert "Almost always leave `tool` as an empty string" in water, "the brief says none is the usual answer; it does not sell the field"
+
+
+def test_the_schema_requires_the_proposal_field_so_silence_is_explicit() -> None:
+    assert "proposed_write" in WORK_ORDER_SCHEMA["required"]
+    assert WORK_ORDER_SCHEMA["properties"]["proposed_write"]["required"] == ["tool", "args"]
+
+
+def test_the_write_tool_argument_table_covers_all_eight_writes() -> None:
+    assert set(WRITE_TOOL_ARGS) == set(WRITE_TOOLS)
+
+
+# --- the key check, in the tick ------------------------------------------------------------- #
+async def test_the_key_check_drops_a_proposal_for_an_incident_the_tick_never_routed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The key is code's, so a foreign one is a bug on this side of the model. Dropped before
+    the gate is opened, with `write_key_unknown` on the order, and the checkpointer is never touched."""
+
+    def _never(*_a: object, **_k: object) -> object:
+        raise AssertionError("the gate was opened for a proposal that failed the key check")
+
+    monkeypatch.setattr("src.agent.executor.checkpointer", _never)
+    foreign = WorkOrder(incident_key="somewhere-else:water_low", agent="water_feed", severity="critical", headline="h", assessment="a", actions=("go",), proposed_write={"tool": "restock_feed", "args": {"sku": "x", "quantity": 1}})
+    with capture_logs() as logs:
+        outcome = await _gate_step(TEST_TARGET, (foreign,), routed_keys=frozenset({"alkali-flat-water:water_low"}), tick=1, run_id="r")
+    assert outcome.orders[0].proposed_write is None and "write_key_unknown" in outcome.orders[0].violations
+    assert outcome.proposed == () and outcome.pending is None
+    assert any(entry["event"] == "write_key_unknown" for entry in logs)
+
+
+# --- the pause, on Postgres ------------------------------------------------------------------- #
+async def test_a_proposal_pauses_and_a_new_connection_still_finds_it(gate_target: StoreTarget) -> None:
+    """The gate outlives the process. Connection one proposes and is closed; connection two
+    stands in for the restarted loop and lists the same pause with the same audit id."""
+    with capture_logs() as logs:
+        async with checkpointer(gate_target) as saver:
+            outcome = await propose(build_gate(saver, perform=_perform_ok), _proposal())
+    assert outcome.paused and outcome.audit_id and not outcome.dropped
+    assert [entry["phase"] for entry in _audit(logs)] == ["proposed"]
+    assert _audit(logs)[0]["audit_id"] == outcome.audit_id and _audit(logs)[0]["tool"] == "restock_feed" and _audit(logs)[0]["incident_key"] == "alkali-flat-water:water_low"
+
+    async with checkpointer(gate_target) as saver:
+        waiting = await pending(build_gate(saver, perform=_perform_ok))
+    assert [(p.audit_id, p.tool, p.args, p.agent, p.tick) for p in waiting] == [(outcome.audit_id, "restock_feed", {"sku": "alkali-flat-water-2", "quantity": 16.7}, "water_feed", 1)]
+    assert unpaired_audit_ids(logs) == {outcome.audit_id: 1}, "one line while paused: visible as a dangling record, not an absence"
+
+
+async def test_the_same_write_for_the_same_incident_is_asked_once(gate_target: StoreTarget) -> None:
+    async with checkpointer(gate_target) as saver:
+        gate = build_gate(saver, perform=_perform_ok)
+        first = await propose(gate, _proposal(tick=1))
+        with capture_logs() as logs:
+            second = await propose(gate, _proposal(tick=2, args={"sku": "alkali-flat-water-2", "quantity": 2.0}))
+            other_tool = await propose(gate, _proposal(tick=2, tool="consume_feed"))
+        waiting = await pending(gate)
+    assert second.duplicate_of == first.audit_id and not second.paused, "same incident, same tool: a duplicate, even with different args"
+    assert other_tool.paused, "a different write for the same incident is a different question"
+    assert _audit(logs) and all(entry["audit_id"] == other_tool.audit_id for entry in _audit(logs)), "the duplicate wrote no audit line: it is not a new side effect"
+    assert len(waiting) == 2 and any(entry["event"] == "write_proposal_duplicate" for entry in logs)
+
+
+async def test_reject_then_approve_land_their_decided_lines_and_a_second_answer_is_refused(gate_target: StoreTarget) -> None:
+    """The verification the plan names, minus the process kill (that is the live check): reject
+    one, approve the other, prove both decided lines land with the fields `docs/logging.md`
+    promises, and prove the rail is empty once nothing is pending."""
+    performed: list[tuple[str, dict[str, object], Approval]] = []
+
+    async def _perform(tool: str, args: dict[str, object], approval: Approval) -> tuple[str, str]:
+        performed.append((tool, args, approval))
+        return "written", '{"ok": true}'
+
+    with capture_logs() as logs:
+        async with checkpointer(gate_target) as saver:
+            gate = build_gate(saver, perform=_perform)
+            a = await propose(gate, _proposal("alkali-flat-water:water_low"))
+            b = await propose(gate, _proposal("windmill-pasture-water:water_low"))
+        assert set(unpaired_audit_ids(logs)) == {a.audit_id, b.audit_id}, "both pending, both dangling on purpose"
+
+        async with checkpointer(gate_target) as saver:  # a different process, hours later
+            gate = build_gate(saver, perform=_perform)
+            rejected = await decide(gate, audit_id=a.audit_id, decision="reject", decided_by="scooter", reason="tank 2 is fine, no restock")
+            approved = await decide(gate, audit_id=b.audit_id, decision="approve", decided_by="scooter")
+            assert await pending(gate) == ()
+            with pytest.raises(GateError, match="already decided"):
+                await decide(gate, audit_id=a.audit_id, decision="approve", decided_by="scooter")
+            with pytest.raises(GateError, match="no proposal"):
+                await decide(gate, audit_id="nope", decision="approve", decided_by="scooter")
+            with pytest.raises(GateError, match="needs a reason"):
+                await decide(gate, audit_id=b.audit_id, decision="reject", decided_by="scooter")
+
+    assert rejected["result"] == "not_executed" and rejected["decision"] == "reject"
+    assert approved["result"] == "written" and approved["decided_by"] == "scooter"
+    assert [(t, a_) for t, a_, _ in performed] == [("restock_feed", {"sku": "alkali-flat-water-2", "quantity": 16.7})], "exactly one write performed, the approved one, once"
+    assert performed[0][2] == Approval(audit_id=b.audit_id, decided_by="scooter")
+
+    decided = {entry["audit_id"]: entry for entry in _audit(logs) if entry["phase"] == "decided"}
+    assert decided[a.audit_id]["decision"] == "reject" and decided[a.audit_id]["result"] == "not_executed" and decided[a.audit_id]["reason"] == "tank 2 is fine, no restock"
+    assert decided[b.audit_id]["decision"] == "approve" and decided[b.audit_id]["result"] == "written" and decided[b.audit_id]["upstream"] == '{"ok": true}'
+    for entry in decided.values():
+        assert entry["decided_by"] == "scooter" and isinstance(entry["latency_to_decision_ms"], int) and entry["latency_to_decision_ms"] >= 0
+    assert unpaired_audit_ids(logs) == {}, "every audit_id appears exactly twice once nothing is pending"
+
+
+async def test_an_approved_write_that_dies_on_the_wire_still_gets_its_receipt(gate_target: StoreTarget) -> None:
+    calls = 0
+
+    async def _boom(tool: str, args: dict[str, object], approval: Approval) -> tuple[str, str]:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("Feed API unreachable")
+
+    with capture_logs() as logs:
+        async with checkpointer(gate_target) as saver:
+            gate = build_gate(saver, perform=_boom)
+            paused = await propose(gate, _proposal())
+            final = await decide(gate, audit_id=paused.audit_id, decision="approve", decided_by="scooter")
+    assert final["result"] == "transport_RuntimeError" and calls == 1, "the receipt is written whatever the wire did, and nothing retries"
+    assert unpaired_audit_ids(logs) == {}
+
+
+async def test_a_proposal_the_checkpointer_cannot_persist_is_dropped_not_dangled() -> None:
+    """The one shape the rail must never see is a `proposed` that nobody can ever answer. If the
+    pause cannot be written, the pair is completed with `dropped` and the caller holds the incident."""
+
+    class _DeadCheckpointer:
+        async def alist(self, *_a: object, **_k: object) -> AsyncIterator[object]:
+            return
+            yield
+
+    class _DeadGate:
+        checkpointer = _DeadCheckpointer()
+
+        async def ainvoke(self, *_a: object, **_k: object) -> object:
+            raise ConnectionError("checkpointer down")
+
+    with capture_logs() as logs:
+        outcome = await propose(_DeadGate(), _proposal())  # type: ignore[arg-type]
+    assert outcome.dropped and outcome.audit_id and not outcome.paused
+    decided = [entry for entry in _audit(logs) if entry["phase"] == "decided"]
+    assert decided[0]["decision"] == "dropped" and decided[0]["decided_by"] == "gate" and decided[0]["result"] == "checkpointer_unavailable"
+    assert unpaired_audit_ids(logs) == {}
+
+
+def _proposing_order(key: str) -> WorkOrder:
+    return WorkOrder(incident_key=key, agent="water_feed", severity="critical", headline="Alkali Flat tank dry", assessment="alkali-flat-water reads 1.2 gal", actions=("haul water",), rules_cited=("WATER-01",), proposed_write={"tool": "restock_feed", "args": {"sku": "alkali-flat-water-2", "quantity": 16.7}})
+
+
+@respx.mock
+async def test_two_ticks_one_pending_write(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, gate_target: StoreTarget) -> None:
+    """A pending write does not block the tick, and the next tick re-proposing the same write
+    for the same incident is a duplicate to suppress, not a second question. Two ticks, one pause."""
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, _proposing_order)
+    with capture_logs() as logs:
+        first = await run_tick(tick=1, store=gate_target, now=T0, spend=True)
+    assert first.error is None and len(first.writes_proposed) == 1 and first.writes_pending == 1 and first.writes_duplicate == 0
+    order = first.work_orders[0]
+    assert order.audit_id == first.writes_proposed[0] and order.shippable and order.proposed_write is not None
+    assert first.held == (), "a pending write holds nothing: the incident is ongoing and the proposal waits"
+    line = next(entry for entry in logs if entry["event"] == "tick")
+    assert (line["writes_proposed"], line["writes_duplicate"], line["writes_pending"], line["writes_failed"]) == (1, 0, 1, 0)
+    assert first.shift_report is not None, "the tick did not wait for an answer"
+
+    respx.mock.reset()
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, _proposing_order)
+    # Held so the incident is re-judged, which is the only way a second proposal can arise.
+    second = await run_tick(tick=2, store=gate_target, now=T1, spend=True, held=("alkali-flat-water:water_low",))
+    assert second.writes_proposed == () and second.writes_duplicate == 1 and second.writes_pending == 1
+    assert second.work_orders[0].audit_id == first.writes_proposed[0], "the order points at the pause already waiting"
+
+    async with checkpointer(gate_target) as saver:
+        waiting = await pending(build_gate(saver, perform=_perform_ok))
+    assert [p.audit_id for p in waiting] == [first.writes_proposed[0]]
+
+
+@respx.mock
+async def test_a_tick_with_nothing_to_propose_never_opens_the_gate(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    def _never(*_a: object, **_k: object) -> object:
+        raise AssertionError("no proposal, no checkpointer connection")
+
+    monkeypatch.setattr("src.agent.executor.checkpointer", _never)
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, lambda key: to_work_order(packet=_packet("alkali-flat-water"), agent="water_feed", response=_response(_answer())))
+    with capture_logs() as logs:
+        state = await run_tick(tick=1, store=target, now=T0, spend=True)
+    assert state.error is None and state.writes_pending is None
+    assert next(entry for entry in logs if entry["event"] == "tick")["writes_pending"] is None, "a count nobody measured is null, not zero"
+
+
+@respx.mock
+async def test_the_gate_being_unreachable_holds_the_incident_and_the_tick_still_reports(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """The gate never fails the tick. The proposal is counted as failed, its incident is held
+    with the gate's own reason (durably, so a restart re-proposes it too), and the shift page ships."""
+
+    @asynccontextmanager
+    async def _down(_target: StoreTarget) -> AsyncIterator[object]:
+        raise ConnectionError("checkpointer unreachable")
+        yield
+
+    monkeypatch.setattr("src.agent.executor.checkpointer", _down)
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, _proposing_order)
+    with capture_logs() as logs:
+        state = await run_tick(tick=1, store=target, now=T0, spend=True)
+    assert state.error is None and state.shift_report is not None
+    assert state.writes_failed == 1 and state.writes_proposed == () and state.held == ("alkali-flat-water:water_low",)
+    assert any(entry["event"] == "gate_unavailable" for entry in logs)
+    async with store_session(url=target.url, schema=target.schema) as session:
+        rows = (await session.execute(text("select incident_key, held_reason from incidents"))).all()
+    assert [tuple(r) for r in rows] == [("alkali-flat-water:water_low", "gate_unavailable")]
+
+
+# --- the held set, durable ---------------------------------------------------------------------- #
+@respx.mock
+async def test_the_held_set_survives_a_restart(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """`docs/issues.md` #3 closed. A tick that holds writes the reason on the row; a fresh
+    process reads it back before its first tick; a tick that gets an answer clears it."""
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, lambda key: _held_order(key, violations=("transport_error",)))
+    crashed = await run_tick(tick=1, store=target, now=T0, spend=True)
+    assert crashed.held == ("alkali-flat-water:water_low",)
+    assert await restore_held(target) == frozenset({"alkali-flat-water:water_low"}), "what a restarted loop would start with"
+    async with store_session(url=target.url, schema=target.schema) as session:
+        assert (await session.execute(text("select held_reason from incidents"))).scalar_one() == "transport_error"
+
+    respx.mock.reset()
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, lambda key: to_work_order(packet=_packet("alkali-flat-water"), agent="water_feed", response=_response(_answer())))
+    answered = await run_tick(tick=2, store=target, now=T1, spend=True, held=await restore_held(target))
+    assert answered.held == () and await restore_held(target) == frozenset()
+
+
+async def test_the_loop_starts_from_what_the_previous_run_was_carrying() -> None:
+    calls: list[dict[str, object]] = []
+
+    async def _restore(_target: StoreTarget) -> frozenset[str]:
+        return frozenset({"alkali-flat-water:water_low"})
+
+    with capture_logs() as logs:
+        await run_loop(store=TEST_TARGET, interval_s=0, spend=False, tick_fn=_fake_tick([RanchState()], calls=calls), sleep=_no_sleep, max_ticks=1, restore=_restore)
+    assert calls[0]["held"] == frozenset({"alkali-flat-water:water_low"}), "the first tick re-routes what the last run could not get answered"
+    assert any(entry["event"] == "held_restored" and entry["count"] == 1 for entry in logs)
+
+    async def _unreadable(_target: StoreTarget) -> frozenset[str]:
+        raise ConnectionError("ledger down")
+
+    with capture_logs() as logs:
+        code = await run_loop(store=TEST_TARGET, interval_s=0, spend=False, tick_fn=_fake_tick([RanchState()]), sleep=_no_sleep, max_ticks=1, restore=_unreadable)
+    assert code == EXIT_OK and any(entry["event"] == "held_restore_failed" for entry in logs), "an unreadable ledger starts the loop empty rather than refusing to start"
+
+
+# --- the checkpointer's own migration ------------------------------------------------------------ #
+async def test_migration_0004_wrote_exactly_the_version_rows_the_library_expects(store: AsyncSession) -> None:
+    """`setup()` would have created these tables silently on whichever database the loop was
+    pointed at. Alembic did instead, and the version rows match, so a later `setup()` is a no-op."""
+    versions = (await store.execute(text("select v from checkpoint_migrations order by v"))).scalars().all()
+    assert list(versions) == list(range(1, len(BasePostgresSaver.MIGRATIONS)))
+    tables = (await store.execute(text("select table_name from information_schema.tables where table_schema = :s and table_name like 'checkpoint%' order by 1"), {"s": SCHEMA_TEST})).scalars().all()
+    assert list(tables) == ["checkpoint_blobs", "checkpoint_migrations", "checkpoint_writes", "checkpoints"]
+
+
+async def test_the_checkpointer_refuses_a_database_behind_the_installed_library(gate_target: StoreTarget, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A library upgrade is a new alembic revision, never a silent `setup()` on prod."""
+    monkeypatch.setattr(BasePostgresSaver, "MIGRATIONS", [*BasePostgresSaver.MIGRATIONS, "SELECT 1;"])
+    with pytest.raises(CheckpointerNotMigratedError, match="library was upgraded"):
+        async with checkpointer(gate_target):
+            pass
+
+
+async def test_the_checkpointer_only_ever_opens_an_agent_schema() -> None:
+    assert psycopg_url("postgresql+asyncpg://u:p@h/db") == "postgresql://u:p@h/db"
+    with pytest.raises(SchemaGuardError):
+        async with checkpointer(StoreTarget(name="x", url="postgresql+asyncpg://x", schema="farm")):
+            pass
+
+
+# --- the CLI: the whole of what a human can do at M6 -------------------------------------------- #
+async def test_the_gate_cli_lists_approves_and_rejects(gate_target: StoreTarget, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Same shape as `python -m src.tools.chaos`. If a decision cannot be expressed here, the
+    M8 endpoint will not be able to express it either."""
+    performed: list[str] = []
+
+    async def _perform(tool: str, args: dict[str, object], approval: Approval) -> tuple[str, str]:
+        performed.append(f"{tool} by {approval.decided_by}")
+        return "written", "{}"
+
+    monkeypatch.setattr("src.agent.gate.resolve_store", lambda *_a, **_k: gate_target)
+    monkeypatch.setattr("src.agent.gate.perform_write", _perform)
+    monkeypatch.setattr("src.agent.gate.configure_logging", lambda: "run")
+    async with checkpointer(gate_target) as saver:
+        gate = build_gate(saver, perform=_perform)
+        a = await propose(gate, _proposal("alkali-flat-water:water_low"))
+        b = await propose(gate, _proposal("windmill-pasture-water:water_low"))
+
+    def run(argv: list[str]) -> Awaitable[int]:
+        return asyncio.get_running_loop().run_in_executor(None, gate_main, argv)  # the CLI owns its own asyncio.run
+
+    assert await run(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "2 writes waiting" in out and a.audit_id in out and b.audit_id in out and "restock_feed(quantity=16.7, sku='alkali-flat-water-2')" in out
+
+    assert await run(["approve", a.audit_id, "--by", "scooter"]) == 0 and performed == ["restock_feed by scooter"]
+    assert await run(["reject", b.audit_id, "--by", "scooter", "--reason", "tank 2 is fine"]) == 0
+    assert await run(["approve", b.audit_id, "--by", "scooter"]) == 1 and "already decided" in capsys.readouterr().out
+    assert await run(["list"]) == 0 and "0 writes waiting" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        await run(["reject", a.audit_id])  # --reason is required by the parser itself
+
+
+async def test_the_suite_never_points_a_file_handler_at_the_real_logs(store: AsyncSession) -> None:
+    """`configure_logging` is idempotent, so whichever directory it saw first is where every file
+    handler writes for the rest of the process, and `alembic/env.py` calls it from the session-scoped
+    `migrated_store` before any function-scoped patch. Found at M6 as fixture lines in the real
+    `logs/audit.jsonl`. `store` is requested so the migration, and therefore that first call, has run."""
+    import logging
+
+    from src.utils.logger import AUDIT_STREAM, configure_logging
+
+    configure_logging()
+    real = str((REPO_ROOT / "logs").resolve()).lower()
+    for handler in logging.getLogger(AUDIT_STREAM).handlers:
+        filename = str(getattr(handler, "baseFilename", "") or "")
+        assert not filename.lower().startswith(real), f"a test process would write receipts into {filename}"

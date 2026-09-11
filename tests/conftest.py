@@ -49,7 +49,7 @@ def no_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
     """Chaos is disarmed for every test unless the test arms it itself.
 
     Found at M4: `.env` on this machine carries `CHAOS_ENABLED=1`, and with the real settings
@@ -63,10 +63,15 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     Returned so a test can turn one knob on the copy (`settings.incident_confirm_sweeps = 1`)
     without building a whole `Settings`; the copy is per test, so nothing leaks.
     """
-    disarmed = get_settings().model_copy(update={"chaos_enabled": False})
+    disarmed = get_settings().model_copy(update={"chaos_enabled": False, "log_dir": str(tmp_path / "logs")})
     monkeypatch.setattr("src.tools.chaos.get_settings", lambda: disarmed)
     monkeypatch.setattr("src.agent.executor.get_settings", lambda: disarmed)
     monkeypatch.setattr("src.agent.memory.get_settings", lambda: disarmed)
+    # And the log directory. Found at M6: a CLI rail calls `configure_logging()`, which installs
+    # the file handlers for the whole process, and every audit line a later test wrote outside
+    # `capture_logs` then landed in the real `logs/audit.jsonl` as a `proposed` nobody would ever
+    # answer. Three of them, with the fixture's `run_id`. A receipt file must never carry a test.
+    monkeypatch.setattr("src.utils.logger.get_settings", lambda: disarmed)
     return disarmed
 
 
@@ -99,12 +104,18 @@ async def _drop_test_schema(url: str) -> None:
 
 
 @pytest.fixture(scope="session")
-def migrated_store() -> str:
+def migrated_store(tmp_path_factory: pytest.TempPathFactory) -> str:
     """The URL of a freshly migrated `sw_ops_test`. Skips if no local Postgres is up.
 
     Skipped rather than failed so `pytest` passes on a plane, which is the rule in
     `tests/CLAUDE.md`. The skip message has to name what is not being proven, because a
     green run that quietly proved nothing about the store is worse than a red one.
+
+    The log directory is patched here too, not only in `settings`: `alembic/env.py` calls
+    `configure_logging()`, this fixture is session-scoped so it runs before any function-scoped
+    patch, and `configure_logging` is idempotent, so whichever directory it saw first is where
+    every file handler points for the rest of the process. Found at M6 as fixture lines in the
+    real `logs/audit.jsonl`.
     """
     url = assert_local_test_url(get_settings().database_url_test)
     try:
@@ -118,7 +129,10 @@ def migrated_store() -> str:
     # `-x target=test` through the API, so `SW_OPS_TARGET` is never mutated for the rest
     # of the process and no later test can inherit a prod-pointing environment.
     cfg.cmd_opts = Namespace(x=["target=test"])
-    command.upgrade(cfg, "head")
+    quiet = get_settings().model_copy(update={"log_dir": str(tmp_path_factory.mktemp("logs"))})
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("src.utils.logger.get_settings", lambda: quiet)
+        command.upgrade(cfg, "head")
     return url
 
 
