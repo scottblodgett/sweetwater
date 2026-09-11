@@ -19,7 +19,7 @@ ledger.
                      what the page was handed, so `linked` (the fusion claim) can be checked later
                      against it, same as `check_shift_report` did at the time.
   * `audit_receipts` the two halves of a gate receipt, `proposed` and `decided`, keyed on
-                     `(audit_id, phase)`. That primary key is `docs/issues.md` #10 closing: the
+                     `(audit_id, phase)`. That primary key is `docs/open-issues.md` #10 closing: the
                      "every audit_id appears exactly twice" rail becomes a constraint, a third
                      receipt for one id cannot be inserted, and `logs/audit.jsonl` becomes a
                      projection of this table rather than the record two processes append to.

@@ -288,7 +288,7 @@ the test ledger, so nothing a demo reads from was touched:
 **The move that would have earned the row** is the one Scott named in the design conversation:
 put the forecast on the feed page (the ranch has wind, temperature, and snow-depth sensors and the
 packet does not carry them), so FEED-02 can be answered from the page and `insufficient_information`
-stops being the honest answer. That is `evidence.py`'s change, its own item (`docs/issues.md` #12),
+stops being the honest answer. That is `evidence.py`'s change, its own item (`docs/open-issues.md` #12),
 and the next attempt at this row runs after it.
 
 **The close-out tick agreed.** Re-running the documented `TIER1_ENABLED=1 TIER_COMPARE=1` command at

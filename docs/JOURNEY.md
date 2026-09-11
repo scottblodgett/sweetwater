@@ -1027,7 +1027,7 @@ Gate after the change: **310 tests**, `ruff` clean, `mypy` clean, one alembic he
 whether it pauses at all; the pause is a LangGraph `interrupt()` checkpointed in `sw_ops` so it
 outlives the process; a human answers from `python -m src.agent.gate`; both halves land in
 `audit.jsonl` under one `audit_id`; `GATE_LANDED` flipped last. Migrations `0004` (the
-checkpointer's tables) and `0005` (`incidents.held_reason`, closing `docs/issues.md` #3) ran on
+checkpointer's tables) and `0005` (`incidents.held_reason`, closing `docs/open-issues.md` #3) ran on
 Supabase with an explicit yes. **353 tests**, `ruff` and `mypy` clean, one alembic head at `0005`.
 
 ### The three questions, answered before code
@@ -1211,7 +1211,7 @@ proposed write, or no answer, and before it only by critical.
 
 **Three findings from the reads before a line was written.** The assumed rate was 3x the Opus 5
 list price (cookbook #38). Thinking on Opus 5 is adaptive by default and `budget_tokens` is rejected,
-which nothing here sends (`docs/issues.md` #13; 64 real calls, zero thinking blocks). And "proposes a
+which nothing here sends (`docs/open-issues.md` #13; 64 real calls, zero thinking blocks). And "proposes a
 write" cannot be known before the call, so it became a post-call trigger.
 
 **Built.** `routing.py` (price table, `tier_for`, `escalation_reason`), `call_tier1` on `ChatOllama`
@@ -1240,7 +1240,7 @@ at the real rate, shadows excluded.
 **Verdict.** No move. `TIER1_ENABLED` ships off. The local model was never unsafe, and it saved one
 call in twelve while being thin about the two things a rancher reads the order for. The row says
 so, and it names the change that would earn the next attempt: the forecast on the feed page
-(`docs/issues.md` #12), so the honest answer stops being "I do not know."
+(`docs/open-issues.md` #12), so the honest answer stops being "I do not know."
 
 ### What diverged from the plan
 
@@ -1278,7 +1278,7 @@ so, and it names the change that would earn the next attempt: the forecast on th
 
 **What was planned.** The M7A paragraph in `docs/Plan.md`: a second free sweep off the Farm and Care
 APIs, animal categories in triage, migration `0006`, `knowledge_base/herd.md`, `herd_health` handed
-its first real work, and one paid run that closes `docs/issues.md` #1, #2, #11, and #15. Two wire facts
+its first real work, and one paid run that closes `docs/open-issues.md` #1, #2, #11, and #15. Two wire facts
 to read first: the herd count, and whether observations list ranch-wide.
 
 **What actually happened, in order.**
@@ -1331,7 +1331,7 @@ kill was fired twice) and `herd_health`'s `proposed` / `decided` pair in one run
 `cow-0777:care_overdue` into the Red Canyon water run ("one drive covers a freezing tank behind 111
 head, a 32-day-overdue recheck on a cow that was not rising, and a fence with no push"). That is the
 supervisor joining the herd to the tanks, which is the line the cow's packet exists to protect.
-`docs/issues.md` #2 closed. Then `chaos restore`, and `cow-0905:deceased` resolved on the next tick.
+`docs/open-issues.md` #2 closed. Then `chaos restore`, and `cow-0905:deceased` resolved on the next tick.
 
 | tick | what | cost |
 | --- | --- | --- |
@@ -1537,7 +1537,7 @@ coordinates come from, and where the API is reachable from.
 the catalog, and they are; the catalog is `ranch://sensors/map`, which is the ranch, and neither the
 read API nor a browser calls the ranch. So the map panel is a placeholder that says exactly that, and
 the source it needs, a catalog snapshot the loop writes to `sw_ops` and the API exposes, is written up
-with its DDL as `docs/issues.md` #21 for a yes, rather than migrated in on the window's coattails.
+with its DDL as `docs/open-issues.md` #21 for a yes, rather than migrated in on the window's coattails.
 *Where the API lives.* Vercel cannot reach `127.0.0.1`, and where the loop and API run is #5, a
 decision and not this phase's. Built and verified against `next dev` on this machine with `--api` local;
 the Vercel deploy is #23, owed and not faked with a tunnel.
@@ -1608,7 +1608,7 @@ by design: a human's yes is the belt for agent writes, and `CHAOS_ALLOW_WRITES` 
 switch. So approving the planted `restock_feed` from a browser tab would have restocked a real feed bin.
 The plan avoided it by luck (the first plant used a made-up tool name); the recipe now says it as a rule
 (`docs/STATE.md`, cookbook #47), the window asks once before sending an approve, and the misleading
-`transport_*` label on a missing tool is `docs/issues.md` #22, left in the Python gate on purpose.
+`transport_*` label on a missing tool is `docs/open-issues.md` #22, left in the Python gate on purpose.
 
 **An orphan on the test ledger.** The gauge's x-axis interleaved two runs: this phase's, and run
 `4d7cb8db15cb`, a `--no-spend` loop and an `--api` started at 14:33 local, thirty minutes before this
@@ -1646,7 +1646,7 @@ session checks for stray `main.py` processes before it plants anything.
 6. **The planting script skipped `configure_logging`**, so two `proposed` audit lines reached only the
    console. Cookbook #33, on the harness this time.
 7. **`add_care_note` came back as an MCP outage.** Not the window's defect and not fixed this phase;
-   `docs/issues.md` #22.
+   `docs/open-issues.md` #22.
 
 ### Work not asked for, and why each one is here
 
@@ -1657,8 +1657,8 @@ session checks for stray `main.py` processes before it plants anything.
 | the gate list polling every 20s beside the stream | a decision made at the CLI does not land a tick, and the panel would lie until the next one |
 | 502 `API_UNREACHABLE` and 503 `WINDOW_NOT_CONFIGURED` in the API's own envelope | one error shape for the client to render; a dead API is a sentence in every panel, not a blank page |
 | a 404 at the proxy for any `/api/ops/*` path the API does not have | the proxy is not a general forwarder; an unknown path is never a probe upstream |
-| `docs/issues.md` #21 with the full DDL | the map's source is a migration, and a migration is a yes, not a drive-by |
-| the cookbook re-sectioned by pain with stable numbers and an index | the M9 brief; stable numbers because every `#N` in this file and `issues.md` has to keep meaning what it meant |
+| `docs/open-issues.md` #21 with the full DDL | the map's source is a migration, and a migration is a yes, not a drive-by |
+| the cookbook re-sectioned by pain with stable numbers and an index | the M9 brief; stable numbers because every `#N` in this file and `open-issues.md` has to keep meaning what it meant |
 | killing two orphaned `main.py` processes | they blocked `pytest` and hit the live ranch every 20s for nobody; Scott's go |
 
 ### The M phases, closed

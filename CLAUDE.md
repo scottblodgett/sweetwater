@@ -89,7 +89,7 @@ needed is reachable over the wire or already written down in this repo.
 | log schemas | `docs/logging.md` |
 | where the build stands right now | `docs/STATE.md` - the session-start briefing |
 | what actually happened | `docs/JOURNEY.md` |
-| what is still open across phases, and what each would take | `docs/issues.md` |
+| what is still open across phases, and what each would take | `docs/open-issues.md` |
 
 ## Tech stack
 
@@ -148,7 +148,7 @@ and `OPS_API_TOKEN` from the window's own environment (`web/.env.local`, gitigno
 and pipe the SSE stream through. Six panels: the token gauge off `/ops/stream`, the incident feed, the rails
 read off the latest tick line, the shift report, the gate with approve and reject (approve asks once, because
 it performs the write on the deployed ranch), and a ranch-map placeholder that says why it is empty (the
-catalog is the ranch's, and one thing talks to the ranch: `docs/issues.md` #21). The window has its own gate,
+catalog is the ranch's, and one thing talks to the ranch: `docs/open-issues.md` #21). The window has its own gate,
 the three `web/` commands above, and it is verified against `next dev` on this machine; the Vercel deploy waits
 on where the API lives (#5) and is owed, not faked. `web/README.md` is the detail.
 

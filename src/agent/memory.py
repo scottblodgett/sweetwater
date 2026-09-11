@@ -229,7 +229,7 @@ shift_reports = Table(
     Index("ix_shift_reports_at", "at"),
 )
 
-#: M8, `docs/issues.md` #10. The gate's receipt as a row, keyed on `(audit_id, phase)`, so "every
+#: M8, `docs/open-issues.md` #10. The gate's receipt as a row, keyed on `(audit_id, phase)`, so "every
 #: audit_id appears exactly twice" is a constraint and `logs/audit.jsonl` is a projection. Written
 #: by `src/agent/gate.py` through the checkpointer's own connection (`ThreadedPostgresSaver.record_receipt`),
 #: because the process holding a pause is the process that has that connection open.

@@ -39,7 +39,7 @@ no roster at all. The list still carries her, and the list is what `answered` is
 executor), so an animal that has left the list entirely is recorded as a subject that did not
 answer rather than one that is fine, and so her record is always in the changed set for her packet.
 
-**What this cannot see, on purpose, and it is written down in `docs/issues.md`:** a `high`
+**What this cannot see, on purpose, and it is written down in `docs/open-issues.md`:** a `high`
 observation on an `active` animal with no care task. The coyote kill is caught through the
 status, which chaos patches on the Farm API, and the observation is then read for that animal
 and quoted in its packet.

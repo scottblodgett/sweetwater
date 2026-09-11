@@ -119,7 +119,7 @@ budget to `max_tokens` rather than sharing it.
 **A third trap, found at M7 and not yet fixed:** Claude Opus 5 rejects `budget_tokens` with a 400 and
 wants `{"type": "adaptive"}` plus `output_config.effort`. Nothing here sends anything but `"none"`, which
 omits the block, so every measured call was unaffected; the first job that wants thinking on fixes
-this function first (`docs/issues.md` #13).
+this function first (`docs/open-issues.md` #13).
 
 ## embeddings.py is a seam, not a feature
 

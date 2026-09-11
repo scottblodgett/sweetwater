@@ -240,7 +240,7 @@ Two rules about the order. **The tick line is written first and the row second**
 the heartbeat and must not depend on the ledger being up: a row that fails is `tick_row_failed` on the
 console (a warning naming the API as the thing missing the tick) and never a failed tick. **The receipt
 row is written first and the file line second**, because the table is the record and the file is the
-projection: `docs/issues.md` #10 closed here. A `proposed` row that cannot be written takes the same
+projection: `docs/open-issues.md` #10 closed here. A `proposed` row that cannot be written takes the same
 `dropped` path as a checkpointer failure; a `decided` row that cannot be written is `audit_receipt_failed`
 (with `receipt_phase`, not `phase`, so the audit rail does not count the console line as a receipt), and
 the decision still finishes and still reaches the file, because by then the write on the ranch may
@@ -248,7 +248,7 @@ already have happened. The primary key makes "every `audit_id` appears exactly t
 database enforces, and a rail inserts a third to prove it is refused.
 
 **What stays file-only.** The chaos guard's `blocked` / `auto_allowed` pairs below have no row
-(`docs/issues.md` #20); the tick's `fields` jsonb is the line as written, so a field added to the line
+(`docs/open-issues.md` #20); the tick's `fields` jsonb is the line as written, so a field added to the line
 appears in the row with no migration.
 
 ## `chaos_*` on the console stream - the overlay says so out loud
@@ -303,7 +303,7 @@ documented in its naive form first, and it failed on all three counts at once.
 | --- | --- | --- |
 | `tick.jsonl` | 10 MB, 5 back | a diagnostic; oldest is discardable |
 | `agent.jsonl` | 10 MB, 5 back | same |
-| `audit.jsonl` | daily, **no size cap** | a receipt. A size cap on an audit trail means the trail ends exactly when the ranch got busiest. From M8 a projection of `sw_ops.audit_receipts`, so a rotation colliding with a decision from another process (`docs/issues.md` #10) loses at worst a projected line. |
+| `audit.jsonl` | daily, **no size cap** | a receipt. A size cap on an audit trail means the trail ends exactly when the ranch got busiest. From M8 a projection of `sw_ops.audit_receipts`, so a rotation colliding with a decision from another process (`docs/open-issues.md` #10) loses at worst a projected line. |
 
 ## Never logged
 
@@ -356,7 +356,7 @@ each through its own handler on the same file. A one-line append is atomic enoug
 on Windows in practice, and both lines were read back intact on the first live run. What is not
 safe is the daily rotation firing in both at once: the loop holds the file open across midnight
 and the CLI is short-lived, so the collision is unlikely but not impossible. The checkpointer
-row is the durable truth and the line is the receipt; `docs/issues.md` carries it.
+row is the durable truth and the line is the receipt; `docs/open-issues.md` carries it.
 
 `logs/*.jsonl` is gitignored; `logs/.gitkeep` is not. A captured run worth keeping goes
 into `docs/` next to the finding it supports.

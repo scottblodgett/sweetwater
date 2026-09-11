@@ -296,7 +296,7 @@ The audit rail: every `audit_id` in `audit.jsonl` appears exactly twice, **or on
 is still open**, and `gate.unpaired_audit_ids` minus `gate.pending` must be empty. From M8 the same
 pair is a row in `sw_ops.audit_receipts` first, written through the checkpointer's connection
 (`gate.record_receipt`), and the primary key `(audit_id, phase)` makes the rail a constraint; the file
-is the projection (`docs/issues.md` #10). A console line about a receipt must not carry both `audit_id`
+is the projection (`docs/open-issues.md` #10). A console line about a receipt must not carry both `audit_id`
 and `phase`, or the rail counts it as one: `audit_receipt_failed` says `receipt_phase` for that reason.
 
 From M8 the tick's last act is `_record_tick`: the tick line as a row in `sw_ops.ticks` and the shift

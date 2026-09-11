@@ -2,7 +2,7 @@
 
 The patterns, ordered by **the pain that produced them** rather than by when each landed. Reordered at
 the M9 boundary, the close of the M phases; until then entries sat in the order they were paid for.
-**The numbers are stable**: `#33` means the same entry it meant in every `JOURNEY.md` and `issues.md`
+**The numbers are stable**: `#33` means the same entry it meant in every `JOURNEY.md` and `open-issues.md`
 reference, so the index below is how to find one by number.
 
 Each entry answers three questions: what went wrong, what it looked like while it was going wrong, and
@@ -415,7 +415,7 @@ path, plant a tool the ranch does not have, so the whole pipe is exercised and t
 end. When the pause names a real tool, reject it with a reason; reject exercises every line but the
 write. And the window asks once before sending an approve, naming the tool and the args, because that
 click is the one action on the page that is hard to reverse. The refusal's *label* is its own item
-(`docs/issues.md` #22): a missing tool came back as an outage.
+(`docs/open-issues.md` #22): a missing tool came back as an outage.
 
 ## A frozen upstream you learn on the wire
 
@@ -850,7 +850,7 @@ neither. Opus, same pages, wrote around the gap and listed it under `unknowns`.
 **Fix.** The field's description now names what is an unknown (forecast, fuel, head count, tank
 capacity) and what is insufficiency (the incident's own reading missing, no rule on the page). That
 moved the water packet from 5/5 to 2/5 and the feed packet from 5/5 to 4/5. The rest is not a prompt
-problem: the feed page needs the weather station on it (`docs/issues.md` #12).
+problem: the feed page needs the weather station on it (`docs/open-issues.md` #12).
 
 **Lesson.** An honest exit gets used exactly as often as the inputs are honestly insufficient. When
 a cheap model takes it constantly, look at the page before the model; the fix is usually more

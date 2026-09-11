@@ -270,7 +270,7 @@ async def test_a_post_without_the_token_is_401_and_changes_nothing(api_target: S
 async def test_approve_and_reject_over_http_land_both_halves_of_every_receipt(api_target: StoreTarget, app: FastAPI, client: httpx.AsyncClient, performed: list[Any]) -> None:
     """The M6 verification, over HTTP: reject one, approve the other, `decided_by` is the token's
     name, the write is performed exactly once, and every `audit_id` appears exactly twice in the
-    log AND exactly twice in `audit_receipts` (`docs/issues.md` #10)."""
+    log AND exactly twice in `audit_receipts` (`docs/open-issues.md` #10)."""
     with capture_logs() as logs:
         a, b = await _plant_pauses(api_target, "alkali-flat-water:water_low", "windmill-pasture-water:water_low")
         assert set(unpaired_audit_ids(logs)) == {a, b}, "both pending, both dangling on purpose"

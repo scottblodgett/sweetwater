@@ -32,7 +32,7 @@ The CLI is the whole of what a human can do at M6, and `/ops/gate` at M8 (`src/a
 adds nothing: if a decision cannot be expressed here it cannot be expressed there either. From M8
 each receipt is also a row in `sw_ops.audit_receipts`, written before the file line through the
 checkpointer's own connection; the primary key `(audit_id, phase)` is the "exactly twice" rail as a
-constraint, and the file is the projection (`docs/issues.md` #10).
+constraint, and the file is the projection (`docs/open-issues.md` #10).
 
     python -m src.agent.gate list
     python -m src.agent.gate approve <audit_id> [--by NAME]
@@ -162,7 +162,7 @@ def _ask(state: GateState) -> GateState:
 
 
 async def record_receipt(saver: BaseCheckpointSaver[Any], row: dict[str, Any], *, strict: bool = False) -> None:
-    """M8, `docs/issues.md` #10. The receipt row, on the connection that holds the pause, BEFORE the
+    """M8, `docs/open-issues.md` #10. The receipt row, on the connection that holds the pause, BEFORE the
     file line: the table is the record and `logs/audit.jsonl` is its projection.
 
     `strict` is for the `proposed` half, where a row that cannot be written means the ledger is

@@ -58,14 +58,14 @@ handlers proxy every `/ops/*` call server-side, so the bearer token lives in `we
 reaches a browser. One page: the token gauge off the SSE stream, the incident feed with filters, the
 rails read off the latest tick line, the shift report, the gate with approve and reject, and a ranch-map
 placeholder that says why it is empty. Verified against `next dev` on this machine; the Vercel deploy
-waits on where the API runs (`docs/issues.md` #5, #23). Detail: `web/README.md`.
+waits on where the API runs (`docs/open-issues.md` #5, #23). Detail: `web/README.md`.
 
 No Docker is needed; dockerizing is a deferred FUTURE-1 item, not part of the build: the upstreams are already deployed and agent state lives in
 Supabase, so there is nothing local to stand up. A local Postgres is needed only to run
 the store tests, which must never point at Supabase. Node 22 is needed only for the window.
 
 The build ran M0 through M9 and every phase is landed; M9 was the last. What a session picks up
-next is in `docs/STATE.md`'s Next row and `docs/issues.md`.
+next is in `docs/STATE.md`'s Next row and `docs/open-issues.md`.
 
 ## Verifying a build
 
@@ -109,7 +109,7 @@ Three streams: `tick.jsonl` (the heartbeat), `agent.jsonl` (the instrument),
 | [docs/logging.md](docs/logging.md) | the three log streams |
 | [docs/JOURNEY.md](docs/JOURNEY.md) | what actually happened, and where it diverged, written at every boundary |
 | [docs/cookbook.md](docs/cookbook.md) | 48 lessons, ordered by the pain that produced each one; numbers are stable |
-| [docs/issues.md](docs/issues.md) | what is still open across phases, and what each would take |
+| [docs/open-issues.md](docs/open-issues.md) | what is still open across phases, and what each would take |
 | [docs/STATE.md](docs/STATE.md) | the session-start briefing: where the build stands, decisions made, the verified environment |
 | [docs/Plan.md](docs/Plan.md) | the plan and the tree, which is the authority the layout matches |
 | [web/README.md](web/README.md) | the window: the proxy, the panels, the three-command gate |

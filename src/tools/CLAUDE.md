@@ -40,7 +40,7 @@ three wire facts decided everything else. All three are in `docs/STATE.md`; the 
   once: 2 of 12 come back HTTP 500 at 12 or 20 in flight, 0 of 12 at 6, measured.
 - **Observations are read only for the changed set** (non-active status, pending care task, live incident
   from the ledger via `watch`), because they list per animal only and 1,195 reads a tick is 344k Care
-  requests a day. What that leaves invisible is `docs/issues.md` #16.
+  requests a day. What that leaves invisible is `docs/open-issues.md` #16.
 - **`answered` is the list, minus the animals whose own read failed, and empty whenever `failure` is set.**
   Any page failing, or the care-task read failing, means no animal answered. The tick still runs; the
   line carries `herd_error`.

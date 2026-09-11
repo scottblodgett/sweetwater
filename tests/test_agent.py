@@ -2651,7 +2651,7 @@ async def test_a_proposal_pauses_and_a_new_connection_still_finds_it(gate_target
 
 
 async def test_a_receipt_is_a_row_before_it_is_a_line_and_a_third_one_cannot_be_inserted(gate_target: StoreTarget) -> None:
-    """M8, `docs/issues.md` #10. Both halves of the pair land in `sw_ops.audit_receipts`, the primary
+    """M8, `docs/open-issues.md` #10. Both halves of the pair land in `sw_ops.audit_receipts`, the primary
     key `(audit_id, phase)` refuses a third, and the refusal on the `decided` half is an error line
     rather than an exception, because by then the write on the ranch may already have happened."""
     with capture_logs() as logs:
@@ -2847,7 +2847,7 @@ async def test_the_gate_being_unreachable_holds_the_incident_and_the_tick_still_
 # --- the held set, durable ---------------------------------------------------------------------- #
 @respx.mock
 async def test_the_held_set_survives_a_restart(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
-    """`docs/issues.md` #3 closed. A tick that holds writes the reason on the row; a fresh
+    """`docs/open-issues.md` #3 closed. A tick that holds writes the reason on the row; a fresh
     process reads it back before its first tick; a tick that gets an answer clears it."""
     serve(respx.mock, LOW)
     _stub_spend(monkeypatch, lambda key: _held_order(key, violations=("transport_error",)))

@@ -4,7 +4,7 @@ Revision ID: 0005
 Revises: 0004
 Created: 2026-09-11
 
-M6, and `docs/issues.md` #3. Since M4 an incident whose agent raised, or whose model call
+M6, and `docs/open-issues.md` #3. Since M4 an incident whose agent raised, or whose model call
 died in transport, is *held*: carried into the next tick and re-routed until somebody
 actually answers for it. The set lived in the loop's memory, so a restart turned every held
 incident back into a plain `ongoing` row that would never be re-routed and never get a work

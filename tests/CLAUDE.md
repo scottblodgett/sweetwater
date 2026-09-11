@@ -88,7 +88,7 @@ pass is the failure mode this file exists to prevent.
 | the gate being unreachable holds the incident and the tick still reports | the gate never fails the tick | `_gate_step` let an exception out, or stopped holding what it could not pause |
 | a proposal the checkpointer could not persist is `dropped`, not dangled | a `proposed` with no `decided` has exactly one meaning | the `dropped` line was removed as redundant |
 | a second answer on a decided pause is refused | a resume on a finished thread is a silent no-op that looks like a decision | `decide()` stopped checking for a live interrupt first |
-| the held set survives a restart | `docs/issues.md` #3 | `record_held` stopped being called, or `run_loop` stopped restoring |
+| the held set survives a restart | `docs/open-issues.md` #3 | `record_held` stopped being called, or `run_loop` stopped restoring |
 | the checkpointer refuses a database behind the installed library | a library upgrade is an alembic revision Scott has seen, never a silent `setup()` on prod | somebody called `setup()` |
 | every file handler the suite configured points outside `logs/` | a receipt file never carries a test | `alembic/env.py` or a CLI configured logging before the log directory was patched |
 | `finish_reason` present on every model call | "too weak" stays distinguishable from "never answered" | a call path bypassed `llm_client.py` |
@@ -117,7 +117,7 @@ pass is the failure mode this file exists to prevent.
 | nothing a model reads carries an em dash | the house convention reaches the prompt too | a rewrite of the brief or an SOP |
 | every tick line is also a row, and the shift report with it | the read API is a projection of the ledger, not of a log file another process cannot see | `_record_tick` stopped being called, or a `--no-spend` tick stopped producing a code report |
 | a ledger that cannot take the row costs a warning, not the tick | the tick line is the heartbeat and the row is the projection; the order of those two is the design | somebody made `insert_tick` fail the tick, or moved it above `log_tick` |
-| a receipt is a row before it is a line, and a third one cannot be inserted | `docs/issues.md` #10: the "exactly twice" rail is the primary key on `audit_receipts` | `record_receipt` grew an `ON CONFLICT`, or a console line grew `audit_id` and `phase` together |
+| a receipt is a row before it is a line, and a third one cannot be inserted | `docs/open-issues.md` #10: the "exactly twice" rail is the primary key on `audit_receipts` | `record_receipt` grew an `ON CONFLICT`, or a console line grew `audit_id` and `phase` together |
 | the envelope and the error shape on every route, including a 404 for an unknown path and a 500 | the window reads five services one way | an exception handler was removed, or a route returned a bare list |
 | a bad `limit` is 422 naming the field; a body that is not JSON is 400 | the ranch's status split, copied | the two were merged, or `details.field` became a byte offset again |
 | `/health` answers with the database URL pointed at nothing | liveness is not database health | somebody added a `SELECT 1` to make it "more useful" |

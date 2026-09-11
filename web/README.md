@@ -65,7 +65,7 @@ probe upstream. `API_CORS_ORIGINS` on the API is moot for this window: same orig
 | Shift report | `/ops/report` | `source` first (`code` is the fallback having shipped), headline, situation, priorities, `linked`, escalations, violations, and who wrote it |
 | Gate | `/ops/gate`, decisions through `POST` | every pending write with agent, tool, args, age. **Approve asks once**, naming the tool and args, because it performs the write on the deployed ranch. Reject needs a reason. A pause answered this session stays on screen with its buttons, so a second answer shows the API's 409 as a sentence naming the earlier decision |
 | Incidents | `/ops/incidents?limit=100` with `status`, `owner`, `subject_type` filters | newest first: severity, status, key, owner, summary and last value |
-| Ranch map | nothing yet | a placeholder that says why: coordinates live in the ranch's catalog, the API never calls the ranch, and neither does this window. Waits on `docs/issues.md` #21 |
+| Ranch map | nothing yet | a placeholder that says why: coordinates live in the ranch's catalog, the API never calls the ranch, and neither does this window. Waits on `docs/open-issues.md` #21 |
 
 The stream is the clock. Every tick that lands refreshes the feed, the report, and the gate; the gate
 also polls every 20s, because a decision made at the CLI does not land a tick. `EventSource` reconnects
@@ -94,7 +94,7 @@ was the one piece a port should replace with a chart library.
 
 ## Deploying
 
-Not yet. Vercel cannot reach `127.0.0.1`, and where the loop and API run is `docs/issues.md` #5. When
+Not yet. Vercel cannot reach `127.0.0.1`, and where the loop and API run is `docs/open-issues.md` #5. When
 that lands on a reachable host, set `OPS_API_URL` and `OPS_API_TOKEN` in the Vercel project's
 environment (server-side, never `NEXT_PUBLIC_`), and the plan's "three ticks land without a refresh at
 the Vercel URL" is the check. It is owed, not faked with a tunnel.
