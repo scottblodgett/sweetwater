@@ -105,7 +105,7 @@ def _file_handler(path: Path, *, daily: bool) -> logging.Handler:
     if daily:
         handler = logging.handlers.TimedRotatingFileHandler(path, when="midnight", utc=True, backupCount=0, encoding="utf-8")
     else:
-        handler = logging.handlers.RotatingFileHandler(path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=get_settings().log_rotate_bytes, backupCount=5, encoding="utf-8")
     handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, structlog.processors.JSONRenderer()],

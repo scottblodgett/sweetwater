@@ -2,8 +2,11 @@
 
     python main.py --handshake   prove the deployed ranch is reachable, then exit
     python main.py --once        run exactly one tick, then exit
-    python main.py               run the tick loop until interrupted
+    python main.py               run the tick loop until interrupted, or until the spend ceiling halts it
+    python main.py --no-spend    either of the above with the two paid stages skipped
     python main.py --api         serve the read API only
+
+Exit codes: 0 clean, 1 unrecoverable or forced, 2 config, 3 not built yet, 4 spend ceiling.
 
 The four ranch APIs and the MCP server are deployed and frozen. This process is
 the only thing being built here: one orchestrator, five sub-agents, running
@@ -14,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 import sys
 
+from src.agent.executor import EXIT_NOT_IMPLEMENTED, EXIT_OK, EXIT_UNRECOVERABLE
 from src.tools.allowlists import DEPLOYED_TOOLS
 from src.utils.config import get_settings
 from src.utils.logger import Stopwatch, bind_tick, configure_logging, get_logger, log_tick
@@ -109,8 +114,8 @@ async def handshake() -> int:
     return 0
 
 
-async def once() -> int:
-    """Exactly one tick, then exit. The free pass end to end, no model involved.
+async def once(*, spend: bool = True) -> int:
+    """Exactly one tick, then exit. `--no-spend` stops it at the end of the free pass.
 
     `SW_OPS_TARGET=test` sends the ledger to the local `sw_ops_test` schema instead of
     Supabase, through the same resolver `alembic` uses. Prod is the default: a default
@@ -135,14 +140,58 @@ async def once() -> int:
         log.error("store_unavailable", error=str(exc))
         return 2
 
-    state = await run_tick(tick=1, store=store)
+    state = await run_tick(tick=1, store=store, spend=spend)
     log.info("once_done", store=store.name, summary=summarize(state))
-    return 1 if state.error else 0
+    return EXIT_UNRECOVERABLE if state.error else EXIT_OK
+
+
+async def loop(*, spend: bool = True) -> int:
+    """The continuous loop. M4. Runs until interrupted, or until the spend ceiling halts it.
+
+    Signals, on the platform this actually runs on. Windows has no `loop.add_signal_handler`
+    and never delivers SIGTERM to a console process, so nothing here depends on either. Ctrl+C
+    is handled by `asyncio.Runner` (first cancels, second raises) and `run_loop` turns the
+    first into a drain. SIGTERM (POSIX) and SIGBREAK (Windows, Ctrl+Break) are wired through
+    `signal.signal` to request the same drain, and are simply absent where the platform lacks them.
+    """
+    from src.agent.executor import EXIT_CONFIG, run_loop
+    from src.agent.memory import SchemaGuardError, resolve_store
+
+    log = get_logger("sweetwater.loop")
+    settings = get_settings()
+
+    missing = settings.missing_upstreams()
+    if missing:
+        log.error("config_incomplete", missing=missing, hint="copy .env.example to .env and fill it in")
+        return EXIT_CONFIG
+    if spend and settings.spend_ceiling_usd <= 0:
+        log.error("spend_ceiling_invalid", ceiling_usd=settings.spend_ceiling_usd, hint="SPEND_CEILING_USD must be positive; there is no unlimited setting. Use --no-spend for a free loop")
+        return EXIT_CONFIG
+    try:
+        store = resolve_store()
+    except SchemaGuardError as exc:
+        log.error("store_unavailable", error=str(exc))
+        return EXIT_CONFIG
+
+    stop = asyncio.Event()
+    running = asyncio.get_running_loop()
+
+    def _request_stop(signum: int, _frame: object) -> None:
+        name = signal.Signals(signum).name
+        running.call_soon_threadsafe(stop.set)
+        running.call_soon_threadsafe(lambda: log.warning("stop_requested", signal=name))
+
+    for name in ("SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _request_stop)
+
+    return await run_loop(store=store, spend=spend, stop=stop)
 
 
 async def not_yet(name: str, milestone: str) -> int:
     get_logger("sweetwater").error("not_implemented", command=name, arrives_in=milestone)
-    return 3
+    return EXIT_NOT_IMPLEMENTED
 
 
 def main() -> int:
@@ -151,18 +200,27 @@ def main() -> int:
     mode.add_argument("--handshake", action="store_true", help="verify the deployed MCP server and ranch map, then exit")
     mode.add_argument("--once", action="store_true", help="run exactly one tick, then exit")
     mode.add_argument("--api", action="store_true", help="serve the read API only, no tick loop")
+    parser.add_argument("--no-spend", action="store_true", help="stop every tick at the end of the free pass; no evidence call, no model call, no bill")
     args = parser.parse_args()
 
     run_id = configure_logging()
-    get_logger("sweetwater").info("start", run_id=run_id, mode="handshake" if args.handshake else "once" if args.once else "api" if args.api else "loop")
+    mode_name = "handshake" if args.handshake else "once" if args.once else "api" if args.api else "loop"
+    get_logger("sweetwater").info("start", run_id=run_id, mode=mode_name, spend=not args.no_spend)
 
     if args.handshake:
         return asyncio.run(handshake())
     if args.once:
-        return asyncio.run(once())
+        return asyncio.run(once(spend=not args.no_spend))
     if args.api:
         return asyncio.run(not_yet("--api", "M8"))
-    return asyncio.run(not_yet("the tick loop", "M4"))
+    try:
+        return asyncio.run(loop(spend=not args.no_spend))
+    except KeyboardInterrupt:
+        # The second Ctrl+C. The first was turned into a drain inside `run_loop`; this one
+        # means the person at the keyboard did not want to wait, and the in-flight tick was
+        # cancelled by the Runner on the way out. Not a clean stop, so not exit 0.
+        get_logger("sweetwater").error("loop_forced", hint="second interrupt; the in-flight tick was cancelled and wrote no line")
+        return EXIT_UNRECOVERABLE
 
 
 if __name__ == "__main__":

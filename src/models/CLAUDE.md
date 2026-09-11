@@ -72,10 +72,13 @@ otherwise, scoping the model id to `us.anthropic.…` for the Bedrock path only,
 `AsyncAnthropicBedrock` expose an identical `messages.create`, so provider choice is a
 constructor decision and nothing downstream changes shape.
 
-**The Bedrock path is right for a supervised M2 and wrong for M4.** It rides this
-session's temporary AWS credentials, which expire; a continuous loop needs a real
-`ANTHROPIC_API_KEY`. When they expire, the failure is data (`ExpiredTokenException` in
-`ModelResponse.error`, a `no_answer` work order), not an exception.
+**The Bedrock path rides this session's temporary AWS credentials, which expire.** A loop
+meant to run for days needs a real `ANTHROPIC_API_KEY`. When they expire mid-run the failure is
+data, not an exception: `ExpiredTokenException` in `ModelResponse.error`, a `no_answer` order
+with `transport_error`, which from M4 puts the incident in the loop's **held** set and, when
+every order on the tick died that way, backs the `model` upstream off. The incidents are
+re-routed when the credential is back; nothing is lost, and nothing is retried on a cadence
+against a dead credential. M4's own paid run was four minutes on Bedrock and never hit it.
 
 ## `THINKING_BUDGET`, and the two ways to misconfigure it
 

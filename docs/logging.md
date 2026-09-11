@@ -34,14 +34,34 @@ container). Files are **always** JSON regardless of environment.
   "findings":21,"critical":6,"opened":9,"ongoing":8,"resolved":4,"held_unread":0,
   "agents_routed":["water_feed","infrastructure"],
   "work_orders":9,"work_orders_shipped":9,"work_orders_rejected":0,"escalated":1,
-  "input_tokens":50385,"output_tokens":7954,
+  "input_tokens":50385,"output_tokens":7954,"cost_usd":1.35,
   "worlds":["infrastructure","water_feed"],"shift_report":"model","shift_report_violations":[],
-  "ledger":{"opened":9,"ongoing":8,"resolved":4} }
+  "ledger":{"opened":9,"ongoing":8,"resolved":4},
+  "held":0,"skipped_upstreams":[],"chaos_fired":0,"chaos_healed":0,"chaos_missed":[] }
 ```
 
-The M3 shape. `cost_usd` joins at M7 with the pricing table; a field is added to this line
-when the stage that produces it exists, not before, so a `null` here always means the stage
-ran and had nothing to say.
+The M4 shape. A field is added to this line when the stage that produces it exists, not
+before, so a `null` here always means the stage ran and had nothing to say.
+
+**`cost_usd` arrived at M4, not M7 as planned**, because the loop's spend ceiling is
+denominated in dollars and a ceiling in tokens is a multiplication somebody does wrong at 2am.
+It is `input_tokens` and `output_tokens` at `llm_client.ASSUMED_RATE_USD_PER_M`, a stated
+assumption in one place; M7's pricing table replaces the constant and not the field. Exactly
+`0.0` on a tick that billed nothing. The loop sums it per run and halts at `SPEND_CEILING_USD`.
+
+**The loop's five fields.** `held` is incidents carried unanswered into the next tick because
+their agent raised, the model died in transport, or the spend stages were in backoff; they are
+re-routed next tick, and a rail rejection is never among them. `skipped_upstreams` names who was
+inside a backoff window; a line with `["sensor"]`, `error: null`, and `sensors_read: 0` is a
+heartbeat during an outage, not a calm ranch. `chaos_fired` and `chaos_healed` are what the tick
+armed and expired when chaos is on. **`chaos_missed` is the one to grep for**: an event this run
+injected that healed without its sensor ever being read. Non-empty means a fault was born and
+died between two sweeps and the ranch read calm the whole time.
+
+**A tick in free-pass backoff writes a short line**, `skipped_upstreams`, `held`, `cost_usd`,
+`error`, `failed_stage`, and nothing about sensors or the ledger, because nothing was attempted.
+A tick that writes no line is indistinguishable from a dead loop, and that rule holds hardest
+exactly when an upstream is down.
 
 **`worlds` and `shift_report` are read as a pair, and that is the only reason both are here.**
 `worlds` is the storm-front count, `shift_report` is `"model"` or `"code"`, and together they
@@ -56,13 +76,12 @@ the responders'. The M2 flat-cost query below still reads correctly - the superv
 on a tick that already fanned out - but a per-work-order average taken off this line is now
 slightly high, and `logs/agent.jsonl` is where to go for the split.
 
-**`chaos_fired` was planned for M5 and is still not here.** M5 built the overlay and applies it
-inside `sensors.sweep()`, which returns the count as `SweepResult.overlay_events`, but nothing
-calls `inject_for_tick` from `run_tick` yet. That was expected to land with M3's executor work
-and did not: M3 touched the executor only to add the synthesize stage, and wiring an injector
-into a tick is cadence work. **It is M4's, with the loop.** Stated here rather than left as an
-absence, because this file's own rule is that a missing field means the stage had nothing to
-say, and in this one case it means the stage is not called yet.
+**`chaos_fired` was planned for M5 and landed at M4**, with the loop, because wiring an injector
+into a tick is cadence work. `run_tick` heals, injects, and fires animal events right after the
+catalog (the plan needs the topology), and its own failure never fails the tick: a
+`chaos_step_failed` warning and honest readings. `SweepResult.overlay_observed` is the other
+half, the event ids whose sensor the sweep actually read, and it is what `chaos_missed` is
+computed against.
 
 **Written at tick end, always, including when the tick failed** (with `error` and
 `failed_stage`). A tick that produces no line is indistinguishable from a dead loop, and
@@ -214,8 +233,14 @@ nobody answered.
 The first query's field names are `input_tokens` and `output_tokens`, matching the model
 API and `agent.jsonl` rather than the `tokens_in` / `tokens_out` this file used to print,
 because two spellings for one number is a query that returns `null` and looks like a calm
-ranch. `cost_usd` arrives with the pricing table at M7; until then the token counts are the
-cost signal.
+ranch. `cost_usd` is on the line from M4 at an assumed rate; the token counts stay the
+measurement and the dollars are arithmetic on top of them.
+
+The loop's own lines, in the main stream rather than `tick.jsonl`: `loop_start`, `loop_stopped`
+(clean drain, exit 0), `loop_halted` (`reason=spend_ceiling`, exit 4), `loop_unrecoverable`
+(exit 1), `loop_draining` on the first interrupt, `stop_requested` with the signal name,
+`upstream_backoff` / `upstream_recovered` per upstream, `tick_overran`, `incidents_held`,
+`held_rerouted`, and `chaos_event_missed`.
 
 `logs/*.jsonl` is gitignored; `logs/.gitkeep` is not. A captured run worth keeping goes
 into `docs/` next to the finding it supports.

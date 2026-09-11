@@ -1308,6 +1308,21 @@ async def test_the_sweep_applies_the_overlay_and_reports_how_many_lies_it_told()
     assert [(f.category, f.severity) for f in triage_sweep(result.readings)] == [("water_low", "critical")]
 
 
+async def test_the_sweep_names_which_overlay_events_its_readings_actually_carried() -> None:
+    """M4's miss check reads `overlay_observed`. An active fault on a sensor that did not answer
+    was never observed, and if it heals before the next sweep the chaos log says it happened
+    while the ranch read calm the whole time. The sweep is the only place that knows which
+    sensors answered, so it is the sweep that says which faults were seen."""
+    other = replace(REF, sensor_id="dark-sensor")
+    with respx.mock(base_url=BASE) as mock:
+        mock.get(f"/sensors/{REF.sensor_id}").respond(200, json=payload(16.4))
+        mock.get(f"/sensors/{other.sensor_id}").respond(503, json={"error": {"category": "upstream"}})
+        result = await sweep([REF, other], overlay=[sensor_event(mode=MODE_PIN, target_id=REF.sensor_id, payload={"value": 0.8}, seq=0), sensor_event(mode=MODE_PIN, target_id=other.sensor_id, payload={"value": 0.8}, seq=1)])
+
+    assert result.overlay_events == 2, "both were active"
+    assert result.overlay_observed == ("chaos-1-0",), "but only the one whose sensor answered was seen"
+
+
 async def test_an_empty_overlay_is_an_honest_sweep_and_says_zero() -> None:
     with respx.mock(base_url=BASE) as mock:
         mock.get(f"/sensors/{REF.sensor_id}").respond(200, json=payload(16.4))

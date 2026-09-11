@@ -820,3 +820,162 @@ describes that exact signature as a config bug rather than a weak model, which i
 one line to spot. It is in the other session's file, so it is reported and recorded in
 `docs/STATE.md`'s owed row rather than fixed here. Fixing another session's file quietly is
 how a parallel build turns into a merge nobody can review.
+
+---
+
+## M4 - The continuous loop
+
+**2026-09-10. Done.** Closed after M5 and M3, in that order, on one `master`.
+
+`run_loop` wraps `run_tick` in `executor.py`: a fixed start-to-start cadence, a hard per-run
+spend ceiling that halts, per-upstream exponential backoff, a held set for incidents whose
+agent never answered, chaos wired into the tick with a miss check, and a shutdown that drains
+the in-flight tick on the platform this actually runs on. `main.py` lost the `not_yet` branch
+for the loop and gained `--no-spend`. Built rails first, as asked: every rule below had a test
+before the loop body existed.
+
+### The ceiling, answered first
+
+**`SPEND_CEILING_USD`, default $10.00 per run, checked after every tick, and it halts.** The
+run's `cost_usd` is summed off the tick lines; reaching the ceiling writes `loop_halted` with
+the reason, the spend, the tick count, and the run id, and the process exits **4**. Not 0,
+because a restart policy that relaunches on a clean exit would relaunch and spend again. Not 1,
+because nothing is broken and an on-call person reading 1 goes hunting for an outage. The
+overshoot is bounded at one tick, because a fan-out in flight is already paid for and cancelling
+it wastes the tokens. There is no unlimited value: a non-positive ceiling refuses to start a
+spending loop. `--once` is exempt, since a human is at the keyboard for that one.
+
+**The premise needed one correction.** The brief said `tick.jsonl` already carried `cost_usd`.
+It did not; `docs/logging.md` and `docs/model-routing.md` both scheduled it for M7 with the
+pricing table. The routing ledger did already state an assumed rate of $15/M in and $75/M out
+"so it can be corrected in one place," so that place became code: `ASSUMED_RATE_USD_PER_M` in
+`llm_client.py`, `cost_usd` on every tick line from M4, and M7's pricing table replaces the
+constant rather than introducing the field. A ceiling in tokens would have needed somebody to
+multiply at 2am, and the multiplication is the thing that gets done wrong.
+
+### The four things, and what each turned out to be
+
+**1. A crashed agent.** Reconcile runs before any agent and reads triage's findings, so an agent
+raising cannot close an incident; the first rail asserts exactly that and it passed on the
+existing code. The real hole was one layer down: an incident whose agent raised, or whose model
+call died in transport, gets a `no_answer` order, is `ongoing` on the next tick, and is
+therefore **never re-routed and never worked.** `held` is the fix. The tick emits the keys of
+retriable no-answers (`agent_raised`, `worker_raised`, `transport_error`, or a skipped spend
+stage), the loop carries them, and the next tick re-routes any that are still open. A rail
+rejection is never held, because a retry loop turns a rail into a sampler, and neither is
+`max_tokens`, because that buys the same truncation twice. In-process only: the durable version
+is a column on `incidents`, which is a Supabase migration and Scott's explicit yes.
+
+**2. Cadence and TTL.** Already one decision by M5's construction: a TTL is `ttl_ticks` times
+the cadence at injection, so changing the cadence rescales every scenario with it, and the
+catalog's minimum of two ticks means every fault straddles two sweeps at nominal cadence. What
+remained was the miss: a sweep in backoff while a short fault ages out. `SweepResult` now carries
+`overlay_observed`, the event ids whose sensor the sweep actually read, and at heal time an event
+this run injected that was never observed logs `chaos_event_missed` and lands in `chaos_missed`
+on the line. Animal events are excluded because nothing observes them yet (see the coyote item
+below). **The live run produced exactly one**, and it was real: `chaos-1-13`, a `stream_run_dry`
+on `alkali-spring-flow`, injected by tick 11 seconds before that tick's sweep failed, expired four
+ticks later during the outage, and healed on tick 16 having never been read.
+
+**3. Per-upstream backoff.** Five keys: `mcp`, `sensor`, `sw_ops`, `evidence` (Farm, Feed, and
+Care sit behind one stage, and telling them apart is `evidence.py`'s business), and `model`.
+Exponential and deterministic, 60s base and 900s cap, with no jitter because one loop retrying
+one service has no herd to break up. The loop itself never sleeps past one cadence. A free-pass
+upstream inside its window skips the whole free pass and **the tick still writes its line**,
+short, naming who is sick; a spend upstream inside its window runs the free pass and holds the
+new incidents. The model never raises out of `fan_out`, so its outage is read off the orders:
+every order dying in transport marks it down, one real answer clears it.
+
+**4. Windows shutdown.** Nothing here calls `loop.add_signal_handler`. Python 3.11's
+`asyncio.Runner` already turns the first Ctrl+C into a cancel of the main task and the second
+into `KeyboardInterrupt`, so the tick runs behind `asyncio.shield`, the cancel lands in the loop,
+the tick drains, the line is written, exit 0; a second Ctrl+C escapes and `main.py` returns 1.
+SIGTERM and SIGBREAK go through `signal.signal` and set the stop event, which also wakes the
+cadence sleep. **SIGBREAK is what made shutdown scriptable**: it is the one interrupt Windows
+delivers to a child process, and the live run was stopped with it.
+
+### The free run: 30 ticks, one dead upstream, two rotations, $0.00
+
+Run `c45d85b664a1`, `--no-spend`, `SW_OPS_TARGET=test`, cadence **60s**, chaos armed on the
+test store, `LOG_ROTATE_BYTES=8000`, `LOG_DIR=logs/m4-free`. The Sensor API was reached through
+a forwarding proxy on localhost, because settings are read once and cached so nothing can be
+repointed mid-run; killing the proxy is the upstream dying (`docs/cookbook.md` #27).
+
+| | |
+| --- | --- |
+| ticks | **30 in 30 minutes**, one line each, 02:29:16 to 02:58:16 UTC, every start on the minute |
+| a healthy tick | 3.0 to 3.6s, 160 read, 0 failed, 10 to 24 opened |
+| the kill, at tick 11 | sweep failed in 18s with `all 160 reads failed (transport)`; `sensor` backed off 60s |
+| ticks 12, 14, 15 | **skipped, and each wrote its line**: `skipped_upstreams=["sensor"]`, `error=null`, 0 to 1ms |
+| tick 13 | attempted, failed again, backoff 120s |
+| tick 16 | proxy back one minute earlier; sweep succeeded, `upstream_recovered after_failures=2`, and the missed chaos event healed |
+| chaos | 30 events injected over 30 ticks, all `sensor_overlay`, 1 missed and reported |
+| rotation | three files (`tick.jsonl`, `.1`, `.2`), one `run_id` across all of them, and `sw_ticks` joined them on it |
+| shutdown | `CTRL_BREAK_EVENT` at 02:59:12 during the cadence sleep; `stop_requested` and `loop_stopped` in the same millisecond; **exit 0** |
+| cost | `cost_usd: 0.0` on every line, `spent_usd: 0.0` at stop |
+
+### The paid run: two ticks, then the ceiling did its job
+
+Run `f1376b4e8bbc`, prod ledger, `CHAOS_ENABLED=0` set explicitly (see defect 2), cadence 120s,
+`SPEND_CEILING_USD=3.00` so the halt would be exercised for real if the ranch was busy. It was.
+
+| | tick 1 | tick 2 |
+| --- | --- | --- |
+| newly-opened, so calls | 12 across 3 worlds | 14 across 2 worlds |
+| responder tokens in / out | 72,692 / 10,523 | 82,086 / 13,060 |
+| shift report | `model`, fused | `model`, fused |
+| `cost_usd` | **2.16** | **2.54** |
+| wall clock | 80s | 90s |
+| rail failures | 0 of 13 | 0 of 15 |
+
+**26 work orders, 26 shipped, 0 rejected, 0 no-answer, 0 held.** After tick 2 the run stood at
+**$4.70 against a $3.00 ceiling**, `loop_halted` was written with `reason=spend_ceiling`, and the
+process **exited 4** on its own before a third tick started. The overshoot is the one tick the
+design allows. Full numbers and the steady-state finding: `docs/model-routing.md`.
+
+### Divergences from the plan
+
+| Planned | What shipped | Why |
+| --- | --- | --- |
+| `cost_usd` at M7 | at M4 | the ceiling is in dollars; see above |
+| exits 0 / 1 | plus **4** for the ceiling | a halt is neither clean nor broken, and a restart policy has to be able to tell |
+| kill by pointing at a bad URL | kill by stopping a proxy in the path | settings are read once and cached; repointing needs a restart, which is not a mid-run failure |
+| rotation "will be real" | forced with `LOG_ROTATE_BYTES=8000` | 30 tick lines are 18KB against a 10MB cap; nothing rotates in 30 minutes at the default |
+| a held column | an in-process held set | a column is a Supabase migration and needs an explicit yes |
+| the coyote verification | **still owed, and reframed** | nothing in the tick reads the Care API, so `herd_health` has no discovery path regardless of chaos or the supervisor. That is a new free stage plus a triage category, not three lines, and it is its own scoped item |
+
+### Five defects M4 caught in itself
+
+**1. A dead Sensor API was a green tick.** `read_sensor` turns every transport failure into a
+per-sensor error, correctly, so 160 of them produced a sweep with zero readings and no exception.
+Backoff never fires on a stage that did not fail. Found by predicting what the live kill would
+show before running it, and the prediction was "nothing." `run_tick` now raises when the sweep
+has errors and no readings. `docs/cookbook.md` #25.
+
+**2. The test suite was reading Supabase.** `.env` on this machine has `CHAOS_ENABLED=1`, and
+`sweep()` reads the overlay through `resolve_store()`, whose default is prod. Every tick test had
+been reading `sw_ops.chaos_events` on the hosted database, and from M4 the tick would have
+injected into `sw_ops_test` on every test. An autouse `chaos_off` fixture disarms both call
+sites. `docs/cookbook.md` #26. `docs/STATE.md` said the flag "belongs at 0"; it was at 1.
+
+**3. The brief's premise about `cost_usd`** (above).
+
+**4. Loop-level lines said `tick=0`.** `bind_tick` runs inside the tick, the tick runs as its
+own task, and a task copies its context, so the loop's `upstream_backoff` line about tick 11
+carried `tick: 0`. Seen on the first live run. The loop binds the tick before creating the task.
+
+**5. Two fixtures in the loop rails lied about the loop.** The fake sleep did not advance the fake
+clock, so start-to-start cadence read as drift; and a fake skipped tick did not report its skip,
+so `observe` read it as a recovery. Both were the fixture, not the loop, and both are exactly the
+two facts the real tick reports and the rail exists to check.
+
+### Work not asked for, and why each one is here
+
+| Added | Why it was not optional |
+| --- | --- |
+| `--no-spend` | the free verification run needs a documented way to run the loop with the paid stages off, and an env var for "do not spend" is the flag nobody sets |
+| `LOG_ROTATE_BYTES` | rotation could not otherwise happen inside the run that is supposed to prove it |
+| the all-failed-sweep raise | without it the kill test would have proved nothing |
+| `chaos_off` in `conftest.py` | see defect 2 |
+| `overlay_observed` on `SweepResult` | the miss check has to know which faults were seen, and only the sweep knows which sensors answered |
+| `skipped_upstreams`, `held`, `chaos_fired`, `chaos_healed`, `chaos_missed` on the tick line | every rule the loop enforces has to be readable off the line, or the line cannot tell a heartbeat during an outage from a calm ranch |

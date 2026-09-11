@@ -629,5 +629,98 @@ config value exists.
 
 ---
 
+## 25. A hundred and sixty item failures added up to a green tick
+
+**Pain.** Found at M4 by asking, before killing an upstream live, what a dead Sensor API would
+look like from inside the code. The answer was: nothing. `read_sensor` turns every transport
+failure into a per-sensor `SweepError`, which is correct for one dark sensor, so 160 of them
+produced a sweep with zero readings and zero raised exceptions. The tick was green,
+`sensors_read` was 0, reconcile correctly resolved nothing, and the loop would have read 160
+connection errors on every tick at cadence forever. Backoff never fires on a stage that did not
+fail.
+
+**Fix.** `run_tick` raises when the sweep has errors and no readings: "sweep read nothing: all
+160 reads failed." One dark sensor is still one dark sensor; every sensor dark is the upstream.
+The rail serves three broken sensors and asserts `failed_stage == "sweep"`, then serves one
+broken and asserts the tick is fine.
+
+**Lesson.** An aggregate of item failures is a different fact from the item failures, and code
+that handles each item well can be blind to all of them failing together. Any loop that
+tolerates per-item errors needs a second question at the end: did anything succeed at all? And
+plan a live kill by first predicting what the code will show; if the prediction is "nothing
+changes," the kill would have proved nothing and the code has a hole.
+
+**Found:** M4, in design, before the live run.
+
+---
+
+## 26. An armed feature flag plus a prod default put the test suite on Supabase
+
+**Pain.** `.env` on this machine has `CHAOS_ENABLED=1`, left over from driving M5. Every tick
+test calls `sweep()`, which calls `active_overlay()`, which reads the real settings, sees chaos
+armed, and resolves a store with `resolve_store()`, whose default is prod. So `pytest` had been
+reading `sw_ops.chaos_events` on Supabase, read-only and by accident, on every tick test. The
+first rule of `tests/CLAUDE.md` is "never Supabase," and no rail caught it because a read
+leaves no trace. From M4 it would have been worse: the tick injects when armed, and the plan
+would have been written into `sw_ops_test` on every test.
+
+**Fix.** An autouse `chaos_off` fixture in `conftest.py` patches both `get_settings` call sites
+with a copy of the real settings and chaos disarmed. A test that wants chaos patches it back,
+which the chaos suite already did, and a later patch wins.
+
+**Lesson.** A feature that reads an env flag and a store whose default is prod are each fine;
+together they mean a developer's `.env` decides whether the test suite touches production. Any
+test suite that shares a `.env` with the live process needs one fixture whose whole job is
+disarming the flags that reach outward, and it has to be autouse: opt-in safety is the same as
+none. Also: `CHAOS_ENABLED` "belongs at 0" was true in the docs and false on the machine.
+Check the machine.
+
+**Found:** M4, while wiring chaos into the tick and asking where the tests would inject.
+
+---
+
+## 27. You cannot repoint an upstream mid-run, so own the thing between you and it
+
+**Pain.** The M4 verification calls for killing an upstream mid-run "by pointing it at a bad
+URL." Settings are read once at process start and cached, correctly, so there is nothing to
+repoint without a restart, and a restart is not a mid-run failure. Editing code to reload
+settings for the sake of one test is the test bending the product.
+
+**Fix.** A forty-line forwarding proxy on localhost, outside the repo, and `SENSOR_API` pointed
+at it for the run. Killing the proxy process is the upstream dying; starting it again is the
+upstream recovering. The loop sees `ConnectError`, backs off, skips, retries, and recovers, and
+knows nothing about the proxy.
+
+**Lesson.** To fault a dependency you do not control from a process you cannot reconfigure,
+put something you do control in the path and fault that. It is the same move as the chaos
+overlay: the lie lives in one place you own, and the thing being tested is untouched.
+
+**Found:** M4, planning the live run.
+
+---
+
+## 28. Write the shutdown for the platform it runs on, not the one in the tutorial
+
+**Pain.** Every asyncio shutdown example is POSIX: `loop.add_signal_handler(SIGTERM, ...)`.
+On Windows 11, where this runs, that call raises `NotImplementedError`, SIGTERM is never
+delivered to a console process, and Ctrl+C arrives as `KeyboardInterrupt`. The predictable
+path is to write the POSIX version, watch it fail, and weaken shutdown to a flag nobody sets.
+
+**Fix.** Lean on what Python 3.11 already does: `asyncio.Runner` turns the first Ctrl+C into a
+cancel of the main task and the second into `KeyboardInterrupt`. Run the tick as its own task
+behind `asyncio.shield`, catch the cancel in the loop, drain the tick, write the line, exit 0.
+Register SIGTERM and SIGBREAK through `signal.signal`, which exists everywhere and is a no-op
+where the signal is never delivered. Verified live with `CTRL_BREAK_EVENT` from a driver
+process, which is the one interrupt Windows will deliver to a child.
+
+**Lesson.** Graceful shutdown is a platform question before it is an asyncio question. Find
+out what the platform actually delivers, then build on the runtime's own handling of it rather
+than fighting it. And a shutdown path that cannot be exercised from a script is a shutdown path
+that has never been tested; SIGBREAK made it scriptable.
+
+**Found:** M4, in design, from the prompt's own warning.
+
+---
+
 _Candidates still known from the design and not yet paid for: the `num_ctx` shim trap, and why a
 gate must outlive its process._

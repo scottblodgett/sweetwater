@@ -48,6 +48,23 @@ def no_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("src.models.llm_client.build_client", _refuse)
 
 
+@pytest.fixture(autouse=True)
+def chaos_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chaos is disarmed for every test unless the test arms it itself.
+
+    Found at M4: `.env` on this machine carries `CHAOS_ENABLED=1`, and with the real settings
+    in force `sweep()` reads the active overlay through `resolve_store()`, whose default is
+    Supabase. That is a test touching the hosted database, read-only and by accident, which
+    is exactly the class of thing the first rule of this file forbids. And from M4 the tick
+    itself injects when armed, which would have written the plan into `sw_ops_test` on every
+    tick test. A test that wants chaos patches `src.tools.chaos.get_settings` itself, as the
+    chaos suite in `test_tools.py` already does, and that later patch wins.
+    """
+    disarmed = get_settings().model_copy(update={"chaos_enabled": False})
+    monkeypatch.setattr("src.tools.chaos.get_settings", lambda: disarmed)
+    monkeypatch.setattr("src.agent.executor.get_settings", lambda: disarmed)
+
+
 async def _probe(url: str) -> None:
     engine = build_engine(url, schema=SCHEMA_TEST)
     try:

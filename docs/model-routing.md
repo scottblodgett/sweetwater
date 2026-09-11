@@ -146,6 +146,38 @@ new. Naively, 288 ticks a day at tick B's cost is roughly $730/day, and that num
 steady-state loop opens a handful of incidents per tick, not fourteen, which is a materially
 different bill. M4 runs for 30 minutes unattended and measures it rather than either of us guessing.
 
+## What M4 measured, and the prediction it overturned
+
+`cost_usd` is on the tick line from M4 at the rate above (`llm_client.ASSUMED_RATE_USD_PER_M`),
+and the loop halts at `SPEND_CEILING_USD`. The short paid run, prod ledger, chaos off, 120s cadence:
+
+| | tick 1 | tick 2 |
+| --- | --- | --- |
+| newly-opened, so calls | 12 across 3 worlds | 14 across 2 worlds |
+| responder input / output | 72,692 / 10,523 | 82,086 / 13,060 |
+| shift report | fused by the model | fused by the model |
+| `cost_usd` | **$2.16** | **$2.54** |
+| wall clock | 80 s | 90 s |
+
+26/26 shipped, 0 rejected, 0 no-answer. The run halted itself at **$4.70 against a $3.00
+ceiling**, exit 4, one tick of overshoot as designed.
+
+**The "handful of new incidents per tick" prediction above was wrong for this ranch.** The
+prod ledger was not freshly refilled; it had 25 live incidents from M3 and had churned for
+hours. Tick 1 still opened 12 and tick 2 opened 14, and the 30-minute free run at a 60s
+cadence opened **10 to 24 per tick, every tick, for 30 ticks.** The reason is in
+`docs/STATE.md`: the deployed Sensor API synthesizes a fresh reading on every call, unanchored
+to the last one, so healthy sensors draw extreme values a fraction of the time and the ledger
+churns 10 to 20 opened and 10 to 20 resolved on every tick regardless of cadence. On this ranch
+**every tick is a storm tick.** At 300s that is roughly $2.30 x 12 = **$28 an hour, $670 a
+day**, which is the "fiction" number above arriving as a measurement.
+
+That is a property of the simulator, and it points at two levers, neither of which is M4's:
+a debounce in triage or reconcile (an incident opens only when a sensor is bad on two
+consecutive sweeps, which the seven permanently-bad sensors would pass and a one-draw extreme
+would not), and M7's cascade. It is written here so M7 optimizes against the measured bill and
+not the predicted one.
+
 **Both ticks were `reasoning_effort="none"`, including the supervisor.** Fusion is the one job in
 this repo where that looks arguable, since deciding two incidents are one event is closer to
 classification than to writing. It stays off because the fusion claim is *checked* rather than
@@ -178,6 +210,7 @@ One row per job that moved tiers. No row, no move.
 | --- | --- | --- | --- | --- | --- |
 | 2026-09-10 | evidence-packet judging **plus** work-order write, `water_feed` | - | Tier 2 | 3 live ticks, 19 work orders. 58,339 then 38,328 then 24,161 tokens as the ledger grew 25 to 65 rows. 19/19 shipped, 0 rejected, all `tool_use`. Rule citations discriminate: `WATER-05` on 12 of 19, but `east-allotment-water` cited only `WATER-02` | **baseline set.** The number to beat, not a decision |
 | 2026-09-10 | the same job across **four** responders, fanned out | - | Tier 2 | 2 live ticks, 29 work orders, 3 worlds each. 29/29 shipped, 0 rejected, 0 no-answer. Per-call cost unchanged from the row above, so fan-out multiplies calls and not price. `herd_health` was handed nothing on both ticks and logged nothing about it, which is `docs/STATE.md` decision 5 working | **baseline widened.** Still no move |
+| 2026-09-10 | the whole tick, in the loop, unattended | - | Tier 2 | 2 paid ticks on the prod ledger at 120s cadence: 12 then 14 newly-opened, $2.16 then $2.54, 26/26 shipped, fused both times, halted at the $3 ceiling with exit 4. 30 free ticks at 60s cadence opened 10 to 24 each. Steady state on this ranch is a storm every tick, not a handful | **no move.** The bill is now measured; the lever is a debounce or M7, not a cheaper tick |
 | 2026-09-10 | shift-report synthesis, the supervisor | - | Tier 2 | 1 call per tick, gated at `FUSION_THRESHOLD = 2` worlds, so most ticks make none. 14,093 in / 1,646 out on a 14-order page, `tool_use`, 0 violations. The design table above puts "shift-report assembly" in Tier 1; that is still the intent, and it is not this job. Assembly in code is what a calm tick already does for free | **not moved, and the table's Tier-1 row is about `assemble_shift_report`, not about fusion** |
 | _(M7)_ | chaos observation prose | Tier 2 | Tier 1 | pending | pending |
 | _(M7)_ | work-order write | Tier 2 | Tier 1 | pending | pending |

@@ -104,7 +104,8 @@ only way to reach ranch data is over HTTP through the deployed APIs.
 ```bash
 python main.py --handshake   # prove the deployed ranch is reachable, then exit
 python main.py --once        # exactly one tick        (live, and SPENDS from M2)
-python main.py               # the continuous loop     (stub until M4, exits 3)
+python main.py               # the continuous loop     (live from M4, SPENDS, halts at SPEND_CEILING_USD)
+python main.py --no-spend    # the loop (or --once) stopped at the end of the free pass: no evidence, no model, no bill
 python main.py --api         # read API only           (stub until M8, exits 3)
 
 pytest
@@ -115,13 +116,29 @@ python -m src.tools.chaos status   # M5. Also plan / inject / expire / restore, 
 ```
 
 An unbuilt mode exits **3** with a `not_implemented` line naming the milestone that
-brings it, rather than failing as if it were broken.
+brings it, rather than failing as if it were broken. The loop's other exits: **0** is a clean
+drain after Ctrl+C, SIGTERM, or SIGBREAK; **1** is a second Ctrl+C or a tick raising outside
+its own guard; **2** is a config refusal; **4** is the spend ceiling, chosen so a restart policy
+does not relaunch and spend again and nobody reads it as an outage.
+
+**The loop has a hard per-run spend ceiling, and it HALTS.** `SPEND_CEILING_USD` (default
+$10, must be positive, no unlimited value) is checked after every tick against the summed
+`cost_usd` on the tick lines; reaching it writes `loop_halted` with the reason and exits 4.
+Overshoot is bounded at one tick, because a fan-out in flight is already paid for. The ceiling
+does not apply to `--once`, where a human is at the keyboard.
 
 **`--once` costs money from M2.** Its last two stages assemble an evidence packet and hand
 it to Opus, once per newly-opened incident: 24k to 58k tokens depending on how much of the
 ledger is already `ongoing`, and **161k on the M3 tree with five agents and a shift report.**
 In code, `run_tick(spend=False)` stops at the end of the free pass, and
 `conftest.no_model_calls` makes a forgotten flag fail loudly rather than bill.
+
+**Backoff is per upstream and the heartbeat never stops.** A sick Sensor API, MCP, or ledger
+skips the free pass for an exponential window (60s base, 900s cap) and the tick still writes
+its line naming who is sick; a sick Farm/Feed/Care or model skips only the spend and holds the
+new incidents for the next tick. An incident whose agent raised or whose model call died in
+transport is **held**, re-routed next tick, and counted on the line. A rail rejection is never
+retried.
 
 **`SW_OPS_TARGET=test` points the ledger at local `sw_ops_test` instead of Supabase**, which
 is how a tick gets exercised without writing 23 incidents into the ledger a demo reads from.

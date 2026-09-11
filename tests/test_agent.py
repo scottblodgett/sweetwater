@@ -13,6 +13,9 @@ the rails matter more than the filenames. In order:
      `DROP SCHEMA` that already ran
   5. **config and logging** - the instrument is built before the thing it measures, so the
      instrument gets tests first
+  6. **the work order** - the rails on what a model is allowed to have said
+  7. **the loop** - held incidents, per-upstream backoff, the spend ceiling, cadence, and
+     a shutdown that drains rather than cancels. M4.
 
 Never Supabase. The upstream is respx against a fake host and the ledger is the local
 `sw_ops_test` schema, so `pytest` passes on a plane.
@@ -23,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,7 +58,7 @@ from src.agent.agent import (
     synthesize,
     unrouted_categories,
 )
-from src.agent.executor import run_tick, summarize
+from src.agent.executor import EXIT_OK, EXIT_SPEND_CEILING, EXIT_UNRECOVERABLE, Backoff, run_loop, run_tick, summarize
 from src.agent.memory import (
     ALLOWED_SCHEMAS,
     RANCH_SCHEMAS,
@@ -76,14 +79,15 @@ from src.agent.memory import (
 )
 from src.agent.state import Finding, Incident, RanchState, WorkOrder
 from src.agent.workers import AGENT_CONCURRENCY, citable_rules, fan_out, run_agent, run_water_feed, to_work_order
-from src.models.llm_client import THINKING_BUDGET, ModelResponse, call_tier2, resolve_provider
+from src.models.llm_client import ASSUMED_RATE_USD_PER_M, THINKING_BUDGET, ModelResponse, call_tier2, cost_usd, resolve_provider
 from src.prompts.agent_prompts import MANDATES, SUPERVISOR_MANDATE
 from src.prompts.system_prompts import SHIFT_REPORT_SCHEMA, WORK_ORDER_SCHEMA, system_prompt
 from src.tools.allowlists import DEPLOYED_TOOLS
+from src.tools.chaos import KIND_ANIMAL, KIND_SENSOR, ChaosEvent
 from src.tools.evidence import EvidencePacket, HistoryPoint, PastureContext, SiblingReading
 from src.tools.mcp_client import RanchMap, SensorRef, flatten_exception, parse_ranch_map
 from src.tools.triage import ALL_CATEGORIES
-from src.utils.config import Settings
+from src.utils.config import Settings, get_settings
 from src.utils.helpers import backoff_delay, utc_now_iso
 from src.utils.logger import _foreign_chain, _redact
 
@@ -1663,3 +1667,489 @@ def test_the_unbriefed_headline_promises_an_action_it_never_writes_down() -> Non
     assert "GM on stocking review" in no_brief.headline and no_brief.escalate
     assert not [a for a in no_brief.actions if "escalat" in a.lower() or "general manager" in a.lower()]
     assert any("Escalate to the general manager" in a for a in _compliance_order(WITH_BRIEF_ANSWER).actions)
+
+
+# =========================================================================== #
+# 7. the loop: held incidents, backoff, the ceiling, cadence, shutdown. M4.
+# =========================================================================== #
+# Nothing here reaches a model or the ranch. The tick rails run `run_tick` against respx and
+# `sw_ops_test`; the loop rails hand `run_loop` a fake tick, a fake clock, and a fake sleep,
+# because thirty ticks of bookkeeping should take a millisecond and prove the same thing.
+
+
+def _held_order(key: str, *, agent: str = "water_feed", violations: tuple[str, ...] = ("agent_raised",), status: str = "no_answer") -> WorkOrder:
+    return WorkOrder(incident_key=key, agent=agent, severity="critical", status=status, violations=violations, assessment="x")  # type: ignore[arg-type]
+
+
+def _stub_spend(monkeypatch: pytest.MonkeyPatch, outcome: Callable[[str], WorkOrder]) -> list[str]:
+    """`assemble` returns bare packets and `fan_out` answers each with `outcome(key)`. Returns
+    the list of incident keys the fan-out was actually handed, for asserting on."""
+    handed: list[str] = []
+
+    async def _assemble(incidents: object, **_kw: object) -> list[SimpleNamespace]:
+        return [SimpleNamespace(incident=inc) for inc in incidents]  # type: ignore[attr-defined]
+
+    async def _fan_out(by_agent: dict[str, tuple[SimpleNamespace, ...]], **_kw: object) -> dict[str, tuple[WorkOrder, ...]]:
+        out: dict[str, tuple[WorkOrder, ...]] = {}
+        for owner, packets in by_agent.items():
+            handed.extend(p.incident.key for p in packets)
+            out[owner] = tuple(outcome(p.incident.key) for p in packets)
+        return out
+
+    monkeypatch.setattr("src.agent.executor.assemble", _assemble)
+    monkeypatch.setattr("src.agent.executor.fan_out", _fan_out)
+    return handed
+
+
+LOW = {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0}
+CALM = {"alkali-flat-water": 18.0, "east-allotment-fence": 6.4, "home-place-bin": 900.0}
+
+
+@respx.mock
+async def test_a_crashed_agent_resolves_nothing_and_its_incidents_are_held(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """M1's rule one layer up. Reconcile runs before any agent and reads triage's findings, so
+    an agent raising cannot close an incident; the rail asserts that first. What it CAN do is
+    leave a `no_answer` order on an incident that is `ongoing` next tick and never re-routed.
+    `held` is the fix: carried out of the tick, counted on the line, re-routed on the next."""
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, lambda key: _held_order(key))
+    with capture_logs() as logs:
+        crashed = await run_tick(tick=1, store=target, now=T0, spend=True)
+
+    assert crashed.error is None and len(crashed.opened) == 1
+    assert crashed.resolved == (), "a crashed agent resolved nothing"
+    assert crashed.held == ("alkali-flat-water:water_low",)
+    line = next(entry for entry in logs if entry["event"] == "tick")
+    assert line["held"] == 1 and line["ledger"] == {"opened": 1}
+    assert any(entry["event"] == "incidents_held" and entry["count"] == 1 for entry in logs)
+
+    respx.mock.reset()
+    serve(respx.mock, LOW)
+    handed = _stub_spend(monkeypatch, lambda key: to_work_order(packet=_packet("alkali-flat-water"), agent="water_feed", response=_response(_answer())))
+    recovered = await run_tick(tick=2, store=target, now=T1, spend=True, held=crashed.held)
+
+    assert recovered.opened == () and len(recovered.ongoing) == 1, "the ledger calls it ongoing, which is why route() alone would never see it again"
+    assert handed == ["alkali-flat-water:water_low"], "and the held incident was re-routed anyway"
+    assert recovered.held == (), "answered, so no longer held"
+
+
+@respx.mock
+async def test_a_held_incident_that_heals_falls_out_of_the_held_set(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, lambda key: _held_order(key))
+    crashed = await run_tick(tick=1, store=target, now=T0, spend=True)
+
+    respx.mock.reset()
+    serve(respx.mock, CALM)
+    handed = _stub_spend(monkeypatch, lambda key: _held_order(key))
+    healed = await run_tick(tick=2, store=target, now=T1, spend=True, held=crashed.held)
+
+    assert len(healed.resolved) == 1 and healed.held == () and handed == [], "nothing to re-route: the tank came back"
+
+
+@respx.mock
+async def test_a_rail_rejection_is_never_held(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """A retry loop turns a rail into a sampler. `rejected` means the model answered and the
+    answer was indefensible; asking again until it passes is the one thing not to do. And a
+    `max_tokens` no-answer is a config bug that buys the same truncation twice."""
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, lambda key: _held_order(key, status="rejected", violations=("all_clear",)))
+    assert (await run_tick(tick=1, store=target, now=T0, spend=True)).held == ()
+
+    respx.mock.reset()
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, lambda key: _held_order(key, violations=("no_payload", "max_tokens")))
+    assert (await run_tick(tick=2, store=target, now=T1, spend=True)).held == ()
+
+
+@respx.mock
+async def test_a_transport_failure_is_held_because_the_model_never_answered(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    serve(respx.mock, LOW)
+    _stub_spend(monkeypatch, lambda key: _held_order(key, violations=("no_payload", "transport_error")))
+    assert (await run_tick(tick=1, store=target, now=T0, spend=True)).held == ("alkali-flat-water:water_low",)
+
+
+async def test_a_tick_with_the_free_pass_in_backoff_still_writes_its_line(monkeypatch: pytest.MonkeyPatch, target: StoreTarget) -> None:
+    """The rule the whole design hangs on. A loop in backoff that writes no line is
+    indistinguishable from a dead loop. So the tick writes one, names who is sick, touches
+    nothing, and the held set passes through untouched because nothing was attempted."""
+
+    async def _never() -> tuple[RanchMap, str]:
+        raise AssertionError("the catalog must not be fetched while the sensor api is in backoff")
+
+    monkeypatch.setattr("src.agent.executor.fetch_catalog", _never)
+    with capture_logs() as logs:
+        state = await run_tick(tick=3, store=target, spend=True, skip=("sensor",), held=("a:b",))
+
+    lines = [entry for entry in logs if entry["event"] == "tick"]
+    assert len(lines) == 1
+    assert lines[0]["skipped_upstreams"] == ["sensor"] and lines[0]["error"] is None and lines[0]["failed_stage"] is None
+    assert lines[0]["held"] == 1 and lines[0]["cost_usd"] == 0.0
+    assert state.held == ("a:b",) and state.sensors_read == 0
+    assert "skipped" in summarize(state) and "sensor" in summarize(state)
+
+
+@respx.mock
+async def test_a_sick_model_holds_new_incidents_instead_of_paying_for_packets_nobody_can_judge(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """Per-upstream, not global: the ranch is readable, so the free pass runs and the ledger
+    moves. Only the spend is withheld, and what it would have spent on is held for the tick
+    when the window closes."""
+    serve(respx.mock, LOW)
+
+    async def _no(*_a: object, **_k: object) -> None:
+        raise AssertionError("no evidence call while the model is in backoff")
+
+    monkeypatch.setattr("src.agent.executor.assemble", _no)
+    state = await run_tick(tick=1, store=target, now=T0, spend=True, skip=("model",))
+
+    assert len(state.opened) == 1, "the free pass ran"
+    assert state.skipped_upstreams == ("model",) and state.held == ("alkali-flat-water:water_low",)
+    assert state.work_orders == () and state.cost_usd == 0.0
+
+
+@respx.mock
+async def test_every_read_failing_is_the_sensor_api_being_down_and_fails_the_sweep(catalog: RanchMap, target: StoreTarget) -> None:
+    """One dark sensor is data; every sensor dark is an outage. Without this the sweep "succeeds"
+    with zero readings, the tick is green, and the loop reads 160 connection errors on every tick
+    at cadence forever, which is the opposite of backing off. Found while planning the live kill."""
+    serve(respx.mock, LOW, broken=set(LOW))
+    with capture_logs() as logs:
+        state = await run_tick(tick=1, store=target, now=T0, spend=False)
+    assert state.failed_stage == "sweep" and state.error is not None and "all 3 reads failed" in state.error
+    assert next(entry for entry in logs if entry["event"] == "tick")["failed_stage"] == "sweep"
+    assert state.resolved == () and state.opened == ()
+
+    respx.mock.reset()
+    serve(respx.mock, LOW, broken={"alkali-flat-water"})
+    partial = await run_tick(tick=2, store=target, now=T1, spend=False)
+    assert partial.failed_stage is None and (partial.sensors_read, partial.sensors_failed) == (2, 1), "one dark sensor is still just one dark sensor"
+
+
+@respx.mock
+async def test_a_failed_tick_keeps_carrying_what_it_was_handed(catalog: RanchMap, target: StoreTarget, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _boom(*_a: object, **_k: object) -> object:
+        raise httpx.ConnectError("sensor api unreachable")
+
+    monkeypatch.setattr("src.agent.executor.sweep", _boom)
+    state = await run_tick(tick=1, store=target, now=T0, spend=False, held=("x:y",))
+    assert state.failed_stage == "sweep" and state.held == ("x:y",)
+
+
+@respx.mock
+async def test_cost_usd_rides_on_the_tick_line_and_a_calm_tick_is_exactly_zero(catalog: RanchMap, target: StoreTarget) -> None:
+    """The ceiling is denominated in dollars, so the dollars are on the line rather than
+    derived later from the tokens by whoever is awake. The rate is an assumption, in one
+    place, and the field is exact zero when nothing billed, not a rounding of nothing."""
+    serve(respx.mock, CALM)
+    with capture_logs() as logs:
+        state = await run_tick(tick=1, store=target, now=T0, spend=False)
+    line = next(entry for entry in logs if entry["event"] == "tick")
+    assert line["cost_usd"] == 0.0 and state.cost_usd == 0.0
+    assert cost_usd(1_000_000, 0) == ASSUMED_RATE_USD_PER_M[0] and cost_usd(0, 1_000_000) == ASSUMED_RATE_USD_PER_M[1]
+    assert cost_usd(91_468, 15_545) == pytest.approx(2.54, abs=0.01), "tick B in docs/model-routing.md, so the constant and the ledger agree"
+
+
+# --- the backoff registry --------------------------------------------------------------- #
+def test_backoff_is_per_upstream_exponential_and_capped() -> None:
+    """Backing the whole loop off because the Feed API is sick means one dead service stops
+    the ranch watch. One key per upstream, and a failure on one says nothing about another."""
+    b = Backoff(base=60.0, cap=900.0)
+    assert [b.record_failure("sensor", now=0.0) for _ in range(5)] == [60.0, 120.0, 240.0, 480.0, 900.0]
+    assert b.blocked(now=0.0) == {"sensor": 900.0}
+    assert "mcp" not in b.blocked(now=0.0), "and mcp is untouched"
+    assert b.blocked(now=901.0) == {}, "the window closes on its own"
+    b.record_success("sensor")
+    assert b.failures == {} and b.record_failure("sensor", now=0.0) == 60.0, "a success resets the count"
+
+
+def test_backoff_reads_the_tick_outcome_by_stage() -> None:
+    b = Backoff(base=60.0, cap=900.0)
+    b.observe(RanchState(failed_stage="sweep", error="ConnectError"), now=0.0)
+    assert set(b.blocked(now=0.0)) == {"sensor"}
+
+    b.observe(RanchState(failed_stage="reconcile", error="OperationalError"), now=0.0)
+    assert set(b.blocked(now=0.0)) == {"sw_ops"}, "the sweep ran clean on that tick, which is the sensor api recovering, and the ledger is now the sick one"
+
+    b.observe(RanchState(failed_stage=None, catalog_source="mcp_resource"), now=0.0)
+    assert b.blocked(now=0.0) == {}, "a clean tick clears everything it attempted"
+
+    b.observe(RanchState(failed_stage="chaos", error="x"), now=0.0)
+    assert b.blocked(now=0.0) == {}, "an unknown stage marks nothing rather than crashing the loop"
+
+
+def test_backoff_treats_every_order_dying_in_transport_as_the_model_being_down() -> None:
+    """`fan_out` never raises; the model's outage arrives as transport-error orders. All of them
+    dying is the model down. Some answering is not, and must not back the model off."""
+    b = Backoff(base=60.0, cap=900.0)
+    dead = RanchState(work_orders=(_held_order("a", violations=("no_payload", "transport_error")), _held_order("b", violations=("no_payload", "transport_error"))))
+    b.observe(dead, now=0.0)
+    assert set(b.blocked(now=0.0)) == {"model"}
+
+    mixed = RanchState(work_orders=(_held_order("a", violations=("no_payload", "transport_error")), _held_order("b", status="ok", violations=())))
+    b.observe(mixed, now=0.0)
+    assert b.blocked(now=0.0) == {}, "one real answer is a recovery"
+
+
+# --- the loop ---------------------------------------------------------------------------- #
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _fake_tick(states: list[RanchState], *, calls: list[dict[str, object]] | None = None, clock: _Clock | None = None, takes: float = 0.0) -> Callable[..., Awaitable[RanchState]]:
+    """A tick that returns the next canned state, records what it was handed, and advances
+    the fake clock by `takes` so cadence can be asserted on."""
+    queue = list(states)
+
+    async def _tick(**kw: object) -> RanchState:
+        if calls is not None:
+            calls.append(kw)
+        if clock is not None:
+            clock.t += takes
+        return queue.pop(0) if queue else RanchState()
+
+    return _tick
+
+
+async def _no_sleep(_s: float) -> None:
+    return None
+
+
+def _sleep_recorder(record: list[float], clock: _Clock) -> Callable[[float], Awaitable[None]]:
+    """A sleep that records what it was asked for and moves the fake clock by that much."""
+
+    async def _sleep(s: float) -> None:
+        record.append(s)
+        clock.t += s
+
+    return _sleep
+
+
+TEST_TARGET = StoreTarget(name="test", url="postgresql+asyncpg://x", schema="sw_ops_test")
+
+
+async def test_the_loop_halts_at_the_spend_ceiling_and_exits_4() -> None:
+    """The first phase where the money runs with nobody watching. The ceiling HALTS: no
+    further tick starts, the reason is logged with the run id, and the exit code is one a
+    restart policy will not relaunch and an on-call person will not read as an outage.
+    Overshoot is bounded at one tick, because a fan-out already in flight is already paid for."""
+    with capture_logs() as logs:
+        code = await run_loop(store=TEST_TARGET, interval_s=0, ceiling_usd=10.0, tick_fn=_fake_tick([RanchState(cost_usd=4.0)] * 5), sleep=_no_sleep)
+
+    assert code == EXIT_SPEND_CEILING == 4
+    halted = next(entry for entry in logs if entry["event"] == "loop_halted")
+    assert halted["reason"] == "spend_ceiling" and halted["ticks"] == 3, "4, 8, 12: the third tick crossed 10 and no fourth started"
+    assert halted["spent_usd"] == 12.0 and halted["ceiling_usd"] == 10.0
+    assert "run_id" in halted
+
+
+async def test_the_loop_refuses_a_ceiling_that_is_not_positive() -> None:
+    """There is no value that means unlimited. Zero is a refusal, not infinity."""
+    with pytest.raises(ValueError, match="SPEND_CEILING_USD"):
+        await run_loop(store=TEST_TARGET, interval_s=0, ceiling_usd=0.0, tick_fn=_fake_tick([]), sleep=_no_sleep, max_ticks=1)
+    assert await run_loop(store=TEST_TARGET, interval_s=0, ceiling_usd=0.0, spend=False, tick_fn=_fake_tick([]), sleep=_no_sleep, max_ticks=1) == EXIT_OK, "a free loop has nothing to cap"
+
+
+async def test_a_free_loop_never_halts_on_cost() -> None:
+    code = await run_loop(store=TEST_TARGET, interval_s=0, spend=False, ceiling_usd=1.0, tick_fn=_fake_tick([RanchState(cost_usd=5.0)] * 5), sleep=_no_sleep, max_ticks=5)
+    assert code == EXIT_OK
+
+
+async def test_cadence_is_start_to_start_and_an_overrun_is_named() -> None:
+    """A 90-second storm tick must not push every later tick 90 seconds late. The next tick is
+    scheduled from when this one STARTED, so the sleep is the interval minus the tick's own
+    duration, and a tick longer than the interval starts the next immediately and says so."""
+    clock = _Clock()
+    slept: list[float] = []
+    with capture_logs() as logs:
+        await run_loop(store=TEST_TARGET, interval_s=10.0, spend=False, tick_fn=_fake_tick([RanchState()] * 3, clock=clock, takes=3.0), clock=clock, sleep=_sleep_recorder(slept, clock), max_ticks=3)
+    assert slept == [7.0, 7.0], "10 minus the 3 the tick took, twice; no sleep after the last"
+
+    clock = _Clock()
+    slept = []
+    with capture_logs() as logs:
+        await run_loop(store=TEST_TARGET, interval_s=10.0, spend=False, tick_fn=_fake_tick([RanchState()] * 2, clock=clock, takes=14.0), clock=clock, sleep=_sleep_recorder(slept, clock), max_ticks=2)
+    assert slept == [], "the tick overran, so the next started at once"
+    overran = next(entry for entry in logs if entry["event"] == "tick_overran")
+    assert overran["by_s"] == 4.0
+
+
+async def test_the_loop_carries_held_and_backoff_from_one_tick_into_the_next() -> None:
+    """The bookkeeping that makes M4 more than a while loop: what one tick could not answer
+    and which upstream it found sick are the next tick's inputs."""
+    calls: list[dict[str, object]] = []
+    # Tick 2 reports the skip the way the real tick does, because `observe` reads it to know
+    # the sensor api was not attempted rather than recovered.
+    states = [RanchState(failed_stage="sweep", error="ConnectError", held=("a:b",)), RanchState(held=(), skipped_upstreams=("sensor",)), RanchState()]
+    await run_loop(store=TEST_TARGET, interval_s=0, spend=False, tick_fn=_fake_tick(states, calls=calls), clock=_Clock(), sleep=_no_sleep, max_ticks=3)
+
+    assert calls[0]["held"] == frozenset() and calls[0]["skip"] == ()
+    assert calls[1]["held"] == frozenset({"a:b"}) and calls[1]["skip"] == ("sensor",), "tick 1 failed at sweep, so tick 2 skips the sensor api and carries the held key"
+    assert calls[2]["held"] == frozenset() and calls[2]["skip"] == ("sensor",), "tick 2 attempted nothing on the sensor api, which says nothing about its recovery; the window is still open on a frozen clock"
+
+
+async def test_the_first_interrupt_drains_the_in_flight_tick_and_exits_0() -> None:
+    """Graceful shutdown on the platform this runs on. Python 3.11's Runner turns the first
+    Ctrl+C into a cancel of the main task; `run_loop` catches it, lets the in-flight tick
+    FINISH (its tokens are already paid for), and returns 0. A tick cancelled halfway writes
+    no line, and a loop that exits without one looks like a loop that died."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished: list[int] = []
+
+    async def _slow_tick(**kw: object) -> RanchState:
+        started.set()
+        await release.wait()
+        finished.append(int(kw["tick"]))  # type: ignore[call-overload]
+        return RanchState(tick=int(kw["tick"]))  # type: ignore[call-overload]
+
+    with capture_logs() as logs:
+        runner = asyncio.create_task(run_loop(store=TEST_TARGET, interval_s=1000.0, spend=False, tick_fn=_slow_tick))
+        await started.wait()
+        runner.cancel()
+        await asyncio.sleep(0)
+        assert not runner.done(), "the loop is draining, not dead"
+        release.set()
+        code = await runner
+
+    assert code == EXIT_OK and finished == [1], "the tick completed after the interrupt"
+    assert any(entry["event"] == "loop_draining" for entry in logs)
+    assert next(entry for entry in logs if entry["event"] == "loop_stopped")["ticks"] == 1
+
+
+async def test_an_interrupt_during_the_cadence_sleep_stops_cleanly() -> None:
+    ticked = asyncio.Event()
+
+    async def _tick(**_kw: object) -> RanchState:
+        ticked.set()
+        return RanchState()
+
+    runner = asyncio.create_task(run_loop(store=TEST_TARGET, interval_s=1000.0, spend=False, tick_fn=_tick))
+    await ticked.wait()
+    await asyncio.sleep(0.01)
+    runner.cancel()
+    assert await runner == EXIT_OK
+
+
+async def test_a_stop_request_wakes_the_loop_out_of_its_sleep() -> None:
+    """SIGTERM and SIGBREAK set the stop event from a signal handler. A loop asleep for the
+    rest of a five-minute cadence has to notice within the tick, not at the next one."""
+    stop = asyncio.Event()
+    runner = asyncio.create_task(run_loop(store=TEST_TARGET, interval_s=1000.0, spend=False, tick_fn=_fake_tick([RanchState()]), stop=stop))
+    await asyncio.sleep(0.01)
+    stop.set()
+    assert await asyncio.wait_for(runner, timeout=2.0) == EXIT_OK
+
+
+async def test_a_tick_raising_outside_its_own_guard_writes_a_line_and_exits_1() -> None:
+    """`run_tick` catches everything a stage can raise, so this is a bug in the scaffolding.
+    It still gets a tick line, and then the loop stops rather than retrying a bug on a
+    cadence, because that is the tight billing loop this module exists to prevent."""
+
+    async def _bug(**_kw: object) -> RanchState:
+        raise RuntimeError("log_tick blew up")
+
+    with capture_logs() as logs:
+        code = await run_loop(store=TEST_TARGET, interval_s=0, spend=False, tick_fn=_bug, sleep=_no_sleep)
+
+    assert code == EXIT_UNRECOVERABLE == 1
+    line = next(entry for entry in logs if entry["event"] == "tick")
+    assert line["failed_stage"] == "tick" and "log_tick blew up" in line["error"]
+
+
+# --- chaos, from inside the tick ---------------------------------------------------------- #
+def _chaos_settings(**over: object) -> Settings:
+    return get_settings().model_copy(update={"chaos_enabled": True, "chaos_allow_writes": False, "chaos_animal_cohort": "", **over})
+
+
+def _healed(event_id: str, *, kind: str = KIND_SENSOR) -> ChaosEvent:
+    return ChaosEvent(event_id=event_id, group_id="g", scenario="dead_radio", kind=kind, target_id="alkali-flat-water" if kind == KIND_SENSOR else "cow-0901", target_type="water-level", location="Alkali Flat", fault="offline", payload={}, seed=1, seq=0, status="expired", injected_at=T0, expires_at=T1)
+
+
+@respx.mock
+async def test_a_chaos_fault_that_healed_without_ever_being_read_is_reported_missed(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """Cadence and TTL were chosen together (TTL is in ticks, multiplied by the cadence at
+    injection), so at nominal cadence every fault straddles two sweeps. The miss that remains
+    is a sweep in backoff while a short fault ages out. A silent miss is the failure, not the
+    miss itself: the chaos log would be full of events the ranch never saw, and the ranch
+    would have read calm the whole time."""
+    monkeypatch.setattr("src.agent.executor.get_settings", _chaos_settings)
+
+    async def _expire(_session: object, **_kw: object) -> tuple[ChaosEvent, ...]:
+        return (_healed("chaos-1-0"), _healed("chaos-1-1", kind=KIND_ANIMAL))
+
+    async def _inject(*_a: object, **_k: object) -> tuple[ChaosEvent, ...]:
+        return ()
+
+    monkeypatch.setattr("src.agent.executor.chaos.expire", _expire)
+    monkeypatch.setattr("src.agent.executor.chaos.inject_for_tick", _inject)
+    monkeypatch.setattr("src.agent.executor.chaos.plan", lambda **_kw: ())
+    serve(respx.mock, CALM)
+
+    with capture_logs() as logs:
+        unseen = await run_tick(tick=2, store=target, now=T1, spend=False, chaos_injected=("chaos-1-0", "chaos-1-1"), chaos_seen=())
+    assert unseen.chaos_missed == ("chaos-1-0",), "the sensor fault was never read; the animal event has no observer yet and is not counted against the sweep"
+    assert unseen.chaos_healed == 2 and unseen.error is None
+    missed = next(entry for entry in logs if entry["event"] == "chaos_event_missed")
+    assert missed["event_id"] == "chaos-1-0"
+    assert next(entry for entry in logs if entry["event"] == "tick")["chaos_missed"] == ["chaos-1-0"]
+
+    respx.mock.reset()
+    serve(respx.mock, CALM)
+    seen = await run_tick(tick=3, store=target, now=T1, spend=False, chaos_injected=("chaos-1-0",), chaos_seen=("chaos-1-0",))
+    assert seen.chaos_missed == (), "read once during its life is observed, not missed"
+
+    respx.mock.reset()
+    serve(respx.mock, CALM)
+    foreign = await run_tick(tick=4, store=target, now=T1, spend=False, chaos_injected=(), chaos_seen=())
+    assert foreign.chaos_missed == (), "an event some other run armed is not this run's miss to report"
+
+
+@respx.mock
+async def test_the_tick_arms_chaos_when_enabled_and_the_line_says_how_much(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """The three lines M5 left owed: `inject_for_tick` wired into the tick, `chaos_fired` on the
+    line, and the failure of either never failing the tick it decorates."""
+    monkeypatch.setattr("src.agent.executor.get_settings", _chaos_settings)
+    armed: list[int] = []
+
+    async def _expire(_session: object, **_kw: object) -> tuple[ChaosEvent, ...]:
+        return ()
+
+    async def _inject(_session: object, *, tick: int, **_kw: object) -> tuple[ChaosEvent, ...]:
+        armed.append(tick)
+        return (_healed("chaos-1-9"),)
+
+    monkeypatch.setattr("src.agent.executor.chaos.expire", _expire)
+    monkeypatch.setattr("src.agent.executor.chaos.inject_for_tick", _inject)
+    monkeypatch.setattr("src.agent.executor.chaos.plan", lambda **_kw: ())
+    serve(respx.mock, CALM)
+    with capture_logs() as logs:
+        state = await run_tick(tick=5, store=target, now=T0, spend=False)
+    assert armed == [5] and state.chaos_fired == 1 and state.chaos_injected == ("chaos-1-9",)
+    assert next(entry for entry in logs if entry["event"] == "tick")["chaos_fired"] == 1
+
+    async def _broken(*_a: object, **_k: object) -> tuple[ChaosEvent, ...]:
+        raise RuntimeError("chaos store unreachable")
+
+    monkeypatch.setattr("src.agent.executor.chaos.expire", _broken)
+    respx.mock.reset()
+    serve(respx.mock, CALM)
+    with capture_logs() as logs:
+        state = await run_tick(tick=6, store=target, now=T1, spend=False)
+    assert state.error is None and state.sensors_read == 3, "chaos never fails the tick it decorates"
+    assert any(entry["event"] == "chaos_step_failed" for entry in logs)
+
+
+@respx.mock
+async def test_chaos_disarmed_means_the_tick_never_touches_the_chaos_store(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    async def _never(*_a: object, **_k: object) -> tuple[ChaosEvent, ...]:
+        raise AssertionError("chaos is off; nothing in the tick may call it")
+
+    monkeypatch.setattr("src.agent.executor.chaos.expire", _never)
+    monkeypatch.setattr("src.agent.executor.chaos.inject_for_tick", _never)
+    serve(respx.mock, CALM)
+    state = await run_tick(tick=1, store=target, now=T0, spend=False)
+    assert state.error is None and state.chaos_fired == 0

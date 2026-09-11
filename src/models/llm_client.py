@@ -86,6 +86,19 @@ THINKING_BUDGET: dict[str, int] = {"none": 0, "low": 2_048, "medium": 6_144, "hi
 
 DEFAULT_MAX_TOKENS = 2_048
 
+#: Dollars per million tokens, (input, output), for the Tier 2 model. **An assumption, stated
+#: once so it can be corrected once.** `docs/model-routing.md` carried this rate as prose from
+#: M2; M4 moves it into code because the loop's spend ceiling is denominated in dollars and a
+#: ceiling in tokens is a multiplication somebody does wrong at 2am. M7's pricing table
+#: replaces this constant, not the `cost_usd` field it feeds.
+ASSUMED_RATE_USD_PER_M: tuple[float, float] = (15.0, 75.0)
+
+
+def cost_usd(input_tokens: int, output_tokens: int) -> float:
+    """Dollars for one call or one tick at `ASSUMED_RATE_USD_PER_M`. Exact zero for zero tokens."""
+    rate_in, rate_out = ASSUMED_RATE_USD_PER_M
+    return round((input_tokens * rate_in + output_tokens * rate_out) / 1_000_000, 6)
+
 
 class Tier2Unavailable(RuntimeError):
     """No usable credential. Raised at construction, never mid-tick from a call site."""

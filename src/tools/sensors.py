@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from src.tools.chaos import ChaosEvent, active_overlay, apply_overlay
+from src.tools.chaos import KIND_SENSOR, ChaosEvent, active_overlay, apply_overlay
 from src.tools.mcp_client import McpUnavailableError, RanchMap, SensorRef, parse_ranch_map, ranch_session, read_ranch_map
 from src.utils.config import get_settings
 from src.utils.helpers import gather_bounded, upstream_client
@@ -71,6 +71,10 @@ class SweepResult:
     readings: tuple[SensorReading, ...] = ()
     errors: tuple[SweepError, ...] = ()
     overlay_events: int = 0
+    #: The ids of the overlay events whose target sensor this sweep actually read. An active
+    #: fault on a sensor that did not answer was not observed, and the M4 loop uses this set to
+    #: tell "the ranch saw the fault" from "the fault healed between two sweeps" (a silent miss).
+    overlay_observed: tuple[str, ...] = ()
 
     @property
     def attempted(self) -> int:
@@ -223,4 +227,6 @@ async def sweep(refs: tuple[SensorRef, ...] | list[SensorRef], *, limit: int | N
 
     events = await active_overlay() if overlay is None else overlay
     faked = apply_overlay(readings, events)
-    return SweepResult(readings=faked, errors=tuple(errors), overlay_events=len(events))
+    read_ids = {r.sensor_id for r in readings}
+    observed = tuple(e.event_id for e in events if e.kind == KIND_SENSOR and e.target_id in read_ids)
+    return SweepResult(readings=faked, errors=tuple(errors), overlay_events=len(events), overlay_observed=observed)

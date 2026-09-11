@@ -32,7 +32,8 @@ A good handshake reports **19 tools, 160 sensors, 32 locations** in about two se
 
 ```bash
 python main.py --once   # exactly one tick        (live: sweeps, triages, and spends)
-python main.py          # the continuous loop     (stub until M4, exits 3)
+python main.py          # the continuous loop     (live: every TICK_INTERVAL_SECONDS, halts at SPEND_CEILING_USD)
+python main.py --no-spend  # either of the above, stopped at the end of the free pass. No bill
 python main.py --api    # read API only           (stub until M8, exits 3)
 ```
 
@@ -41,7 +42,9 @@ evidence packet and hand it to Opus, once per newly-opened incident. Roughly 24k
 tokens on a first run against a quiet ledger, falling as incidents become `ongoing`.
 
 An unbuilt mode exits **3** and names the milestone that brings it, so "not written yet"
-never looks like "broken."
+never looks like "broken." The loop exits **0** on a clean drain (Ctrl+C once, SIGTERM, or
+SIGBREAK), **1** if forced or broken, and **4** when the per-run spend ceiling halts it. The
+ceiling defaults to $10 and has no unlimited setting.
 
 No Docker is needed until M10: the upstreams are already deployed and agent state lives in
 Supabase, so there is nothing local to stand up. A local Postgres is needed only to run

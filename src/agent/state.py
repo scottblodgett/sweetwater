@@ -252,6 +252,24 @@ class RanchState(BaseModel):
     #: The supervisor's own page, assembled last. `None` on a tick that spent nothing,
     #: because a tick with no work orders has no shift to report on.
     shift_report: ShiftReport | None = None
+    #: Dollars this tick billed at `llm_client.ASSUMED_RATE_USD_PER_M`. Exactly 0.0 on a calm
+    #: tick, and the number the M4 loop sums against its ceiling.
+    cost_usd: float = 0.0
+    #: Incidents whose owner never answered for a reason worth retrying (the agent raised, the
+    #: transport failed, or the upstream was in backoff). The loop carries this set into the
+    #: next tick, which re-routes them; a rail rejection is NOT in here, because retrying a
+    #: rejected answer turns a rail into a sampler.
+    held: tuple[str, ...] = ()
+    #: Upstreams whose stage this tick skipped because they were inside a backoff window.
+    skipped_upstreams: tuple[str, ...] = ()
+    #: Chaos, when armed: events injected this tick, events healed this tick, the overlay events
+    #: whose target sensor the sweep read, and injected-this-run events that healed without ever
+    #: being read. `chaos_missed` non-empty is a fault that was born and died between sweeps.
+    chaos_fired: int = 0
+    chaos_healed: int = 0
+    chaos_injected: tuple[str, ...] = ()
+    chaos_observed: tuple[str, ...] = ()
+    chaos_missed: tuple[str, ...] = ()
 
     # Set BEFORE a stage is attempted, never after. A line reading `failed_stage: null`
     # next to an error says a tick died without saying where, which is the one question

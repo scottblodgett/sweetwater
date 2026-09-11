@@ -22,3 +22,7 @@ logs/transcripts/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Per-run log directories from verification runs (LOG_DIR=logs/<run>)
+logs/*/
+!logs/transcripts/

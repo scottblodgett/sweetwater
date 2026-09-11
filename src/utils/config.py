@@ -41,7 +41,26 @@ class Settings(BaseSettings):
     ollama_num_ctx: int = 16_384
 
     # --- Tick loop ------------------------------------------------------------
+    # Cadence is start-to-start, not sleep-after-finish, so a busy tick does not drift the
+    # schedule. Chaos TTLs are expressed in ticks and multiplied by this number at injection
+    # time, so changing it rescales every scenario's lifetime with it: the two are one
+    # decision, made here. See `executor.run_loop`.
     tick_interval_seconds: int = 300
+    # The hard per-run spend ceiling, in dollars at `llm_client.ASSUMED_RATE`. The loop HALTS
+    # when the run's summed `cost_usd` reaches it and exits 4; it does not skip a tick and
+    # carry on. Must be positive, and there is no value that means unlimited: 0 refuses to
+    # start a spending loop. Ten dollars is roughly four storm ticks at M3's worst measured
+    # cost, or a quiet day at a handful of new incidents per tick. `--once` is unaffected,
+    # because a human is at the keyboard for that one.
+    spend_ceiling_usd: float = 10.0
+    # Per-upstream backoff, exponential and deterministic (one caller, so no herd to jitter
+    # against). The loop itself never sleeps longer than one cadence: a sick upstream means
+    # the stage that depends on it is skipped and named on the tick line, while the
+    # heartbeat keeps its rhythm. Base 60s means one failure costs nothing at a 300s cadence
+    # and three in a row skip the next tick; the cap is three ticks of silence toward one
+    # dead service, not toward the ranch.
+    backoff_base_seconds: float = 60.0
+    backoff_cap_seconds: float = 900.0
 
     # --- Chaos ----------------------------------------------------------------
     # Off by default, and that default is load-bearing rather than timid. An overlay
@@ -67,6 +86,11 @@ class Settings(BaseSettings):
     # --- Logging --------------------------------------------------------------
     log_level: str = "INFO"
     log_dir: str = "logs"
+    # Size cap on `tick.jsonl` and `agent.jsonl` before rotation. Configurable so a
+    # verification run can force a rotation for real (a 30-minute run writes about 18KB of
+    # tick lines against a 10MB default) and prove the `run_id` join still works across
+    # files, rather than simulating it.
+    log_rotate_bytes: int = 10 * 1024 * 1024
     log_console_pretty: bool = True
     log_transcripts: bool = False
 

@@ -25,8 +25,8 @@ expensive statement.
 ## The order inside a tick, and which parts are free
 
 ```
-chaos maybe-fires      free
 catalog                free   the MCP map, with GET /sensors as fallback
+chaos maybe-fires      free   after the catalog, because plan() picks targets from the topology
 sweep ~160 sensors     free   bounded by SWEEP_CONCURRENCY
 triage                 free   code owns severity
 reconcile into sw_ops  free   opened / ongoing / resolved
@@ -66,6 +66,55 @@ single marker over both would say a tick died at "the expensive part."
 
 **A persisting fault is `ongoing`, never re-alarmed.** Duplicate alerts train the
 client to ignore the service, which is worse than no service at all.
+
+**Every read failing is the Sensor API being down, and it fails the sweep.** One dark sensor is
+a per-sensor `SweepError` and the sweep carries on; all of them dark is an outage, and without
+the raise the tick is green with zero readings and the loop reads 160 connection errors every
+tick at cadence forever, which is the opposite of backing off.
+
+## The loop (M4). `run_loop` in `executor.py`, and the rules it enforces
+
+**The spend ceiling halts.** `SPEND_CEILING_USD` is summed from `cost_usd` on the tick lines
+and checked after every tick; reaching it writes `loop_halted` and returns exit **4**. Not a
+skipped tick, not a warning. Overshoot is bounded at one tick because a fan-out in flight is
+already paid for and cancelling it wastes the tokens. There is no unlimited value: a
+non-positive ceiling refuses to start a spending loop. `--once` is exempt, a human is there.
+
+**Cadence is start to start.** The next tick is scheduled from when this one began, so a
+90-second storm tick does not push every later tick late; a tick longer than the interval
+starts the next at once and logs `tick_overran`. Chaos TTLs are in ticks and are multiplied by
+the cadence at injection, so cadence and TTL are one decision and rescale together.
+
+**Backoff is per upstream, never global.** Five keys: `mcp`, `sensor`, `sw_ops`, `evidence`
+(Farm, Feed, and Care behind one stage), `model`. Exponential, deterministic (one caller, no
+herd to jitter against), 60s base and 900s cap. The loop itself never sleeps past one cadence.
+A free-pass upstream inside its window skips the whole free pass **and the tick still writes
+its line** naming who is sick; a spend upstream inside its window runs the free pass and holds
+the new incidents. The model never raises out of `fan_out`, so its outage is read off the
+orders: every order dying in transport marks the model, one real answer clears it.
+
+**A crashed agent resolves nothing, and its incidents are held.** Reconcile runs before any
+agent and reads triage's findings, so an agent raising cannot close an incident. What it does
+is leave a `no_answer` order on an incident that is `ongoing` next tick and would never be
+re-routed. `held` is the fix: keys whose order carried `agent_raised`, `worker_raised`, or
+`transport_error` (or whose spend stage was skipped) come out of the tick, go onto the line,
+and are re-routed on the next tick until answered or resolved. **A rail rejection is never
+held**, and neither is `max_tokens`: one is a sampler, the other buys the same truncation twice.
+In-process only for now; the durable version is a column on `incidents`, which is a Supabase
+migration and Scott's explicit yes.
+
+**Shutdown drains, on Windows.** `loop.add_signal_handler` raises `NotImplementedError` there
+and SIGTERM never arrives, so neither is relied on. Python 3.11's `asyncio.Runner` turns the
+first Ctrl+C into a cancel of the main task and the second into `KeyboardInterrupt`. The
+in-flight tick runs behind `asyncio.shield`, the cancel lands in the loop, the tick finishes,
+the line is written, exit 0. Second Ctrl+C escapes and `main.py` returns 1. SIGTERM and
+SIGBREAK go through `signal.signal` and set the stop event, which also wakes the cadence sleep.
+
+**A chaos fault that heals unseen is reported, never silent.** `SweepResult.overlay_observed`
+is the event ids whose sensor the sweep read; at heal time an event this run injected that was
+never in that set logs `chaos_event_missed` and lands in `chaos_missed` on the line. Animal
+events are excluded because nothing observes them yet: no stage reads the Care API, which is
+the owed `herd_health` verification and its own scoped item.
 
 ## Escalation (see also `src/models/CLAUDE.md`)
 
