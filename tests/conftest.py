@@ -26,7 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.memory import SCHEMA_TEST, assert_droppable_schema, assert_local_test_url, build_engine, session_factory
-from src.utils.config import get_settings
+from src.utils.config import Settings, get_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,7 +49,7 @@ def no_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def chaos_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     """Chaos is disarmed for every test unless the test arms it itself.
 
     Found at M4: `.env` on this machine carries `CHAOS_ENABLED=1`, and with the real settings
@@ -59,10 +59,23 @@ def chaos_off(monkeypatch: pytest.MonkeyPatch) -> None:
     itself injects when armed, which would have written the plan into `sw_ops_test` on every
     tick test. A test that wants chaos patches `src.tools.chaos.get_settings` itself, as the
     chaos suite in `test_tools.py` already does, and that later patch wins.
+
+    Returned so a test can turn one knob on the copy (`settings.incident_confirm_sweeps = 1`)
+    without building a whole `Settings`; the copy is per test, so nothing leaks.
     """
     disarmed = get_settings().model_copy(update={"chaos_enabled": False})
     monkeypatch.setattr("src.tools.chaos.get_settings", lambda: disarmed)
     monkeypatch.setattr("src.agent.executor.get_settings", lambda: disarmed)
+    monkeypatch.setattr("src.agent.memory.get_settings", lambda: disarmed)
+    return disarmed
+
+
+@pytest.fixture
+def first_sight(settings: Settings) -> Settings:
+    """Open on the first bad read, the behaviour before migration 0003. For rails whose subject
+    is something other than the debounce, so they do not each need a warm-up tick."""
+    settings.incident_confirm_sweeps = 1
+    return settings
 
 
 async def _probe(url: str) -> None:

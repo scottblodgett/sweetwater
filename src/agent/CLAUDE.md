@@ -29,7 +29,7 @@ catalog                free   the MCP map, with GET /sensors as fallback
 chaos maybe-fires      free   after the catalog, because plan() picks targets from the topology
 sweep ~160 sensors     free   bounded by SWEEP_CONCURRENCY
 triage                 free   code owns severity
-reconcile into sw_ops  free   opened / ongoing / resolved
+reconcile into sw_ops  free   pending / opened / ongoing / resolved / dismissed
 route new incidents    free
   -> evidence          SPEND  HTTP, not tokens: ~4 extra calls per newly-opened incident
   -> fan out           SPEND  only newly-opened incidents reach a model
@@ -66,6 +66,16 @@ single marker over both would say a tick died at "the expensive part."
 
 **A persisting fault is `ongoing`, never re-alarmed.** Duplicate alerts train the
 client to ignore the service, which is worse than no service at all.
+
+**One bad read is `pending`, not an incident.** The deployed Sensor API invents a fresh
+reading on every call, so a healthy tank reads empty one sweep in a while and fine on the next.
+`INCIDENT_CONFIRM_SWEEPS` (default 2) is how many consecutive sweeps have to flag a sensor
+before it opens; until then the row is `pending`: live in the ledger, covered by the unique
+index and the unread guard, but never routed, paged, or billed. A pending row that reads clean is
+`dismissed`, never `resolved`, because nothing was alarmed. Unread is not read-clean, for pending
+exactly as for opened. The seven permanently-bad sensors and every chaos scenario (minimum TTL
+two ticks) still open on their second sweep. Migration `0003`. M4 measured the reason: 10 to 24
+opened per tick, almost all of them dice.
 
 **Every read failing is the Sensor API being down, and it fails the sweep.** One dark sensor is
 a per-sensor `SweepError` and the sweep carries on; all of them dark is an outage, and without

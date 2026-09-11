@@ -979,3 +979,43 @@ two facts the real tick reports and the rail exists to check.
 | `chaos_off` in `conftest.py` | see defect 2 |
 | `overlay_observed` on `SweepResult` | the miss check has to know which faults were seen, and only the sweep knows which sensors answered |
 | `skipped_upstreams`, `held`, `chaos_fired`, `chaos_healed`, `chaos_missed` on the tick line | every rule the loop enforces has to be readable off the line, or the line cannot tell a heartbeat during an outage from a calm ranch |
+
+### Addendum, same day: the debounce. One bad read is not an incident
+
+The paid run's finding was that every tick is a storm tick, and the plain-language version of
+why is this: the deployed Sensor API rolls fresh dice on every read, a healthy tank comes up
+"empty" one sweep in a while, we paid a model to write a work order about it, and it fixed
+itself five minutes later. Ten to twenty times a tick. Scott asked for the fix the same day.
+
+**`INCIDENT_CONFIRM_SWEEPS`, default 2, and migration `0003`.** A finding has to be present on
+two consecutive sweeps before it opens. Until then the row is `pending`: live in the ledger, so
+the unique index and the unread guard both cover it, but not in `opened`, so nothing is routed,
+paged, or billed. A pending row whose sensor reads clean is `dismissed`, not `resolved`, because
+nothing was ever alarmed; the row is kept so the churn stays countable. Unread is not read-clean
+for a pending row either, so an outage during the confirmation window holds rather than dismisses.
+The partial unique index now names the live set (`pending`, `opened`, `ongoing`) instead of
+saying "not resolved", because with two terminal states those stopped meaning the same thing.
+Setting the knob to 1 restores open-on-first-sight, which the rails whose subject is something
+else use through a `first_sight` fixture, and which the rail table in `tests/CLAUDE.md` says not to
+reach for otherwise.
+
+**Migrated on Supabase with an explicit yes**, `0002 -> 0003`, 2026-09-10. The downgrade
+promotes pending to opened and dismissed to resolved before rebuilding the old index, so it can
+actually run.
+
+**Three free ticks on the prod ledger, twenty seconds apart, right after the migration:**
+
+| | would have opened | opened | dismissed | routed |
+| --- | --- | --- | --- | --- |
+| tick 1 | 14 | **0** (14 pending) | 0 | nobody |
+| tick 2 | 17 | **2** | 12 | compliance 1, water_feed 1 |
+| tick 3 | 21 | **1** | 16 | water_feed 1 |
+
+Twelve of tick 1's fourteen pending rows read clean on tick 2 and were dismissed. Two were still
+bad and opened. That is the dice being filtered out, and at the measured $0.18 per work order it
+takes the bill from roughly $2.30 a tick to roughly $0.20 to $0.40. Every chaos scenario has a
+TTL of at least two ticks and the seven permanently-bad sensors are bad on every read, so
+nothing that is supposed to be found is lost; the chaos end-to-end rail in `test_tools.py` now
+shows the fault pending on its first sweep and opened on its second, which is the honest shape.
+
+Gate after the change: **310 tests**, `ruff` clean, `mypy` clean, one alembic head at `0003`.

@@ -299,6 +299,7 @@ async def run_tick(
             )
             ledger = {str(k): v for k, v in (await counts_by_status(session)).items()}
         state.opened, state.ongoing, state.resolved = result.opened, result.ongoing, result.resolved
+        state.pending, state.dismissed = result.pending, result.dismissed
         held_unread = len(result.skipped_unread)
 
         state.failed_stage = "route"
@@ -381,6 +382,11 @@ async def run_tick(
         opened=len(state.opened),
         ongoing=len(state.ongoing),
         resolved=len(state.resolved),
+        # The debounce. `pending` was flagged this sweep and not yet confirmed; `dismissed`
+        # was pending and read clean. A high `dismissed` beside a low `opened` is the
+        # simulator's dice being filtered out, which is the number that used to be the bill.
+        pending=len(state.pending),
+        dismissed=len(state.dismissed),
         held_unread=held_unread,
         agents_routed=sorted(state.routed),
         work_orders=len(state.work_orders),
@@ -558,8 +564,9 @@ def summarize(state: RanchState) -> str:
         spend = f", {sum(1 for o in state.work_orders if o.shippable)}/{len(state.work_orders)} work orders shipped on {tokens} tokens (${state.cost_usd:.2f})"
     report = f", shift report {state.shift_report.source}" if state.shift_report else ""
     held = f", {len(state.held)} held" if state.held else ""
+    debounce = f" (pending {len(state.pending)}, dismissed {len(state.dismissed)})" if state.pending or state.dismissed else ""
     return (
         f"tick {state.tick} ok - {state.sensors_read} read ({state.sensors_failed} failed) via {state.catalog_source}, "
-        f"{len(state.findings)} findings, opened {len(state.opened)} / ongoing {len(state.ongoing)} / resolved {len(state.resolved)}, routed to {fan}{spend}{report}{held}"
+        f"{len(state.findings)} findings, opened {len(state.opened)} / ongoing {len(state.ongoing)} / resolved {len(state.resolved)}{debounce}, routed to {fan}{spend}{report}{held}"
     )
 

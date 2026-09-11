@@ -30,7 +30,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from src.agent.state import Finding, Incident, IncidentStatus, Severity
+from src.agent.state import LIVE_STATUSES, Finding, Incident, IncidentStatus, Severity
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
 
@@ -127,7 +127,7 @@ incidents = Table(
     # than by this module remembering to check. Partial rather than plain unique so the
     # history survives: a tank that dries out in March and again in July is two rows and
     # two work orders, not one row with its March story overwritten.
-    Index("uq_incidents_open_key", "incident_key", unique=True, postgresql_where=text("status <> 'resolved'")),
+    Index("uq_incidents_open_key", "incident_key", unique=True, postgresql_where=text("status IN ('pending', 'opened', 'ongoing')")),
     Index("ix_incidents_status_last_seen", "status", "last_seen_at"),
     Index("ix_incidents_sensor", "sensor_id"),
 )
@@ -255,11 +255,15 @@ class ReconcileResult:
     opened: tuple[Incident, ...] = ()
     ongoing: tuple[Incident, ...] = ()
     resolved: tuple[Incident, ...] = ()
+    #: The debounce buckets. `pending` was flagged but not yet on enough consecutive sweeps to
+    #: be an incident; `dismissed` was pending and read clean. Neither is paged or billed.
+    pending: tuple[Incident, ...] = ()
+    dismissed: tuple[Incident, ...] = ()
     skipped_unread: tuple[str, ...] = ()
 
     @property
     def counts(self) -> dict[str, int]:
-        return {"opened": len(self.opened), "ongoing": len(self.ongoing), "resolved": len(self.resolved)}
+        return {"opened": len(self.opened), "ongoing": len(self.ongoing), "resolved": len(self.resolved), "pending": len(self.pending), "dismissed": len(self.dismissed)}
 
 
 def _display_value(finding: Finding) -> str | None:
@@ -296,7 +300,9 @@ def _to_incident(row: dict[str, Any]) -> Incident:
 
 
 async def open_incidents(session: AsyncSession) -> tuple[Incident, ...]:
-    rows = (await session.execute(select(incidents).where(incidents.c.status != "resolved").order_by(incidents.c.first_seen_at))).mappings().all()
+    """Every live row: `pending`, `opened`, `ongoing`. Named by the live set rather than as
+    "not resolved", because `dismissed` is also not resolved and is not live."""
+    rows = (await session.execute(select(incidents).where(incidents.c.status.in_(LIVE_STATUSES)).order_by(incidents.c.first_seen_at))).mappings().all()
     return tuple(_to_incident(dict(r)) for r in rows)
 
 
@@ -309,17 +315,27 @@ async def reconcile(
     read_sensor_ids: Iterable[str] | None = None,
     now: datetime | None = None,
     owners: dict[str, str] | None = None,
+    confirm_sweeps: int | None = None,
 ) -> ReconcileResult:
-    """Fold this tick's findings into the ledger and return the three buckets.
+    """Fold this tick's findings into the ledger and return the buckets.
 
     `read_sensor_ids` is the set of sensors this tick actually got a reading for. An
-    incident is only resolved if its sensor answered and had nothing wrong to say.
-    Leaving it `None` means "everything was read", which is convenient in a test and
-    wrong in production, so `main.py` always passes it.
+    incident is only resolved (or dismissed) if its sensor answered and had nothing wrong
+    to say. Leaving it `None` means "everything was read", which is convenient in a test
+    and wrong in production, so `main.py` always passes it.
+
+    `confirm_sweeps` is the debounce: a finding has to be present on this many consecutive
+    sweeps before it opens. Until then it is `pending`: live in the ledger so the unique
+    index and the unread guard both cover it, but not in `opened`, so it is never routed,
+    never paged, and never billed. A pending row whose sensor reads clean is `dismissed`,
+    not `resolved`, because nothing was ever alarmed. Defaults to `INCIDENT_CONFIRM_SWEEPS`;
+    1 is open-on-first-sight, the behaviour before 0003. The reason is in `config.py`: the
+    deployed Sensor API invents a fresh reading per call, and one bad draw is not a dry tank.
 
     `now` is injectable so tests assert on fixed timestamps rather than on the clock.
     """
     stamp = now or datetime.now(UTC)
+    confirm = max(1, get_settings().incident_confirm_sweeps if confirm_sweeps is None else confirm_sweeps)
     readable = set(read_sensor_ids) if read_sensor_ids is not None else None
     by_key = {f.key: f for f in findings}
     existing = {inc.key: inc for inc in await open_incidents(session)}
@@ -327,11 +343,14 @@ async def reconcile(
     opened: list[Incident] = []
     ongoing: list[Incident] = []
     resolved: list[Incident] = []
+    pending: list[Incident] = []
+    dismissed: list[Incident] = []
 
     for key, finding in by_key.items():
         owner = (owners or {}).get(key)
         prior = existing.get(key)
         if prior is None:
+            first_status: IncidentStatus = "opened" if confirm <= 1 else "pending"
             values = {
                 "incident_key": key,
                 "sensor_id": finding.sensor_id,
@@ -339,7 +358,7 @@ async def reconcile(
                 "location": finding.location,
                 "category": finding.category,
                 "severity": finding.severity,
-                "status": "opened",
+                "status": first_status,
                 "summary": finding.summary,
                 "last_value": _display_value(finding),
                 "unit": finding.unit,
@@ -348,37 +367,54 @@ async def reconcile(
                 "first_seen_at": stamp,
                 "last_seen_at": stamp,
                 "resolved_at": None,
-                "tick_opened": tick,
+                "tick_opened": tick if first_status == "opened" else 0,
                 "tick_last_seen": tick,
                 "run_id": run_id,
                 "owner": owner,
             }
             row_id = (await session.execute(incidents.insert().returning(incidents.c.id), values)).scalar_one()
-            opened.append(_to_incident({**values, "id": row_id}))
+            (opened if first_status == "opened" else pending).append(_to_incident({**values, "id": row_id}))
             continue
 
-        # Seen again. `ongoing`, never `opened` a second time, and severity is refreshed
-        # because the reading moved and code owns severity at every tier.
+        # Seen again. Severity is refreshed because the reading moved and code owns severity
+        # at every tier. A pending row that has now been seen enough times in a row opens, and
+        # `tick_opened` is the tick it opened on, not the tick it was first glimpsed;
+        # `first_seen_at` keeps the glimpse. An opened row becomes `ongoing`, never `opened`
+        # a second time.
+        seen = prior.occurrences + 1
+        if prior.status == "pending":
+            next_status: IncidentStatus = "opened" if seen >= confirm else "pending"
+        else:
+            next_status = "ongoing"
         updated = {
             "severity": finding.severity,
-            "status": "ongoing",
+            "status": next_status,
             "summary": finding.summary,
             "last_value": _display_value(finding),
             "threshold": finding.threshold,
-            "occurrences": prior.occurrences + 1,
+            "occurrences": seen,
             "last_seen_at": stamp,
             "tick_last_seen": tick,
             "owner": owner or prior.owner,
         }
+        if next_status == "opened":
+            updated["tick_opened"] = tick
         await session.execute(incidents.update().where(incidents.c.id == prior.row_id).values(**updated))
-        ongoing.append(prior.model_copy(update={**updated, "severity": finding.severity}))
+        after = prior.model_copy(update={**updated, "severity": finding.severity})
+        {"opened": opened, "pending": pending, "ongoing": ongoing}[next_status].append(after)
 
     for key, prior in existing.items():
         if key in by_key:
             continue
         if readable is not None and prior.sensor_id not in readable:
             # The sensor did not answer this tick. Absence of a finding is not evidence of
-            # health, and an upstream outage must not close every incident on the ranch.
+            # health, and an upstream outage must not close every incident on the ranch. This
+            # holds for a pending row too: unread is not "read clean".
+            continue
+        if prior.status == "pending":
+            # One bad draw, then a clean read. Never alarmed, so never resolved.
+            await session.execute(incidents.update().where(incidents.c.id == prior.row_id).values(status="dismissed", resolved_at=stamp, tick_last_seen=tick))
+            dismissed.append(prior.model_copy(update={"status": "dismissed", "resolved_at": stamp, "tick_last_seen": tick}))
             continue
         await session.execute(incidents.update().where(incidents.c.id == prior.row_id).values(status="resolved", resolved_at=stamp, tick_last_seen=tick))
         resolved.append(prior.model_copy(update={"status": "resolved", "resolved_at": stamp, "tick_last_seen": tick}))
@@ -386,8 +422,8 @@ async def reconcile(
     skipped = tuple(sorted(k for k, inc in existing.items() if k not in by_key and readable is not None and inc.sensor_id not in readable))
     await session.commit()
 
-    log.info("reconciled", tick=tick, opened=len(opened), ongoing=len(ongoing), resolved=len(resolved), held_unread=len(skipped))
-    return ReconcileResult(opened=tuple(opened), ongoing=tuple(ongoing), resolved=tuple(resolved), skipped_unread=skipped)
+    log.info("reconciled", tick=tick, opened=len(opened), ongoing=len(ongoing), resolved=len(resolved), pending=len(pending), dismissed=len(dismissed), held_unread=len(skipped), confirm_sweeps=confirm)
+    return ReconcileResult(opened=tuple(opened), ongoing=tuple(ongoing), resolved=tuple(resolved), pending=tuple(pending), dismissed=tuple(dismissed), skipped_unread=skipped)
 
 
 def worst_severity(items: Iterable[Incident]) -> Severity | None:

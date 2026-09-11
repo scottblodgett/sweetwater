@@ -50,7 +50,8 @@ pass is the failure mode this file exists to prevent.
 | triage truth table | severity is deterministic and code-owned | a threshold moved, or a type fell through a default |
 | unknown sensor type trips `warn_once` | a new type can never read as nominal by accident | someone added a default branch |
 | sweep concurrency ceiling | 160 reads never go out unbounded | a `gather` replaced `gather_bounded` |
-| the three reconcile buckets | a persisting fault is `ongoing`, never re-alarmed | the incident key changed, or the partial unique index was dropped |
+| the reconcile buckets | a persisting fault is `ongoing`, never re-alarmed | the incident key changed, or the partial unique index was dropped |
+| one bad read is `pending`, two in a row is `opened`, pending then clean is `dismissed` | a synthesized sensor's one-draw extreme cannot page anyone or bill anything | `INCIDENT_CONFIRM_SWEEPS` was defaulted to 1, or a pending row was routed. **Do not fix a rail by passing `first_sight`** unless the rail is genuinely about something else |
 | a sensor that did not answer resolves nothing | one upstream outage cannot close every incident and report an all-clear | `read_sensor_ids` stopped being passed, or was widened to the whole catalog |
 | an empty catalog fails the tick | an unreadable map cannot present as a calm ranch | someone made the empty case a quiet success |
 | no SQL in this repo names a ranch schema | the only route to ranch data is HTTP | a query reached into `farm`, `feed`, `animal_care`, or `sensor` |

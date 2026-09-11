@@ -88,6 +88,7 @@ needed is reachable over the wire or already written down in this repo.
 | log schemas | `docs/logging.md` |
 | where the build stands right now | `docs/STATE.md` - the session-start briefing |
 | what actually happened | `docs/JOURNEY.md` |
+| what is still open across phases, and what each would take | `docs/issues.md` |
 
 ## Tech stack
 

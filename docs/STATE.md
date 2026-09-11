@@ -20,7 +20,7 @@ sessions on one `master` and M5 closed first, so the phase numbers are not the c
 | HEAD | The M4 boundary on `master`. A hash here is stale by one commit by construction, so trust `git log` over this cell and the milestone over both. |
 | Owed | **The coyote verification is still owed, and it is bigger than it was written up as.** Nothing in the tick reads the Care API: no stage produces an animal finding, so `herd_health` has no discovery path regardless of chaos or the supervisor. That is a new free stage (an animal sweep) plus a triage category, its own scoped item, not three lines. The three lines that *were* owed (`inject_for_tick` in the tick, `chaos_fired` on the line) landed at M4. Also owed, and needing an explicit yes: a column on `incidents` to make the held set survive a restart. |
 
-Milestone list and the shape: `docs/architecture.md`. The layout, the milestone order, and which leaf lands when: `docs/Plan.md`, which is the authority the tree matches. What happened and what diverged: `docs/JOURNEY.md`. Phase-close ritual: root `CLAUDE.md`.
+Everything still open across phases, with what each would take: `docs/issues.md`. Milestone list and the shape: `docs/architecture.md`. The layout, the milestone order, and which leaf lands when: `docs/Plan.md`, which is the authority the tree matches. What happened and what diverged: `docs/JOURNEY.md`. Phase-close ritual: root `CLAUDE.md`.
 
 ---
 
@@ -57,19 +57,20 @@ Seven other leaves are docstring-only placeholders naming the milestone that fil
 3. **Triage thresholds are derived from the ranch mission in `docs/sweetwater-ranch.md` and the observed distributions below.** Never lifted from the upstream service's source. See the boundary rule.
 4. **Triage writes the human sentence in code.** Deterministic prose per finding, per the voice rules in `src/tools/CLAUDE.md`. A model never authors severity and never authors an all-clear.
 5. **No sensor incident routes to `herd_health`**, because by design it cannot read a sensor. It stays idle until chaos writes real animal events at M5. That is correct, not a gap.
-6. **A sensor that did not answer resolves nothing.** `reconcile` takes the set of sensors that actually replied. "No finding" and "no reading" are different facts, and conflating them lets one upstream outage close every incident and report an all-clear.
-7. **An empty catalog is a failed tick, not a calm one.** Nothing is swept and nothing is reconciled, because resolving every incident on the strength of a map we could not read is the worst available outcome.
-8. **Structured output is a forced tool call, not a "reply in JSON" instruction.** The schema is enforced by the API, and - the reason that actually matters - `finish_reason` stays honest: `tool_use` is a real answer, `max_tokens` is a config bug. With free-form JSON both arrive as text and the distinction is gone.
-9. **Thinking is off for the work-order job, and `reasoning_effort` is an explicit per-call argument.** Turning thinking off is free exactly when the model is not the one classifying, and `triage.py` classified. Per-call rather than ambient so turning it on for one job later does not touch any other call site.
-10. **A work order is never dropped.** A model that never answered, timed out, or got truncated still produces a `WorkOrder` with `status="no_answer"` and the reason in `assessment`. A tick that silently loses an incident is indistinguishable from a ranch with nothing wrong.
-11. **A write tool is declared, withheld from the model, and refused at runtime, all three, until M6 flips `GATE_LANDED`.** A declared-but-withheld tool is a documented seam; a live write tool with no gate is a bug waiting for a demo. `GATE_LANDED` is a boolean in one module and not a config value, because an env var is something somebody sets on a laptop at 11pm to make a demo work.
-12. **Severity ownership extends to the shift report.** The supervisor may not restate a severity, and `linked` - its only causal claim - is checked in code against the incident keys the page actually carried. This is why `reasoning_effort` stays off even for fusion: the claim is verified rather than trusted.
-13. **`ruff format` is deliberately not in the gate.** `E501` is ignored on purpose so a long line may stay long; the formatter hard-wraps at 140 with no escape hatch, so the two contradict. `ruff check` is the lint gate. Do not add the formatter back.
-14. **The loop's spend ceiling halts; it never skips a tick and carries on.** `SPEND_CEILING_USD`, default $10, no unlimited value, exit **4**. Overshoot is one tick by design. Decided before the loop body was written, because M4 is the first phase where the money runs with nobody watching.
-15. **Backoff is per upstream and the heartbeat never stops.** A tick in backoff writes its line naming who is sick. One dead service never stops the ranch watch, and the loop itself never sleeps past one cadence.
-16. **A `no_answer` for a retriable reason is held and re-routed; a rail rejection never is.** The held set is in-process until a column on `incidents` gets an explicit yes.
-17. **`cost_usd` is on the tick line from M4 at a stated assumed rate**, one constant in `llm_client.py`. M7 replaces the constant, not the field.
-18. **Shutdown is written for Windows.** No `add_signal_handler`; the Runner's Ctrl+C handling plus `signal.signal` for SIGTERM/SIGBREAK, and the in-flight tick drains.
+6. **One bad read is `pending`; two in a row is an incident.** `INCIDENT_CONFIRM_SWEEPS`, default 2, migration `0003`, decided and migrated on Supabase 2026-09-10 with Scott's explicit yes. A pending row that reads clean is `dismissed`, never `resolved`. The reason is the M4 measurement: the Sensor API redraws every reading, so at 1 the loop paid for 10 to 24 work orders per tick about tanks that were never empty.
+7. **A sensor that did not answer resolves nothing.** `reconcile` takes the set of sensors that actually replied. "No finding" and "no reading" are different facts, and conflating them lets one upstream outage close every incident and report an all-clear.
+8. **An empty catalog is a failed tick, not a calm one.** Nothing is swept and nothing is reconciled, because resolving every incident on the strength of a map we could not read is the worst available outcome.
+9. **Structured output is a forced tool call, not a "reply in JSON" instruction.** The schema is enforced by the API, and - the reason that actually matters - `finish_reason` stays honest: `tool_use` is a real answer, `max_tokens` is a config bug. With free-form JSON both arrive as text and the distinction is gone.
+10. **Thinking is off for the work-order job, and `reasoning_effort` is an explicit per-call argument.** Turning thinking off is free exactly when the model is not the one classifying, and `triage.py` classified. Per-call rather than ambient so turning it on for one job later does not touch any other call site.
+11. **A work order is never dropped.** A model that never answered, timed out, or got truncated still produces a `WorkOrder` with `status="no_answer"` and the reason in `assessment`. A tick that silently loses an incident is indistinguishable from a ranch with nothing wrong.
+12. **A write tool is declared, withheld from the model, and refused at runtime, all three, until M6 flips `GATE_LANDED`.** A declared-but-withheld tool is a documented seam; a live write tool with no gate is a bug waiting for a demo. `GATE_LANDED` is a boolean in one module and not a config value, because an env var is something somebody sets on a laptop at 11pm to make a demo work.
+13. **Severity ownership extends to the shift report.** The supervisor may not restate a severity, and `linked` - its only causal claim - is checked in code against the incident keys the page actually carried. This is why `reasoning_effort` stays off even for fusion: the claim is verified rather than trusted.
+14. **`ruff format` is deliberately not in the gate.** `E501` is ignored on purpose so a long line may stay long; the formatter hard-wraps at 140 with no escape hatch, so the two contradict. `ruff check` is the lint gate. Do not add the formatter back.
+15. **The loop's spend ceiling halts; it never skips a tick and carries on.** `SPEND_CEILING_USD`, default $10, no unlimited value, exit **4**. Overshoot is one tick by design. Decided before the loop body was written, because M4 is the first phase where the money runs with nobody watching.
+16. **Backoff is per upstream and the heartbeat never stops.** A tick in backoff writes its line naming who is sick. One dead service never stops the ranch watch, and the loop itself never sleeps past one cadence.
+17. **A `no_answer` for a retriable reason is held and re-routed; a rail rejection never is.** The held set is in-process until a column on `incidents` gets an explicit yes.
+18. **`cost_usd` is on the tick line from M4 at a stated assumed rate**, one constant in `llm_client.py`. M7 replaces the constant, not the field.
+19. **Shutdown is written for Windows.** No `add_signal_handler`; the Runner's Ctrl+C handling plus `signal.signal` for SIGTERM/SIGBREAK, and the in-flight tick drains.
 
 ## The boundary rule, sharpened
 
@@ -86,7 +87,7 @@ Learned the hard way on 2026-09-10, in this repo, by doing exactly that and retr
 - **`ANTHROPIC_API_KEY` is still empty, and M4's paid run shipped on Bedrock anyway.** This machine authenticates to **AWS Bedrock** (`CLAUDE_CODE_USE_BEDROCK=1`, `us-east-1`, session-scoped temporary credentials), and `resolve_provider()` in `llm_client.py` picks first-party Anthropic when a key exists and Bedrock otherwise. Session credentials expire, so a loop meant to run for days needs a real key. From M4 an expiry mid-run is survivable: `ExpiredTokenException` becomes a `transport_error` no-answer, the incident is **held**, and the `model` upstream backs off; nothing is lost and nothing retries on a cadence against a dead credential.
 - **`anthropic[bedrock]` is a first-order dependency now.** It was absent from `requirements.txt` and arrived transitively through `langchain-anthropic` without the extra, so the first live call failed on `No module named 'botocore'`. `llm_client.py` calls the raw SDK, not `ChatAnthropic`, because `langchain-anthropic` has no Bedrock path and M2 has no tool loop.
 - **Ollama is up** on `localhost:11434`. Not needed until M7.
-- **Supabase**: PostgreSQL 17.6, connects as `postgres`, can create schemas. **`sw_ops` now exists**, migrated to `0001`, with `alembic_version` inside it. The connection also has write access to `farm`, `feed`, `animal_care`, and `sensor`, and must never use it. The engine pins `search_path` to the target schema, and a test fails if any SQL in this repo names a ranch schema.
+- **Supabase**: PostgreSQL 17.6, connects as `postgres`, can create schemas. **`sw_ops` now exists**, migrated to `0003`, with `alembic_version` inside it. The connection also has write access to `farm`, `feed`, `animal_care`, and `sensor`, and must never use it. The engine pins `search_path` to the target schema, and a test fails if any SQL in this repo names a ranch schema.
 - **Local Postgres**: 16.4, database **`farm_systems_test`**, connects as `postgres` with no password. It already holds the upstream project's `farm`, `feed`, `animal_care`, and `sensor` schemas, so **`sw_ops_test` is the only schema this repo may create or drop.** A two-value allowlist in `memory.py` refuses anything else, and the store tests skip rather than fail when no local Postgres answers. This is the exact accident that cost three answer keys in a previous life of the project.
 - Both database URLs in `.env` use the bare `postgresql://` scheme. `config.py` upgrades them to `postgresql+asyncpg://` in a validator, since SQLAlchemy otherwise reaches for psycopg2, which is not installed. Supabase's pooler additionally needs `statement_cache_size=0`, set once in the engine factory with the reason in a comment. Do not clean either of those up.
 - **`SW_OPS_TARGET`** picks the store: unset or `prod` is Supabase, `test` is the local `sw_ops_test`. Prod is the default on purpose, because a default that quietly writes somewhere harmless is a default that ships.
@@ -235,14 +236,15 @@ three files. `CTRL_BREAK_EVENT` during the cadence sleep stopped it in the same 
 opened 14 and cost **$2.54** in 90s, 26/26 shipped, both reports fused, then **exit 4 at $4.70
 against a $3.00 ceiling.**
 
-**The finding that matters most for what comes next: on this ranch every tick is a storm tick.**
+**The finding that matters most, and what was done about it the same day: on this ranch every tick was a storm tick.**
 The prediction in `docs/model-routing.md` was that a steady-state loop opens a handful of
 incidents per tick. It opened 10 to 24 on every one of 30 free ticks and 12 then 14 on the paid
 ones, because the deployed Sensor API synthesizes a fresh, unanchored reading on every call and
 healthy sensors draw extremes a fraction of the time. At 300s that is roughly **$28 an hour.** The
 levers are a debounce (open only on two consecutive bad sweeps, which the seven permanently-bad
-sensors pass and a one-draw extreme does not) or M7's cascade. Neither is decided. Have that
-conversation before running the loop unattended for a day.
+sensors pass and a one-draw extreme does not) or M7's cascade. **The debounce shipped the same
+day** as `INCIDENT_CONFIRM_SWEEPS = 2` and migration `0003` (decision 6); the live check is in
+`docs/JOURNEY.md` under the M4 addendum. M7 is next.
 
 **The held set and the miss check are in-process.** Both live for the run and die with it. A held
 incident survives a restart only as `ongoing`; a fault injected by a previous run is never this

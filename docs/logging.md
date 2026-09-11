@@ -31,7 +31,7 @@ container). Files are **always** JSON regardless of environment.
 { "ts":"2026-09-10T14:30:00.000Z","run_id":"9a10c5f00357","tick":42,"duration_ms":8140,
   "store":"prod","catalog_source":"mcp_resource",
   "sensors_read":160,"sensors_failed":0,
-  "findings":21,"critical":6,"opened":9,"ongoing":8,"resolved":4,"held_unread":0,
+  "findings":21,"critical":6,"opened":2,"ongoing":8,"resolved":4,"pending":7,"dismissed":9,"held_unread":0,
   "agents_routed":["water_feed","infrastructure"],
   "work_orders":9,"work_orders_shipped":9,"work_orders_rejected":0,"escalated":1,
   "input_tokens":50385,"output_tokens":7954,"cost_usd":1.35,
@@ -48,6 +48,11 @@ denominated in dollars and a ceiling in tokens is a multiplication somebody does
 It is `input_tokens` and `output_tokens` at `llm_client.ASSUMED_RATE_USD_PER_M`, a stated
 assumption in one place; M7's pricing table replaces the constant and not the field. Exactly
 `0.0` on a tick that billed nothing. The loop sums it per run and halts at `SPEND_CEILING_USD`.
+
+**`pending` and `dismissed` are the debounce** (migration 0003). `pending` was flagged this sweep
+and not yet seen on `INCIDENT_CONFIRM_SWEEPS` consecutive sweeps; `dismissed` was pending and read
+clean. Neither is routed or billed. A high `dismissed` beside a low `opened` is the simulator's
+dice being filtered out, and it is the number that used to be the bill.
 
 **The loop's five fields.** `held` is incidents carried unanswered into the next tick because
 their agent raised, the model died in transport, or the spend stages were in backoff; they are

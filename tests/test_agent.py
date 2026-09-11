@@ -201,37 +201,54 @@ def incident(key: str, *, category: str, owner: str | None = None) -> Incident:
 # 1. the tick, end to end
 # =========================================================================== #
 @respx.mock
-async def test_a_tick_opens_incidents_and_the_next_tick_calls_them_ongoing(catalog: RanchMap, target: StoreTarget) -> None:
-    """The whole point of the store, exercised through the tick rather than around it. A
-    persisting fault re-alarming every five minutes is how a service teaches its client to
-    ignore it."""
+async def test_a_tick_holds_a_first_sighting_pending_opens_it_on_the_second_and_calls_it_ongoing_after(catalog: RanchMap, target: StoreTarget) -> None:
+    """The whole point of the store, exercised through the tick rather than around it. One bad
+    read is pending and reaches nobody; the same read twice in a row is an incident and is
+    routed exactly once; after that it is ongoing, and a persisting fault re-alarming every
+    five minutes is how a service teaches its client to ignore it."""
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
 
     first = await run_tick(tick=1, store=target, now=T0, spend=False)
     assert first.error is None and first.failed_stage is None
     assert (first.sensors_read, first.sensors_failed) == (3, 0)
     assert [f.category for f in first.findings] == ["water_low"]
-    assert len(first.opened) == 1 and first.ongoing == () and first.resolved == ()
-    assert first.routed == {"water_feed": ("alkali-flat-water:water_low",)}
+    assert len(first.pending) == 1 and first.opened == () and first.ongoing == ()
+    assert first.routed == {}, "a first sighting reaches no agent and costs nothing"
 
     second = await run_tick(tick=2, store=target, now=T1, spend=False)
-    assert len(second.opened) == 0 and len(second.ongoing) == 1
-    assert second.ongoing[0].occurrences == 2
+    assert len(second.opened) == 1 and second.pending == () and second.ongoing == ()
+    assert second.opened[0].occurrences == 2 and second.opened[0].tick_opened == 2 and second.opened[0].first_seen_at == T0
+    assert second.routed == {"water_feed": ("alkali-flat-water:water_low",)}
+
+    third = await run_tick(tick=3, store=target, now=T2, spend=False)
+    assert third.opened == () and len(third.ongoing) == 1 and third.ongoing[0].occurrences == 3
     # Nothing new opened, so nothing is handed to a model. This is the entire cost story.
-    assert second.routed == {}
+    assert third.routed == {}
 
 
 @respx.mock
-async def test_a_fault_that_heals_resolves_on_the_next_tick(catalog: RanchMap, target: StoreTarget) -> None:
+async def test_a_confirmed_fault_that_heals_resolves_but_a_single_bad_read_is_dismissed(catalog: RanchMap, target: StoreTarget) -> None:
+    """The debounce's other half. The deployed Sensor API invents a fresh reading per call, so a
+    healthy tank reads empty one sweep and fine the next; that is `dismissed`, never alarmed and
+    never `resolved`. A fault seen twice and then gone is a real `resolved`."""
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
     await run_tick(tick=1, store=target, now=T0, spend=False)
-
     respx.mock.reset()
     serve(respx.mock, {"alkali-flat-water": 9.0, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
-    healed = await run_tick(tick=2, store=target, now=T1, spend=False)
+    dice = await run_tick(tick=2, store=target, now=T1, spend=False)
+    assert dice.findings == () and dice.resolved == () and len(dice.dismissed) == 1
+    assert dice.dismissed[0].status == "dismissed" and dice.dismissed[0].occurrences == 1
+    assert "dismissed 1" in summarize(dice)
 
-    assert healed.findings == () and len(healed.resolved) == 1
-    assert healed.resolved[0].status == "resolved" and healed.resolved[0].resolved_at == T1
+    respx.mock.reset()
+    serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
+    await run_tick(tick=3, store=target, now=T2, spend=False)
+    confirmed = await run_tick(tick=4, store=target, now=T2, spend=False)
+    assert len(confirmed.opened) == 1, "the dismissed row did not block a new pending on the same key"
+    respx.mock.reset()
+    serve(respx.mock, {"alkali-flat-water": 9.0, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
+    healed = await run_tick(tick=5, store=target, now=T2, spend=False)
+    assert len(healed.resolved) == 1 and healed.resolved[0].status == "resolved" and healed.dismissed == ()
 
 
 @respx.mock
@@ -248,7 +265,7 @@ async def test_a_sensor_that_did_not_answer_holds_its_incident_open(catalog: Ran
 
     assert (dark.sensors_read, dark.sensors_failed) == (2, 1)
     assert dark.findings == (), "a failed read produces no finding; it is not a fault"
-    assert dark.resolved == (), "the tank stopped answering, so nothing is known to have healed"
+    assert dark.resolved == () and dark.dismissed == (), "the tank stopped answering, so nothing is known to have healed, and a pending row is held rather than dismissed"
 
 
 @respx.mock
@@ -261,9 +278,9 @@ async def test_exactly_one_tick_line_is_written_and_it_carries_the_counts(catalo
     lines = [line for line in logs if line["event"] == "tick"]
     assert len(lines) == 1
     line = lines[0]
-    assert (line["sensors_read"], line["sensors_failed"], line["findings"], line["opened"]) == (3, 0, 1, 1)
+    assert (line["sensors_read"], line["sensors_failed"], line["findings"], line["opened"], line["pending"], line["dismissed"]) == (3, 0, 1, 0, 1, 0)
     assert line["failed_stage"] is None and line["error"] is None
-    assert line["agents_routed"] == ["water_feed"] and line["catalog_source"] == "mcp_resource"
+    assert line["agents_routed"] == [] and line["catalog_source"] == "mcp_resource"
     assert line["store"] == "test", "which database a tick wrote to has to be on the line"
 
 
@@ -303,7 +320,7 @@ async def test_a_failing_stage_is_reported_not_raised(monkeypatch: pytest.Monkey
 
 
 @respx.mock
-async def test_the_summary_line_names_the_reading_a_human_would_ask_about(catalog: RanchMap, target: StoreTarget) -> None:
+async def test_the_summary_line_names_the_reading_a_human_would_ask_about(first_sight: Settings, catalog: RanchMap, target: StoreTarget) -> None:
     """`--once` is run by a person watching a console. A summary that says "1 finding" and
     nothing else sends them to the JSON to learn anything at all."""
     serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
@@ -403,50 +420,96 @@ def test_route_of_nothing_is_nothing_not_five_empty_agents() -> None:
 
 
 # =========================================================================== #
-# 3. the store: opened -> ongoing -> resolved, against a real Postgres
+# 3. the store: pending -> opened -> ongoing -> resolved (or dismissed), against a real Postgres
 # =========================================================================== #
-async def test_a_new_finding_opens_exactly_once(store: AsyncSession) -> None:
+async def test_a_new_finding_is_pending_once_opens_exactly_once_and_is_ongoing_after(store: AsyncSession) -> None:
+    """The five statuses, in order, on one row. At the default `INCIDENT_CONFIRM_SWEEPS = 2` a
+    finding is pending on its first sweep, opened on its second, and ongoing from the third."""
     first = await reconcile(store, [finding()], tick=1, run_id="r1", read_sensor_ids=ALL_SENSORS, now=T0)
-    assert first.counts == {"opened": 1, "ongoing": 0, "resolved": 0}
-    assert first.opened[0].key == "alkali-flat-water:water_low"
-    assert first.opened[0].tick_opened == 1 and first.opened[0].occurrences == 1
+    assert first.counts == {"opened": 0, "ongoing": 0, "resolved": 0, "pending": 1, "dismissed": 0}
+    assert first.pending[0].key == "alkali-flat-water:water_low" and first.pending[0].status == "pending"
+    assert first.pending[0].tick_opened == 0 and first.pending[0].occurrences == 1, "not opened yet, so no opening tick"
 
     second = await reconcile(store, [finding()], tick=2, run_id="r1", read_sensor_ids=ALL_SENSORS, now=T1)
-    assert second.counts == {"opened": 0, "ongoing": 1, "resolved": 0}, "a persisting fault is ongoing, never re-alarmed"
+    assert second.counts == {"opened": 1, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}
+    assert second.opened[0].tick_opened == 2 and second.opened[0].first_seen_at == T0 and second.opened[0].occurrences == 2
 
     third = await reconcile(store, [finding()], tick=3, run_id="r1", read_sensor_ids=ALL_SENSORS, now=T2)
-    assert third.counts == {"opened": 0, "ongoing": 1, "resolved": 0}
+    assert third.counts == {"opened": 0, "ongoing": 1, "resolved": 0, "pending": 0, "dismissed": 0}, "a persisting fault is ongoing, never re-alarmed"
     assert third.ongoing[0].occurrences == 3
-    assert third.ongoing[0].tick_opened == 1 and third.ongoing[0].tick_last_seen == 3
+    assert third.ongoing[0].tick_opened == 2 and third.ongoing[0].tick_last_seen == 3
     assert third.ongoing[0].first_seen_at == T0 and third.ongoing[0].last_seen_at == T2
 
     # One row for the whole story, not three.
     assert (await store.execute(text("select count(*) from incidents"))).scalar_one() == 1
 
 
-async def test_a_finding_that_stops_appearing_resolves(store: AsyncSession) -> None:
+async def test_a_pending_finding_that_reads_clean_is_dismissed_not_resolved(store: AsyncSession) -> None:
+    """One bad draw from a synthesized sensor is not an incident. It was never alarmed, so it
+    cannot have healed; `dismissed` keeps the row so the churn rate stays countable and keeps it
+    out of every resolved count a human reads."""
     await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
     result = await reconcile(store, [], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
 
-    assert result.counts == {"opened": 0, "ongoing": 0, "resolved": 1}
+    assert result.counts == {"opened": 0, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 1}
+    assert result.dismissed[0].resolved_at == T1
+    assert await open_incidents(store) == () and await counts_by_status(store) == {"dismissed": 1}
+
+    again = await reconcile(store, [finding()], tick=3, read_sensor_ids=ALL_SENSORS, now=T2)
+    assert again.counts["pending"] == 1, "a dismissed row is terminal, so the same key can go pending again"
+    assert (await store.execute(text("select count(*) from incidents"))).scalar_one() == 2
+
+
+async def test_a_pending_finding_whose_sensor_went_dark_is_held_not_dismissed(store: AsyncSession) -> None:
+    """Unread is not read-clean, for a pending row exactly as for an opened one. An outage
+    during the confirmation window must not quietly dismiss what was about to open."""
+    await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
+    blind = await reconcile(store, [], tick=2, read_sensor_ids=(), now=T1)
+    assert blind.counts == {"opened": 0, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}
+    assert blind.skipped_unread == ("alkali-flat-water:water_low",)
+    confirmed = await reconcile(store, [finding()], tick=3, read_sensor_ids=ALL_SENSORS, now=T2)
+    assert confirmed.counts["opened"] == 1, "and the next clean read that still shows the fault opens it"
+
+
+async def test_the_confirmation_window_is_a_knob_and_one_means_first_sight(store: AsyncSession) -> None:
+    """`INCIDENT_CONFIRM_SWEEPS`. 1 is the pre-0003 behaviour; 3 needs three in a row."""
+    now = await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0, confirm_sweeps=1)
+    assert now.counts["opened"] == 1 and now.opened[0].tick_opened == 1
+    await reconcile(store, [], tick=2, read_sensor_ids=ALL_SENSORS, now=T1, confirm_sweeps=1)
+
+    slow = [await reconcile(store, [finding()], tick=t, read_sensor_ids=ALL_SENSORS, now=T2, confirm_sweeps=3) for t in (3, 4, 5)]
+    assert [r.counts["pending"] for r in slow] == [1, 1, 0] and [r.counts["opened"] for r in slow] == [0, 0, 1]
+
+
+async def test_severity_on_a_pending_row_follows_the_latest_read_when_it_opens(store: AsyncSession) -> None:
+    await reconcile(store, [finding(severity="warning", value=5.0)], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
+    result = await reconcile(store, [finding(severity="critical", value=1.4)], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
+    assert result.opened[0].severity == "critical" and result.opened[0].last_value == "1.4"
+
+
+async def test_a_finding_that_stops_appearing_resolves(first_sight: Settings, store: AsyncSession) -> None:
+    await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
+    result = await reconcile(store, [], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
+
+    assert result.counts == {"opened": 0, "ongoing": 0, "resolved": 1, "pending": 0, "dismissed": 0}
     assert result.resolved[0].resolved_at == T1
     assert await open_incidents(store) == (), "a resolved incident is no longer open"
     assert await counts_by_status(store) == {"resolved": 1}
 
 
-async def test_the_same_fault_returning_after_a_resolve_is_a_new_incident(store: AsyncSession) -> None:
+async def test_the_same_fault_returning_after_a_resolve_is_a_new_incident(first_sight: Settings, store: AsyncSession) -> None:
     """History survives. The same tank drying out in March and again in July is two work
     orders, and collapsing them would overwrite the March story."""
     await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
     await reconcile(store, [], tick=2, read_sensor_ids=ALL_SENSORS, now=T1)
     again = await reconcile(store, [finding()], tick=3, read_sensor_ids=ALL_SENSORS, now=T2)
 
-    assert again.counts == {"opened": 1, "ongoing": 0, "resolved": 0}
+    assert again.counts == {"opened": 1, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}
     assert (await store.execute(text("select count(*) from incidents"))).scalar_one() == 2
     assert again.opened[0].tick_opened == 3
 
 
-async def test_a_sensor_that_did_not_answer_resolves_nothing(store: AsyncSession) -> None:
+async def test_a_sensor_that_did_not_answer_resolves_nothing(first_sight: Settings, store: AsyncSession) -> None:
     """The failure this prevents: the Sensor API has a bad five minutes, the sweep returns
     errors instead of readings, every incident on the ranch closes, and the feed reports an
     all-clear at the exact moment nobody can see anything."""
@@ -454,14 +517,14 @@ async def test_a_sensor_that_did_not_answer_resolves_nothing(store: AsyncSession
 
     blind = await reconcile(store, [], tick=2, read_sensor_ids=(), now=T1)
 
-    assert blind.counts == {"opened": 0, "ongoing": 0, "resolved": 0}
+    assert blind.counts == {"opened": 0, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}
     assert blind.skipped_unread == ("alkali-flat-water:water_low",)
     still_open = await open_incidents(store)
     assert len(still_open) == 1 and still_open[0].status == "opened"
     assert still_open[0].last_seen_at == T0, "an unread tick must not restamp the incident as freshly seen"
 
 
-async def test_other_sensors_still_resolve_while_one_is_dark(store: AsyncSession) -> None:
+async def test_other_sensors_still_resolve_while_one_is_dark(first_sight: Settings, store: AsyncSession) -> None:
     """Per sensor, not per tick. One dark sensor must not freeze the whole ledger."""
     await reconcile(store, [finding(), finding("east-allotment-fence", category="fence_down")], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
     result = await reconcile(store, [], tick=2, read_sensor_ids=("east-allotment-fence",), now=T1)
@@ -470,7 +533,7 @@ async def test_other_sensors_still_resolve_while_one_is_dark(store: AsyncSession
     assert result.skipped_unread == ("alkali-flat-water:water_low",)
 
 
-async def test_severity_follows_the_current_reading_on_an_ongoing_incident(store: AsyncSession) -> None:
+async def test_severity_follows_the_current_reading_on_an_ongoing_incident(first_sight: Settings, store: AsyncSession) -> None:
     """Code owns severity at every tick, not just the first one. A tank that fills back to
     a warning is still one incident, described accurately."""
     await reconcile(store, [finding(severity="critical", value=1.4)], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
@@ -482,20 +545,20 @@ async def test_severity_follows_the_current_reading_on_an_ongoing_incident(store
     assert tuple(row) == ("warning", "5", "ongoing")
 
 
-async def test_two_categories_on_one_sensor_are_two_incidents(store: AsyncSession) -> None:
+async def test_two_categories_on_one_sensor_are_two_incidents(first_sight: Settings, store: AsyncSession) -> None:
     """A degraded probe reporting a dry tank is two work orders for two different people.
     The key is `sensor:category`, so they never collapse."""
     result = await reconcile(store, [finding(), finding(category="sensor_degraded", severity="warning")], tick=1, read_sensor_ids=ALL_SENSORS, now=T0)
     assert {i.key for i in result.opened} == {"alkali-flat-water:water_low", "alkali-flat-water:sensor_degraded"}
 
 
-async def test_a_gate_value_is_stored_as_open_not_as_true(store: AsyncSession) -> None:
+async def test_a_gate_value_is_stored_as_open_not_as_true(first_sight: Settings, store: AsyncSession) -> None:
     gate = Finding(sensor_id="coyote-draw-gate", sensor_type="gate", location="Coyote Draw", category="gate_open", severity="warning", value=True, summary="Coyote Draw: gate coyote-draw-gate reads open.")
     result = await reconcile(store, [gate], tick=1, read_sensor_ids=("coyote-draw-gate",), now=T0)
     assert result.opened[0].last_value == "open"
 
 
-async def test_the_owner_is_recorded_when_routing_supplies_one(store: AsyncSession) -> None:
+async def test_the_owner_is_recorded_when_routing_supplies_one(first_sight: Settings, store: AsyncSession) -> None:
     result = await reconcile(store, [finding()], tick=1, read_sensor_ids=ALL_SENSORS, now=T0, owners={"alkali-flat-water:water_low": "water_feed"})
     assert result.opened[0].owner == "water_feed"
 
@@ -520,6 +583,15 @@ async def test_the_partial_unique_index_forbids_two_live_incidents_on_one_key(st
     with pytest.raises(IntegrityError):
         await store.execute(incidents.insert(), {**row, "status": "ongoing"})
     await store.rollback()
+    await store.execute(incidents.insert(), row)
+    with pytest.raises(IntegrityError):
+        await store.execute(incidents.insert(), {**row, "status": "pending"})
+    await store.rollback()
+    # Two terminal rows on one key are history, not a collision.
+    await store.execute(incidents.insert(), {**row, "status": "dismissed"})
+    await store.execute(incidents.insert(), {**row, "status": "resolved"})
+    await store.execute(incidents.insert(), {**row, "status": "pending"})
+    await store.commit()
 
 
 async def test_the_connection_can_only_see_the_agent_schema(store: AsyncSession) -> None:
@@ -1212,7 +1284,7 @@ def test_the_schema_forces_every_field_a_lazy_answer_would_leave_out() -> None:
 
 
 @respx.mock
-async def test_a_tick_told_not_to_spend_stops_at_the_end_of_the_free_pass(catalog: RanchMap, target: StoreTarget) -> None:
+async def test_a_tick_told_not_to_spend_stops_at_the_end_of_the_free_pass(first_sight: Settings, catalog: RanchMap, target: StoreTarget) -> None:
     """How every rail above the model layer exercises the whole pipeline for free, and the
     reason `conftest.no_model_calls` sits behind it. A forgotten flag has to fail, not bill."""
     serve(respx.mock, {"alkali-flat-water": 1.4, "east-allotment-fence": 6.0, "home-place-bin": 4000})
@@ -1706,7 +1778,7 @@ CALM = {"alkali-flat-water": 18.0, "east-allotment-fence": 6.4, "home-place-bin"
 
 
 @respx.mock
-async def test_a_crashed_agent_resolves_nothing_and_its_incidents_are_held(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+async def test_a_crashed_agent_resolves_nothing_and_its_incidents_are_held(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
     """M1's rule one layer up. Reconcile runs before any agent and reads triage's findings, so
     an agent raising cannot close an incident; the rail asserts that first. What it CAN do is
     leave a `no_answer` order on an incident that is `ongoing` next tick and never re-routed.
@@ -1734,7 +1806,7 @@ async def test_a_crashed_agent_resolves_nothing_and_its_incidents_are_held(monke
 
 
 @respx.mock
-async def test_a_held_incident_that_heals_falls_out_of_the_held_set(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+async def test_a_held_incident_that_heals_falls_out_of_the_held_set(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
     serve(respx.mock, LOW)
     _stub_spend(monkeypatch, lambda key: _held_order(key))
     crashed = await run_tick(tick=1, store=target, now=T0, spend=True)
@@ -1748,7 +1820,7 @@ async def test_a_held_incident_that_heals_falls_out_of_the_held_set(monkeypatch:
 
 
 @respx.mock
-async def test_a_rail_rejection_is_never_held(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+async def test_a_rail_rejection_is_never_held(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
     """A retry loop turns a rail into a sampler. `rejected` means the model answered and the
     answer was indefensible; asking again until it passes is the one thing not to do. And a
     `max_tokens` no-answer is a config bug that buys the same truncation twice."""
@@ -1763,7 +1835,7 @@ async def test_a_rail_rejection_is_never_held(monkeypatch: pytest.MonkeyPatch, c
 
 
 @respx.mock
-async def test_a_transport_failure_is_held_because_the_model_never_answered(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+async def test_a_transport_failure_is_held_because_the_model_never_answered(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
     serve(respx.mock, LOW)
     _stub_spend(monkeypatch, lambda key: _held_order(key, violations=("no_payload", "transport_error")))
     assert (await run_tick(tick=1, store=target, now=T0, spend=True)).held == ("alkali-flat-water:water_low",)
@@ -1790,7 +1862,7 @@ async def test_a_tick_with_the_free_pass_in_backoff_still_writes_its_line(monkey
 
 
 @respx.mock
-async def test_a_sick_model_holds_new_incidents_instead_of_paying_for_packets_nobody_can_judge(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+async def test_a_sick_model_holds_new_incidents_instead_of_paying_for_packets_nobody_can_judge(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
     """Per-upstream, not global: the ranch is readable, so the free pass runs and the ledger
     moves. Only the spend is withheld, and what it would have spent on is held for the tick
     when the window closes."""

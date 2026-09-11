@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     tier1_model: str = "gemma4:e4b"
     ollama_num_ctx: int = 16_384
 
+    # --- The ledger -------------------------------------------------------------
+    # How many consecutive sweeps have to flag a sensor before it is an incident. The
+    # deployed Sensor API invents a fresh reading on every call, so a healthy tank reads
+    # empty one sweep in fifty and fine on the next; at 1 every such draw opened an incident,
+    # paid a model for a work order, and resolved itself five minutes later. M4 measured that
+    # at 10 to 24 per tick. At 2, a fault has to be there twice in a row, which the seven
+    # permanently-bad sensors and every chaos scenario (minimum TTL two ticks) still are.
+    # 1 restores open-on-first-sight, for a `--once` demo or a rail that is about something else.
+    incident_confirm_sweeps: int = 2
+
     # --- Tick loop ------------------------------------------------------------
     # Cadence is start-to-start, not sleep-after-finish, so a busy tick does not drift the
     # schedule. Chaos TTLs are expressed in ticks and multiplied by this number at injection

@@ -1513,8 +1513,10 @@ async def test_one_scenario_from_injection_through_a_resolved_incident(chaos_sto
 
     findings = triage_sweep(faulted.readings)
     assert [(f.category, f.severity, f.value) for f in findings] == [("water_low", "critical", 0.8)]
-    opened = await reconcile(chaos_store, findings, tick=2, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=NOW)
-    assert opened.counts == {"opened": 1, "ongoing": 0, "resolved": 0}
+    glimpsed = await reconcile(chaos_store, findings, tick=2, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=NOW)
+    assert glimpsed.counts["pending"] == 1 and glimpsed.counts["opened"] == 0, "one bad sweep is pending, which is why every scenario's TTL is at least two ticks"
+    opened = await reconcile(chaos_store, findings, tick=3, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=NOW + timedelta(seconds=300))
+    assert opened.counts == {"opened": 1, "ongoing": 0, "resolved": 0, "pending": 0, "dismissed": 0}, "the fault is still there on the next sweep, so it opens"
 
     # --- tick 5: the TTL is up, the overlay is gone, and the same honest sweep reads nominal --
     later = NOW + timedelta(seconds=300 * (planned[0].ttl_ticks + 1))
@@ -1528,5 +1530,5 @@ async def test_one_scenario_from_injection_through_a_resolved_incident(chaos_sto
     assert clean.overlay_events == 0 and [r.value for r in clean.readings] == [16.4]
     assert triage_sweep(clean.readings) == []
     resolved = await reconcile(chaos_store, [], tick=5, run_id="e2e", read_sensor_ids=[tank.sensor_id], now=later)
-    assert resolved.counts == {"opened": 0, "ongoing": 0, "resolved": 1}
+    assert resolved.counts == {"opened": 0, "ongoing": 0, "resolved": 1, "pending": 0, "dismissed": 0}
     assert resolved.resolved[0].sensor_id == tank.sensor_id

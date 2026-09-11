@@ -14,7 +14,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 Severity = Literal["nominal", "warning", "critical"]
-IncidentStatus = Literal["opened", "ongoing", "resolved"]
+#: `pending` is seen but not yet confirmed: live in the ledger, never paged, never billed.
+#: `dismissed` is a pending that read clean before confirmation: never alarmed, so not `resolved`.
+IncidentStatus = Literal["pending", "opened", "ongoing", "resolved", "dismissed"]
+LIVE_STATUSES: tuple[IncidentStatus, ...] = ("pending", "opened", "ongoing")
 
 SEVERITY_ORDER: dict[Severity, int] = {"nominal": 0, "warning": 1, "critical": 2}
 
@@ -238,9 +241,13 @@ class RanchState(BaseModel):
     sensors_read: int = 0
     sensors_failed: int = 0
     findings: tuple[Finding, ...] = ()
+    #: `opened` is what gets paged and billed. `pending` was flagged this sweep but not yet
+    #: confirmed; `dismissed` was pending and read clean, never alarmed.
     opened: tuple[Incident, ...] = ()
     ongoing: tuple[Incident, ...] = ()
     resolved: tuple[Incident, ...] = ()
+    pending: tuple[Incident, ...] = ()
+    dismissed: tuple[Incident, ...] = ()
     routed: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     #: The first stage that spends money. One per newly-opened incident, across all four
     #: responders as of M3.
