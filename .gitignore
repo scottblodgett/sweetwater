@@ -26,3 +26,8 @@ Thumbs.db
 # Per-run log directories from verification runs (LOG_DIR=logs/<run>)
 logs/*/
 !logs/transcripts/
+
+# The window (M9): dependencies, build output, and local env
+web/node_modules/
+web/.next/
+web/.env*.local

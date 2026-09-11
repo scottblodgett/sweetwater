@@ -1,0 +1,15 @@
+{
+  "name": "agent-lab-ui",
+  "private": true,
+  "type": "module",
+  "description": "Mission-control dashboard to watch Phase II agent-lab runs (token gauge, verdict feed).",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.2"
+  }
+}

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-lab · mission control</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>agent-lab <span class="dim">· mission control</span></h1>
+      <div id="status" class="status dim">idle</div>
+    </header>
+
+    <main>
+      <section id="gauge-panel" class="panel hero">
+        <div class="panel-title">TOKEN GAUGE <span class="dim" id="gauge-sub"></span></div>
+        <div id="banner" class="banner" hidden></div>
+        <canvas id="gauge" width="900" height="320"></canvas>
+        <div class="legend">
+          <span class="key sent">sent (bounded)</span>
+          <span class="key full">full (unbounded)</span>
+          <span class="cumulative" id="cumulative"></span>
+        </div>
+      </section>
+
+      <section id="summary-panel" class="panel" hidden>
+        <div class="panel-title">SUMMARY</div>
+        <dl id="summary-stats" class="summary-stats"></dl>
+        <div id="summary-lesson" class="summary-lesson"></div>
+      </section>
+
+      <section id="verdict-panel" class="panel">
+        <div class="panel-title">VERDICT FEED</div>
+        <div id="verdicts" class="feed"></div>
+      </section>
+
+      <section id="rails-panel" class="panel">
+        <div class="panel-title">RAILS</div>
+        <div id="rails" class="rails"></div>
+      </section>
+
+      <section id="gate-panel" class="panel">
+        <div class="panel-title">GATE</div>
+        <div id="gate" class="gate idle">no pending approval</div>
+        <div id="gate-buttons" class="gate-buttons" hidden>
+          <button id="approve">approve</button>
+          <button id="reject">reject</button>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="controls">
+        <label>rung
+          <select id="rung"></select>
+        </label>
+        <label>source
+          <select id="mode">
+            <option value="live">live</option>
+            <option value="replay">replay</option>
+          </select>
+        </label>
+        <label id="provider-wrap">model
+          <select id="provider"></select>
+        </label>
+        <label id="n-wrap">N <input id="n" type="number" min="1" max="200" value="10" /></label>
+        <label id="file-wrap" hidden>capture <select id="file"></select></label>
+        <button id="run">▶ run</button>
+        <button id="stop" disabled>■ stop</button>
+      </div>
+      <details class="raw">
+        <summary>raw console</summary>
+        <pre id="raw"></pre>
+      </details>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

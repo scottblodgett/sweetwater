@@ -15,7 +15,7 @@ What gets built is the part that does not exist yet: **one orchestrator running 
 |                |                                                                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Repo           | `scott-jasper/sweetwater`, local `C:\temp\sweetwater`. New repo; MCP-Farm untouched.                                                                         |
-| Structure      | The canonical layout from your diagram, mapped 1:1. `requirements.txt`, `pyproject.toml`, `src/{agent,tools,models,prompts,utils,api}`, `tests/`, `data/`, `logs/`, `main.py`. |
+| Structure      | The canonical layout from your diagram, mapped 1:1. `requirements.txt`, `pyproject.toml`, `src/{agent,tools,models,prompts,utils,api}`, `tests/`, `data/`, `logs/`, `main.py`. `web/` (M9) is the window, its own npm project, not a workspace. |
 | Language       | Python **3.11.9**. 3.12 is not installed on this machine and 3.14 breaks native wheels. Next.js for the window only.                                          |
 | Agents         | Orchestrator + **five**: `water_feed`, `herd_health`, `infrastructure`, `compliance`, `chaos`.                                                               |
 | Framework      | **LangGraph Python**, hand-wired supervisor + `create_react_agent` workers.                                                                                  |
@@ -117,6 +117,11 @@ sweetwater/                                lands at
 │   ├── tick.jsonl                  M0    one line per tick        (the heartbeat)
 │   ├── agent.jsonl                 M0    one line per model call  (the instrument), first line at M2
 │   └── audit.jsonl                 M0    one line per side effect (the receipt), first line at M6
+├── web/                            M9    the window: Next.js App Router against `/ops/*` through server-side proxies, so `OPS_API_TOKEN` never reaches a browser. Landed first as `agent-lab-ui` untouched, then ported in place
+│   ├── app/                        M9    layout, the one page, `api/ops/*` route handlers (the proxy, including the SSE stream)
+│   ├── components/                 M9    the five panels: gauge, feed, rails, summary, gate; the map placeholder
+│   ├── lib/                        M9    the envelope types mirroring `src/api/schemas.py`, the fetch and EventSource helpers
+│   └── README.md                   M9    run, env, what carried over from `agent-lab-ui` and what did not
 └── main.py                         M0    `python main.py` runs the loop; `--api`, `--handshake`, `--once`
 ```
 
