@@ -119,7 +119,7 @@ It is known now: a free tick is 3 seconds, a paid tick is 80 to 90 seconds, and 
 loop as written, exit codes and SIGTERM already mean the right thing) versus a Lambda container on
 an EventBridge schedule (cheaper when calm, but the loop's whole design is a long-lived process with
 per-upstream backoff and a held set in memory; issues 3 and 4 would have to be done first). I would
-take the box. M10 dockerizes either way.
+take the box. Dockerizing is FUTURE-1 and deferred; a box runs the venv until then.
 
 ### 6. A real `ANTHROPIC_API_KEY`
 

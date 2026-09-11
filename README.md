@@ -46,7 +46,7 @@ never looks like "broken." The loop exits **0** on a clean drain (Ctrl+C once, S
 SIGBREAK), **1** if forced or broken, and **4** when the per-run spend ceiling halts it. The
 ceiling defaults to $10 and has no unlimited setting.
 
-No Docker is needed until M10: the upstreams are already deployed and agent state lives in
+No Docker is needed; dockerizing is a deferred FUTURE-1 item, not part of the build: the upstreams are already deployed and agent state lives in
 Supabase, so there is nothing local to stand up. A local Postgres is needed only to run
 the store tests, which must never point at Supabase.
 

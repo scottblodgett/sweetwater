@@ -32,7 +32,7 @@ didn't ask for, whichever comes first.
 
 ## How milestones close
 
-The build runs M0 through M10 (`docs/architecture.md`). At the end of **every** M phase,
+The build runs M0 through M9 (`docs/architecture.md`); dockerizing is FUTURE-1 and deferred. At the end of **every** M phase,
 in this order, no exceptions:
 
 1. **Run the gate.** `pytest`, `ruff check .`, `mypy src main.py`, and the phase's own
@@ -173,7 +173,7 @@ design, which is correct for a demo and ruinous for a measurement. `CHAOS_ALLOW_
 separate switch, also off, and it is the only thing between a scenario and a real `PATCH` on
 the deployed Farm API. Knobs and the demo recipe: `docs/STATE.md`.
 
-Windows venv: `.venv/Scripts/python.exe`. No Docker until M10 - the upstreams are
+Windows venv: `.venv/Scripts/python.exe`. No Docker in the build (dockerizing is FUTURE-1, deferred) - the upstreams are
 already deployed and `sw_ops` is in Supabase, so there is nothing local to stand up.
 
 ## Conventions

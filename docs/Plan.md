@@ -24,7 +24,7 @@ What gets built is the part that does not exist yet: **one orchestrator running 
 | Models         | **Local (`gemma4:e4b` via Ollama) by default, Opus on escalation.** Build Opus-only, then move jobs down with a rail.                                        |
 | Logging        | structlog, JSON Lines, three streams: `tick` / `agent` / `audit`. Wired at M0, not bolted on.                                                                |
 | Agent state    | Existing Supabase project, one **new** schema `sw_ops`. Nothing else touches it.                                                                             |
-| How you run it | **Local venv first, Docker last.** `python main.py` against the live APIs and Supabase. No containers needed until M10.                                       |
+| How you run it | **Local venv first, Docker last.** `python main.py` against the live APIs and Supabase. No containers in any M phase. Dockerizing is FUTURE-1, deferred.      |
 
 ---
 
@@ -38,7 +38,7 @@ cp .env.example .env      # fill in MCP_URL, the four API urls, DATABASE_URL, AN
 python main.py            # the tick loop starts talking to the live ranch
 ```
 
-`docker-compose.yml` sits in the tree from M0 as a placeholder, and gets filled in at **M10** once the thing works. Dockerizing a moving target is how you end up debugging a container when the bug is in your prompt.
+`docker-compose.yml` sits in the tree from M0 as a placeholder, and gets filled in at **FUTURE-1**, if and when the hosting decision calls for it. Dockerizing a moving target is how you end up debugging a container when the bug is in your prompt.
 
 **One exception:** the `sw_ops` store tests need a real Postgres and must never point at Supabase, same rule as `farm_systems_test`. They use your existing local Postgres install with a `sw_ops_test` schema. Still no Docker.
 
@@ -53,7 +53,7 @@ sweetwater/                                lands at
 ├── requirements-dev.txt            M0    pytest, ruff, mypy
 ├── .env / .env.example             M0    MCP_URL, *_API urls, DATABASE_URL, ANTHROPIC_API_KEY, OLLAMA_*, CHAOS_*, LOG_*
 ├── .gitignore                      M0
-├── docker-compose.yml             (M10)  placeholder; you do not need it to build this
+├── docker-compose.yml          (FUTURE-1) placeholder; you do not need it to build this, and the phase that fills it is deferred
 ├── alembic.ini                     M1    points at alembic/; the URL comes from env, never from this file
 ├── alembic/
 │   ├── env.py                      M1    resolves the target through the same resolver main.py uses
@@ -416,9 +416,9 @@ Each ends runnable and verifiable. **M0 through M9 need no containers and no new
 
 **M8 The read API.** `api/routes.py`: `/ops/incidents`, `/ops/report`, `/ops/stream` (SSE), `/ops/gate` for approve/reject, `/health`. Same envelope conventions as the ranch APIs so the whole system reads consistently.
 
-**M9 The window.** Next.js on Vercel: incident feed and ranch map against `/ops/*`. Light mode. Sensor coordinates are already in the catalog, so the map needs no new backend work.
+**M9 The window.** Next.js on Vercel: incident feed and ranch map against `/ops/*`. Light mode. Sensor coordinates are already in the catalog, so the map needs no new backend work. This replaces the `agent-lab-ui/` dashboard and the half-built `demo-site/` from MCP-Farm, neither of which comes over: both read the ranch directly, and this one reads `sw_ops` through the M8 API and shows what the agents decided rather than what the sensors said. **M9 is the last M phase**, so its close also carries what the old M10 held: `README.md` brought current, `docs/cookbook.md` ordered by the pain rather than the technique, and `docs/JOURNEY.md`'s final pass, which is a pass and not a reconstruction because it was written at every boundary.
 
-**M10 Dockerize, and close the docs.** Now that it works: a `Dockerfile` for the orchestrator, a second for the API, and `docker-compose.yml` wiring them plus an optional local Postgres for offline work. The same image is what a Lambda container or a small always-on box would run, so this is the last step and also the first step of whatever hosting you pick. Then `README.md`, `docs/cookbook.md` ordered by the pain rather than the technique, and `docs/JOURNEY.md` written from the milestone notes as you go rather than reconstructed at the end.
+**FUTURE-1 Dockerize. Deferred, renamed from M10 on 2026-09-11.** Not part of the build; picked up if and when issue #5 (where the loop runs) lands on a host that wants a container. When it does: a `Dockerfile` for the orchestrator, a second for the API, and `docker-compose.yml` wiring them plus an optional local Postgres for offline work. The same image is what a Lambda container or a small always-on box would run, so this is the last step and also the first step of whatever hosting you pick. The doc close that used to live here moved to M9.
 
 ---
 
@@ -428,13 +428,13 @@ Named so nothing gets quietly resurrected:
 
 - **The APIs and the MCP server.** They stay on Lambda; MCP-Farm goes read-only. If a tool turns out to be genuinely missing, that is a scoped change to the old repo and a conversation, not a drive-by.
 - The 23 `agent-lab/*.mjs` rung scripts. The findings are the asset; the scripts already spent themselves earning them.
-- `agent-lab-ui/` and `demo-site/`. M8's window absorbs both.
+- `agent-lab-ui/` and `demo-site/`. M9's window absorbs both.
 - `docs/prd.md`. Stale as a system description by its own admission. `docs/sweetwater-ranch.md` comes over as canon.
 
 ## Verification, end to end
 
 1. `pytest`, `ruff check`, `mypy --strict` all green.
-2. `python main.py` in a venv, then watch the log for 30 minutes. Ticks land, chaos fires and heals, incidents open and resolve. Only at M10 does this become `docker compose up`, and it must behave identically.
+2. `python main.py` in a venv, then watch the log for 30 minutes. Ticks land, chaos fires and heals, incidents open and resolve. Only at FUTURE-1, if it happens, does this become `docker compose up`, and it must behave identically.
 3. Read a shift report by eye. Right sensing world, real sensor, real reading, and would a hand on shift know what to do.
 4. Human gate by hand: let a tick want a care write, watch it block, kill the process, restart, reject, then approve.
 5. Replay determinism: same `CHAOS_SEED`, two runs, identical event sequence.
@@ -446,5 +446,5 @@ Named so nothing gets quietly resurrected:
 
 ## Open items
 
-- **Where this runs in production.** ECS is off the table. You build and run it in a venv, dockerize at M10, and decide the host after that. Lambda container image on a short EventBridge schedule is the cheap answer for a tick loop; a small always-on box is the honest answer for "constantly running." Worth deciding once M4 exists and you can see how long a tick actually takes.
+- **Where this runs in production.** ECS is off the table. You build and run it in a venv, decide the host, and dockerize (FUTURE-1) only if the host wants a container. Lambda container image on a short EventBridge schedule is the cheap answer for a tick loop; a small always-on box is the honest answer for "constantly running." Worth deciding once M4 exists and you can see how long a tick actually takes.
 - **Multi-tenancy.** "Stand up the next ranch in a morning" implies per-client isolation of `sw_ops`. Not in V1.
