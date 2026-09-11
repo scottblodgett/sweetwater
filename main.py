@@ -4,9 +4,11 @@
     python main.py --once        run exactly one tick, then exit
     python main.py               run the tick loop until interrupted, or until the spend ceiling halts it
     python main.py --no-spend    either of the above with the two paid stages skipped
-    python main.py --api         serve the read API only
+    python main.py --api         serve the read API only: sw_ops in, JSON out, never the ranch, never a model
 
-Exit codes: 0 clean, 1 unrecoverable or forced, 2 config, 3 not built yet, 4 spend ceiling.
+Exit codes: 0 clean, 1 unrecoverable or forced, 2 config, 4 spend ceiling. 3 was "not built yet" and
+retired at M8 when the last unbuilt mode landed; it is not reused, so an old runbook reading 3 is wrong
+rather than misled.
 
 The four ranch APIs and the MCP server are deployed and frozen. This process is
 the only thing being built here: one orchestrator, five sub-agents, running
@@ -20,7 +22,7 @@ import asyncio
 import signal
 import sys
 
-from src.agent.executor import EXIT_NOT_IMPLEMENTED, EXIT_OK, EXIT_UNRECOVERABLE
+from src.agent.executor import EXIT_OK, EXIT_UNRECOVERABLE
 from src.tools.allowlists import DEPLOYED_TOOLS
 from src.utils.config import get_settings
 from src.utils.logger import Stopwatch, bind_tick, configure_logging, get_logger, log_tick
@@ -189,9 +191,40 @@ async def loop(*, spend: bool = True) -> int:
     return await run_loop(store=store, spend=spend, stop=stop)
 
 
-async def not_yet(name: str, milestone: str) -> int:
-    get_logger("sweetwater").error("not_implemented", command=name, arrives_in=milestone)
-    return EXIT_NOT_IMPLEMENTED
+def api() -> int:
+    """The read API. M8. Its own process, reading `sw_ops` and nothing else.
+
+    Two config refusals before a port is bound, both exit 2: no usable `OPS_API_TOKEN` (the POST
+    that approves a real write would have nobody able to make it, and a server that boots and
+    approves nothing is a server someone will "fix" by removing the check), and a store target
+    the guard refuses. `SW_OPS_TARGET=test` reads the local ledger, same resolver as everything
+    else. The four ranch URLs are not required here: this process never calls them.
+    """
+    import uvicorn
+
+    from src.agent.executor import EXIT_CONFIG
+    from src.agent.memory import SchemaGuardError, resolve_store
+    from src.api.routes import create_app
+
+    log = get_logger("sweetwater.api")
+    settings = get_settings()
+    try:
+        tokens = settings.ops_tokens()
+    except ValueError as exc:
+        log.error("config_incomplete", missing=["ops_api_token"], error=str(exc), hint="OPS_API_TOKEN=name:secret[,name:secret] in .env; the secret is at least 16 characters")
+        return EXIT_CONFIG
+    try:
+        store = resolve_store()
+    except SchemaGuardError as exc:
+        log.error("store_unavailable", error=str(exc))
+        return EXIT_CONFIG
+
+    app = create_app(target=store, settings=settings, tokens=tokens)
+    log.info("api_listening", host=settings.api_host, port=settings.api_port, store=store.name, hint=f"curl http://{settings.api_host}:{settings.api_port}/health")
+    # uvicorn owns the loop and the Ctrl+C; `log_config=None` keeps its lines on this repo's
+    # console handler rather than a second formatter nobody configured.
+    uvicorn.run(app, host=settings.api_host, port=settings.api_port, log_config=None, access_log=False)
+    return EXIT_OK
 
 
 def main() -> int:
@@ -199,7 +232,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--handshake", action="store_true", help="verify the deployed MCP server and ranch map, then exit")
     mode.add_argument("--once", action="store_true", help="run exactly one tick, then exit")
-    mode.add_argument("--api", action="store_true", help="serve the read API only, no tick loop")
+    mode.add_argument("--api", action="store_true", help="serve the read API only: reads sw_ops, never the ranch, never a model, no tick loop")
     parser.add_argument("--no-spend", action="store_true", help="stop every tick at the end of the free pass; no evidence call, no model call, no bill")
     args = parser.parse_args()
 
@@ -212,7 +245,7 @@ def main() -> int:
     if args.once:
         return asyncio.run(once(spend=not args.no_spend))
     if args.api:
-        return asyncio.run(not_yet("--api", "M8"))
+        return api()
     try:
         return asyncio.run(loop(spend=not args.no_spend))
     except KeyboardInterrupt:

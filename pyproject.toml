@@ -27,7 +27,7 @@ warn_unreachable = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["mcp.*", "langchain_mcp_adapters.*", "langgraph.*", "sse_starlette.*"]
+module = ["mcp.*", "langchain_mcp_adapters.*", "langgraph.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -28,8 +28,11 @@ The audit rail (`tests/CLAUDE.md`): every `audit_id` appears exactly twice in `a
 **or once while its graph is still paused.** `unpaired_audit_ids` is the check and the CLI's
 `list` is what a person reads to answer the ones that are.
 
-The CLI is the whole of what a human can do at M6, and `/ops/gate` at M8 wraps it and adds
-nothing: if a decision cannot be expressed here it cannot be expressed there either.
+The CLI is the whole of what a human can do at M6, and `/ops/gate` at M8 (`src/api`) wraps it and
+adds nothing: if a decision cannot be expressed here it cannot be expressed there either. From M8
+each receipt is also a row in `sw_ops.audit_receipts`, written before the file line through the
+checkpointer's own connection; the primary key `(audit_id, phase)` is the "exactly twice" rail as a
+constraint, and the file is the projection (`docs/issues.md` #10).
 
     python -m src.agent.gate list
     python -m src.agent.gate approve <audit_id> [--by NAME]
@@ -53,7 +56,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, interrupt
 
-from src.agent.memory import CheckpointerNotMigratedError, SchemaGuardError, checkpointer, resolve_store
+from src.agent.memory import CheckpointerNotMigratedError, SchemaGuardError, ThreadedPostgresSaver, checkpointer, resolve_store
 from src.tools.allowlists import Approval, assert_callable
 from src.utils.helpers import utc_now_iso
 from src.utils.logger import configure_logging, get_logger, log_audit_decided, log_audit_proposed, new_audit_id
@@ -129,7 +132,21 @@ class ProposeOutcome:
 
 
 class GateError(RuntimeError):
-    """A decision that cannot be applied: no such pause, already decided, or a rejection without a reason."""
+    """A decision that cannot be applied: no such pause, already decided, or a rejection without a reason.
+    The CLI catches this base; the API (M8) tells the three apart by subclass to pick 404, 409, or 422,
+    which is why they are types and not message text."""
+
+
+class GateNotFound(GateError):
+    """No proposal has this audit id."""
+
+
+class GateAlreadyDecided(GateError):
+    """The pause was answered once already. A second answer is refused by name, never a silent no-op."""
+
+
+class GateInvalidDecision(GateError):
+    """The decision is malformed: a reject with no reason, or nobody in `decided_by`."""
 
 
 Performer = Callable[[str, dict[str, Any], Approval], Awaitable[tuple[str, str]]]
@@ -144,7 +161,30 @@ def _ask(state: GateState) -> GateState:
     return {"decision": str(answer.get("decision", "")), "decided_by": str(answer.get("decided_by", "")), "reason": str(answer.get("reason", ""))}
 
 
-def _make_execute(perform: Performer) -> Callable[[GateState], Awaitable[GateState]]:
+async def record_receipt(saver: BaseCheckpointSaver[Any], row: dict[str, Any], *, strict: bool = False) -> None:
+    """M8, `docs/issues.md` #10. The receipt row, on the connection that holds the pause, BEFORE the
+    file line: the table is the record and `logs/audit.jsonl` is its projection.
+
+    `strict` is for the `proposed` half, where a row that cannot be written means the ledger is
+    down and the proposal should take the `dropped` path like any other checkpointer failure. The
+    `decided` half is never strict: by then the write on the ranch may already have happened, so
+    the failure is an error line and the decision still finishes and still reaches the file.
+    A saver that is not Postgres (a rail's in-memory one) has no table to write to and says so once.
+    """
+    if not isinstance(saver, ThreadedPostgresSaver):
+        log.debug("audit_receipt_skipped", reason="checkpointer is not Postgres; no audit_receipts table to write")
+        return
+    try:
+        await saver.record_receipt(row)
+    except Exception as exc:
+        if strict:
+            raise
+        # `receipt_phase`, not `phase`: a console line carrying `audit_id` and `phase` would be counted
+        # as a receipt by `unpaired_audit_ids`, and the rail is about receipts. Caught by its own test.
+        log.error("audit_receipt_failed", audit_id=row.get("audit_id"), receipt_phase=row.get("phase"), error=f"{type(exc).__name__}: {exc}"[:200], hint="the decision stands and its file line follows; the table is missing this receipt")
+
+
+def _make_execute(perform: Performer, saver: BaseCheckpointSaver[Any]) -> Callable[[GateState], Awaitable[GateState]]:
     async def _execute(state: GateState) -> GateState:
         decided_at = utc_now_iso()
         latency = int((_parse(decided_at) - _parse(state["proposed_at"])).total_seconds() * 1000)
@@ -159,8 +199,9 @@ def _make_execute(perform: Performer) -> Callable[[GateState], Awaitable[GateSta
                 upstream = str(exc)[:200]
         else:
             result = "not_executed"
-        # The second line of the pair, written here so a decision path that skipped this node
-        # is a decision path that skipped its log line, which is what the audit rail catches.
+        # The second half of the pair, row then line, written here so a decision path that skipped
+        # this node is a decision path that skipped its receipt, which is what the audit rail catches.
+        await record_receipt(saver, {"audit_id": state["audit_id"], "phase": "decided", "at": _parse(decided_at), "run_id": state.get("run_id", ""), "tick": state.get("tick", 0), "tool": state["tool"], "incident_key": state["incident_key"], "decision": decision, "decided_by": state.get("decided_by", ""), "result": result, "reason": state.get("reason", ""), "upstream": upstream, "latency_to_decision_ms": latency})
         log_audit_decided(audit_id=state["audit_id"], decision=decision, decided_by=state.get("decided_by", ""), result=result, latency_to_decision_ms=latency, tool=state["tool"], incident_key=state["incident_key"], reason=state.get("reason", ""), upstream=upstream)
         return {"decided_at": decided_at, "result": result, "upstream": upstream, "latency_to_decision_ms": latency}
 
@@ -190,7 +231,7 @@ def build_gate(saver: BaseCheckpointSaver[Any], *, perform: Performer | None = N
     resolved at call time rather than as a default so a test may patch `perform_write` too."""
     graph: StateGraph = StateGraph(GateState)
     graph.add_node("ask", _ask)
-    graph.add_node("execute", _make_execute(perform or perform_write))
+    graph.add_node("execute", _make_execute(perform or perform_write, saver))
     graph.add_edge(START, "ask")
     graph.add_edge("ask", "execute")
     graph.add_edge("execute", END)
@@ -226,13 +267,19 @@ async def propose(gate: CompiledStateGraph, proposal: WriteProposal) -> ProposeO
 
     audit_id = new_audit_id()
     proposed_at = utc_now_iso()
+    saver = cast(BaseCheckpointSaver[Any], gate.checkpointer)
+    receipt: dict[str, Any] = {"audit_id": audit_id, "phase": "proposed", "at": _parse(proposed_at), "run_id": proposal.run_id, "tick": proposal.tick, "tool": proposal.tool, "incident_key": proposal.incident_key, "proposed_by": proposal.agent, "args": dict(proposal.args)}
     log_audit_proposed(audit_id=audit_id, tool=proposal.tool, args=proposal.args, proposed_by=proposal.agent, incident_key=proposal.incident_key, tick=proposal.tick, run_id=proposal.run_id)
     state: GateState = {"audit_id": audit_id, "incident_key": proposal.incident_key, "agent": proposal.agent, "tool": proposal.tool, "args": dict(proposal.args), "proposed_at": proposed_at, "tick": proposal.tick, "run_id": proposal.run_id}
     try:
+        # M8: the receipt row goes in first and strictly. A ledger that cannot take the row cannot
+        # take the pause either, and the pair is completed with `dropped` the same way.
+        await record_receipt(saver, receipt, strict=True)
         await gate.ainvoke(state, _config(audit_id, incident_key=proposal.incident_key, tool=proposal.tool, agent=proposal.agent))
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         log.error("write_proposal_dropped", audit_id=audit_id, incident=proposal.incident_key, tool=proposal.tool, error=detail, hint="the checkpointer could not persist the pause; the incident is held and the write will be proposed again")
+        await record_receipt(saver, {**receipt, "phase": "decided", "at": datetime.now(UTC), "proposed_by": None, "args": None, "decision": "dropped", "decided_by": "gate", "result": "checkpointer_unavailable", "upstream": detail[:200], "latency_to_decision_ms": 0})
         log_audit_decided(audit_id=audit_id, decision="dropped", decided_by="gate", result="checkpointer_unavailable", latency_to_decision_ms=0, tool=proposal.tool, incident_key=proposal.incident_key, upstream=detail[:200])
         return ProposeOutcome(audit_id=audit_id, dropped=True)
     log.warning("write_paused", audit_id=audit_id, incident=proposal.incident_key, agent=proposal.agent, tool=proposal.tool, args=proposal.args, hint="waiting for a human: python -m src.agent.gate list")
@@ -277,16 +324,16 @@ async def decide(gate: CompiledStateGraph, *, audit_id: str, decision: Decision,
     silent no-op that looks exactly like a decision.
     """
     if decision == "reject" and not reason.strip():
-        raise GateError("a rejection needs a reason; the crew reads it and so does the auditor")
+        raise GateInvalidDecision("a rejection needs a reason; the crew reads it and so does the auditor")
     if not decided_by.strip():
-        raise GateError("a decision needs a name in decided_by")
+        raise GateInvalidDecision("a decision needs a name in decided_by")
     config: RunnableConfig = {"configurable": {"thread_id": audit_id}}
     snapshot = await gate.aget_state(config)
     if not snapshot.values:
-        raise GateError(f"no proposal with audit_id {audit_id}")
+        raise GateNotFound(f"no proposal with audit_id {audit_id}")
     if not any(task.interrupts for task in snapshot.tasks):
         prior = cast(GateState, snapshot.values)
-        raise GateError(f"{audit_id} was already decided: {prior.get('decision', '?')} by {prior.get('decided_by', '?')} at {prior.get('decided_at', '?')} ({prior.get('result', '?')})")
+        raise GateAlreadyDecided(f"{audit_id} was already decided: {prior.get('decision', '?')} by {prior.get('decided_by', '?')} at {prior.get('decided_at', '?')} ({prior.get('result', '?')})")
     values = cast(GateState, snapshot.values)
     final = await gate.ainvoke(Command(resume={"decision": decision, "decided_by": decided_by.strip(), "reason": reason.strip()}), _config(audit_id, incident_key=values.get("incident_key", ""), tool=values.get("tool", ""), agent=values.get("agent", "")))
     log.info("write_decided", audit_id=audit_id, decision=decision, decided_by=decided_by, result=final.get("result"), tool=values.get("tool"), incident=values.get("incident_key"))

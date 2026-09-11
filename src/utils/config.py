@@ -104,6 +104,25 @@ class Settings(BaseSettings):
     # drifts away from the seed the moment someone tunes it.
     chaos_ticks_between_events: int = 1
 
+    # --- The read API, M8 -----------------------------------------------------
+    # `python main.py --api` binds here. Loopback by default: the window reaches it through
+    # whatever fronts this box, and a default that listens on every interface is a default
+    # that ships.
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
+    # `name:secret` pairs, comma-separated. The bearer token `POST /ops/gate` requires, and the
+    # name is what lands in `decided_by`. Read only by `--api`, which refuses to start without
+    # at least one (exit 2): a server that boots and approves nothing is a server someone will
+    # "fix" by removing the check. Never logged; `_SECRET_KEYS` in logger.py covers it.
+    ops_api_token: str = ""
+    # Allowed CORS origins, comma-separated. Empty means no cross-origin browser may read this
+    # API, and empty is the default because M9's window on Vercel is the one origin that needs
+    # it and a wildcard here would ship.
+    api_cors_origins: str = ""
+    # How often `/ops/stream` looks at `sw_ops.ticks` for a new row. A tick lands every five
+    # minutes, so two seconds is generous; it is a knob so a rail can make it small.
+    api_stream_poll_seconds: float = 2.0
+
     # --- Logging --------------------------------------------------------------
     log_level: str = "INFO"
     log_dir: str = "logs"
@@ -145,6 +164,29 @@ class Settings(BaseSettings):
     def log_path(self) -> Path:
         p = Path(self.log_dir)
         return p if p.is_absolute() else REPO_ROOT / p
+
+    @property
+    def cors_origins(self) -> tuple[str, ...]:
+        return tuple(o.strip() for o in self.api_cors_origins.split(",") if o.strip())
+
+    def ops_tokens(self) -> dict[str, str]:
+        """`{secret: name}` from `OPS_API_TOKEN`, or a `ValueError` that says what is wrong.
+
+        Raises rather than returning an empty mapping so `--api` cannot start with nobody able
+        to approve a write and nothing saying so. Sixteen characters is the floor because a
+        secret shorter than that is a password, and a password on a port is a guess away.
+        """
+        tokens: dict[str, str] = {}
+        for pair in (p.strip() for p in self.ops_api_token.split(",") if p.strip()):
+            name, sep, secret = pair.partition(":")
+            if not sep or not name.strip() or not secret.strip():
+                raise ValueError("OPS_API_TOKEN entries are name:secret, comma-separated")
+            if len(secret.strip()) < 16:
+                raise ValueError(f"OPS_API_TOKEN secret for {name.strip()!r} is shorter than 16 characters")
+            tokens[secret.strip()] = name.strip()
+        if not tokens:
+            raise ValueError("OPS_API_TOKEN is empty. POST /ops/gate approves real writes on the ranch and needs at least one name:secret")
+        return tokens
 
     @property
     def chaos_cohort(self) -> tuple[str, ...]:

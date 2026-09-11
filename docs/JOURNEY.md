@@ -1389,3 +1389,134 @@ made real. 407 tests, ruff and mypy clean.
 | `write_transcript` wired in, with `current_tick` | the herd order's prose was unreadable after the tick, and `linked` with it |
 | `herd_roster_disagrees` warning | the roster and the list are two sources; a disagreement beyond the pastureless is worth a line |
 
+## M8 - The read API
+
+**What was planned.** `docs/Plan.md`'s M8 paragraph and `src/api/CLAUDE.md`: FastAPI, five routes
+(`/health`, `/ops/incidents`, `/ops/report`, `/ops/stream`, `/ops/gate`), the ranch's `{data, meta}`
+envelope and error shape, `X-Request-ID` on every request, and the one rule that decides everything
+else: the API never calls the ranch and never calls a model, it reads `sw_ops`. Scott's brief added two
+questions to answer before code, and one issue to decide rather than defer.
+
+**What actually happened, in order.**
+
+**The two questions, answered in the check-in.** *What can the API actually read?* Two of the five
+routes had no source: the shift report was synthesized every tick and written to `logs/`, and the only
+record of a tick was a line in `logs/tick.jsonl`, which a separate process cannot see. So migration
+`0007` adds `ticks` (typed columns for what the API sorts on, the whole line as `fields` jsonb, because
+the line grew five fields at M7 and three at M7A and a column per field is a migration every phase) and
+`shift_reports` (the page plus `incident_keys`, the keys it was handed). `run_tick` writes both beside
+the log line, best-effort, after it: the line is the heartbeat, the row is the projection, and a ledger
+that cannot take the row is a warning, never a failed tick. *Who may approve a write over HTTP?*
+`OPS_API_TOKEN`, `name:secret` pairs, sixteen-character floor, `compare_digest`, `--api` refusing to
+start without one (exit 2), `decided_by` from the token's name and never from the body (a body that
+names one is 422). Reads stay open.
+
+**Issue #10, decided.** The M6 note assumed `/ops/gate` would run in the loop's process. It does not,
+so the API became the second writer on `audit.jsonl` the issue was about. A third table in `0007`,
+`audit_receipts`, primary key `(audit_id, phase)`: the "exactly twice" rail as a constraint. `propose`
+writes the row before the file line through the checkpointer's own connection
+(`ThreadedPostgresSaver.record_receipt`, since the process holding the pause holds that connection),
+`_execute` the same for `decided`. The file is a projection. The chaos guard's pairs stay file-only and
+that is #20.
+
+**The spec grew a sixth route, deliberately.** `GET /ops/gate`, the CLI's `list` in an envelope. The
+window cannot approve a pause it cannot see. Scott asked whether his "do not redesign the spec" rule was
+prudent; it was, and it did its job: the route was asked for, not slipped in, and `src/api/CLAUDE.md`
+was edited first with the reason before code read it.
+
+**Three named errors in `gate.py`, so the API never matches on message text.** `GateNotFound` (404),
+`GateAlreadyDecided` (409), `GateInvalidDecision` (422) subclass `GateError`; the CLI still catches the
+base and nothing changes for it. The plan's rule held: the one behaviour the API needed that the CLI
+could not express went into `gate.py`, and the CLI got it too.
+
+**`sse-starlette` came out the same hour it went in.** The library keeps a process-global exit event
+bound to the first event loop it sees and patches uvicorn's exit handler at import; the second stream
+rail, on pytest-asyncio's second loop, had its generator cancelled mid-query. `tick_events` is now
+twenty lines on `StreamingResponse` with a ping comment from the poll loop. Cookbook #43.
+
+**`app.py` folded into `routes.py`.** The factory, the middleware and the handlers were first written as
+`src/api/app.py`. `docs/Plan.md` names `routes.py` and `schemas.py`, and the tree matches the plan, so
+the factory moved to the bottom of `routes.py` and the file was deleted before the commit.
+
+### The live run, two processes on this machine, test ledger, 2026-09-11
+
+`SW_OPS_TARGET=test TICK_INTERVAL_SECONDS=20 python main.py --no-spend` in one process (fourteen ticks,
+about 22s each, so every one overran the cadence and said so), `SW_OPS_TARGET=test API_PORT=8765
+python main.py --api` in another. `curl -N .../ops/stream?limit=2` opened before the first tick finished
+and showed the row land from the other process. Every route once, envelopes as served:
+
+```jsonc
+// GET /health   (X-Request-ID: journey-health-01 echoed; a request without one got a 32-hex id)
+{"data":{"status":"ok","service":"sweetwater-ops","time":"2026-09-11T18:33:52.745Z"}}
+
+// GET /ops/incidents?limit=2   (the test ledger held one row from the suite at that moment)
+{"data":[{"id":1,"incident_key":"fx-water-02:water_low","subject_id":"fx-water-02","subject_type":"water-level","location":"South Draw","category":"water_low","severity":"critical","status":"resolved","summary":"South Draw: stock-tank level reads 0.8 gal on fx-water-02, at or below the critical line of 2 gal. ...","last_value":"0.8","unit":" gal","threshold":2.0,"occurrences":2,"first_seen_at":"2026-09-10T14:30:00Z","last_seen_at":"2026-09-10T14:35:00Z","resolved_at":"2026-09-10T14:50:00Z","tick_opened":3,"tick_last_seen":5,"run_id":"e2e","owner":null}],"meta":{"count":1,"limit":2,"offset":0}}
+
+// GET /ops/incidents?limit=0   -> 422, and ?status=open -> 422
+{"error":{"code":"VALIDATION_ERROR","message":"limit: Input should be greater than or equal to 1","details":{"field":"limit","reason":"Input should be greater than or equal to 1"}}}
+{"error":{"code":"VALIDATION_ERROR","message":"status: Input should be 'pending', 'opened', 'ongoing', 'resolved' or 'dismissed'","details":{"field":"status","reason":"..."}}}
+
+// GET /ops/report   (before the first tick finished -> 404; after tick 11, the code-assembled page)
+{"error":{"code":"REPORT_NOT_FOUND","message":"no shift report has been written to this ledger yet; one lands at the end of every tick","details":{}}}
+{"data":{"id":11,"run_id":"4d7cb8db15cb","tick":11,"at":"2026-09-11T18:37:54.075971Z","source":"code","headline":"No work orders this tick, so nothing here reports on the shift","situation":"Nothing reached a sub-agent this tick. ...","priorities":[],"linked":[],"escalations":[],"worlds":[],"incident_keys":[],"work_orders":0,"violations":[],"provider":"","model":"","finish_reason":"","latency_ms":0,"input_tokens":0,"output_tokens":0}}
+
+// GET /ops/stream?limit=1   (the latest row on connect, from the loop process; `fields` is the whole tick line)
+event: tick
+id: 14
+data: {"id":14,"run_id":"4d7cb8db15cb","tick":11,"at":"2026-09-11T18:37:54.075971Z","store":"test","duration_ms":22578,"cost_usd":0.0,"error":null,"failed_stage":null,"fields":{"held":0,"tier":null,"opened":0,"ongoing":10,"pending":16,"critical":9,"findings":26,"resolved":4,"sensors_read":160,"herd_animals":5,"shift_report":"code","ledger":{"ongoing":10,"pending":16,"resolved":21,"dismissed":108}, ...}}
+
+// GET /ops/gate   (a pause planted by a third process with M6's method)
+{"data":[{"audit_id":"c5d602affb3c4fd586f2546f24ef9e56","incident_key":"cow-0903:deceased","agent":"herd_health","tool":"create_observation","args":{"animal_id":"cow-0903","observation_type":"mortality","severity":"high","notes":"M8 live gate verification, planted, will be rejected"},"proposed_at":"2026-09-11T18:38:07.378Z","tick":0,"run_id":"m8-plant","age_s":19}],"meta":{"count":1,"limit":500,"offset":0}}
+
+// POST /ops/gate without a token -> 401 with WWW-Authenticate: Bearer; with the token on an unknown id -> 404; a body that is not JSON -> 400
+{"error":{"code":"UNAUTHORIZED","message":"POST /ops/gate needs a bearer token from OPS_API_TOKEN","details":{}}}
+{"error":{"code":"GATE_NOT_FOUND","message":"no proposal with audit_id nope","details":{"audit_id":"nope"}}}
+{"error":{"code":"MALFORMED_BODY","message":"the request body is not valid JSON","details":{"field":"body","reason":"JSON decode error"}}}
+
+// POST /ops/gate {"audit_id":"c5d6...","decision":"reject","reason":"planted for the M8 live check; nothing to record on the herd"}   -> 200, decided_by from the token
+{"data":{"audit_id":"c5d602affb3c4fd586f2546f24ef9e56","incident_key":"cow-0903:deceased","agent":"herd_health","tool":"create_observation","args":{...},"decision":"reject","decided_by":"scooter","reason":"planted for the M8 live check; nothing to record on the herd","decided_at":"2026-09-11T18:38:26.609Z","result":"not_executed","upstream":"","latency_to_decision_ms":19231}}
+
+// the same id again, approve -> 409
+{"error":{"code":"GATE_ALREADY_DECIDED","message":"c5d602affb3c4fd586f2546f24ef9e56 was already decided: reject by scooter at 2026-09-11T18:38:26.609Z (not_executed)","details":{"audit_id":"c5d602affb3c4fd586f2546f24ef9e56"}}}
+
+// GET /ops/nope -> 404 in the same shape
+{"error":{"code":"NOT_FOUND","message":"Not Found","details":{}}}
+```
+
+After the reject: `logs/audit.jsonl` held the `proposed` line from the planting process and the `decided`
+line from the API process under one id, `sw_ops.audit_receipts` held the same two rows (`run_id`
+`m8-plant`, `decided_by` `scooter`, `result` `not_executed`), `python -m src.agent.gate list` said
+`0 writes waiting for a human (test)`, and the ledger held 16 tick rows across two run ids and 13
+report rows. No `tick_row_failed` on the loop's console. Approve over HTTP was not fired live: it
+performs a real write on the ranch, and the rail proves it with an injected performer.
+
+### What diverged from the plan
+
+| Planned | Happened | Why |
+| --- | --- | --- |
+| five routes | six: `GET /ops/gate` added, with Scott's yes, spec edited first | the window cannot approve a pause it cannot see |
+| `/ops/report` and `/ops/stream` read "the report" and "ticks" | migration `0007`: `ticks`, `shift_reports`, written by the loop beside the log line | a separate process cannot read a log file; the API reads `sw_ops` only |
+| #10 fixed for free by the API running in the loop's process | `audit_receipts` with `(audit_id, phase)` as primary key; the file is a projection | the API is its own process, so it was the second writer |
+| no auth in the plan | `OPS_API_TOKEN`, bearer, exit 2 without it, `decided_by` from the token | an unauthenticated POST is an approval anyone who can reach the port can make |
+| `sse-starlette` for the stream | hand-rolled on `StreamingResponse` | process-global loop-bound state, cookbook #43 |
+| `schemas.py`: Finding, Incident, ShiftReport, GateDecision, ChaosEvent | `IncidentOut`, `ShiftReportOut`, `TickOut`, `PendingWriteOut`, `GateDecisionIn` / `Out`, the envelope | projections of the ledger rows, not the tick's own models; no chaos route exists to need `ChaosEvent` |
+| `--api` exits 3 until M8 | exit 3 retired, not reused | the last unbuilt mode landed |
+
+### Defects the phase caught in itself
+
+1. **The SSE library's global state** cancelled the generator on the suite's second event loop. Cookbook #43.
+2. **A console line about a refused receipt was counted as a receipt** by the audit rail, because it carried `audit_id` and `phase`. Cookbook #44.
+3. **The 500 response had no request id**: Starlette's error layer sits above the middleware. Cookbook #45.
+4. **A malformed-JSON 400 named the byte offset as the field.** FastAPI puts the offset in `loc`; the envelope now says `body`.
+5. **The tick-row rail passed alone and failed in the suite**: every test shares one `run_id`, so an earlier rail's tick 1 collided with this one's on `uq_ticks_run_tick`. The `target` fixture truncates `ticks` and `shift_reports` now.
+6. **Source written through a shell heredoc lost its escapes** three times running. Cookbook #46.
+
+### Work not asked for, and why each one is here
+
+| Added | Why it was not optional |
+| --- | --- |
+| `GateNotFound` / `GateAlreadyDecided` / `GateInvalidDecision` | 404 / 409 / 422 without matching on message text; the CLI inherits them for free |
+| `Last-Event-ID` and latest-on-connect on the stream | a window that reconnects should not replay history, and a window that just opened should not be blank for five minutes |
+| `?limit=N` on the stream | the only way to curl it or test it through the ASGI app, which buffers a response until it ends |
+| `Settings.ops_tokens()` raising, and `_SECRET_KEYS` gaining `ops_api_token` | the refusal has to happen before a port is bound, and the token must never reach a log line |
+| `test_no_route_here_imports_a_ranch_client_or_a_model_client` | the rule in `src/api/CLAUDE.md`, as a grep, so it cannot erode quietly |

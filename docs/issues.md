@@ -1,6 +1,6 @@
 # Issues
 
-Open items observed across M0 through M7, first written at the M4 boundary on 2026-09-10 and
+Open items observed across M0 through M8, first written at the M4 boundary on 2026-09-10 and
 extended at each boundary since. Nothing here is a failing gate. These are deferred verifications, owed
 pieces, decisions waiting on a person, and known artifacts. Each one says where it came from and
 what it would take, so it can be picked up cold.
@@ -70,17 +70,30 @@ the reason on every key it holds and nulls it on every key it released, `run_loo
 held keys before its first tick, and the rail is `test_the_held_set_survives_a_restart`. It went
 in as `0005` rather than `0004` because the gate's checkpointer tables took `0004`.
 
-### 10. Two processes append to `audit.jsonl`, and daily rotation could collide
+### 10. Two processes append to `audit.jsonl`, and daily rotation could collide. **Closed at M8, 2026-09-11.**
 
 **Where it came from.** M6. The loop writes `proposed` and the CLI writes `decided`, each through
 its own `TimedRotatingFileHandler` on the same file. A one-line append is fine in practice and both
 halves read back intact on the first live run. A rotation at midnight fired by the long-lived loop
 while a CLI decision is mid-write, or the reverse, is the unlikely case nobody has exercised.
 
-**What it would take.** Either the CLI writes its `decided` line through the loop (M8's `/ops/gate`
-gets there for free, since the API is the loop's process), or the receipt moves to a table and the
-file becomes a projection of it. Decide at M8, when the second writer becomes the API.
+**What it would have taken, and what was done.** The M6 note assumed `/ops/gate` would run in the
+loop's process and fix this for free. It does not: the API is its own process (`python main.py --api`),
+so at M8 it became the second writer this issue is about, and a third once the CLI is counted. So the
+receipt moved to a table. Migration `0007` adds `sw_ops.audit_receipts` with primary key
+`(audit_id, phase)`; `gate.propose` writes the `proposed` row before the file line and `gate._execute`
+writes the `decided` row before its line, both through the checkpointer's own connection
+(`ThreadedPostgresSaver.record_receipt`), so the process holding the pause is the process holding the
+row. The primary key is the "exactly twice" rail as a constraint: a third receipt for one id cannot be
+inserted, and a rail proves it. **`logs/audit.jsonl` is a projection from M8.** A midnight rotation
+colliding with a decision loses at worst a projected line, never the receipt. Verified live with a pause
+planted by one process and rejected over HTTP by another: both rows in the table, both lines in the file.
 
+**What stays file-only, on purpose.** The chaos guard's `blocked` and `auto_allowed` pairs are written
+by `src/tools/chaos.py` through the logger with no ledger connection in hand, so they have no row. They
+are one writer (the loop) and one process, which is not the collision this issue was about. See #20.
+
+### 11. The gate's interrupt is verified on `restock_feed`, not `create_observation`. **Closed at M7A, 2026-09-11.**
 ### 11. The gate's interrupt is verified on `restock_feed`, not `create_observation`. **Closed at M7A, 2026-09-11.**
 
 **What closed it.** `write_paused` on `cow-0905:deceased`, `create_observation`, **audit_id
@@ -231,6 +244,21 @@ Rename to `subject_not_named` when the M8 API decides what it shows a human, so 
 "Recheck pinkeye eye — remove patch" is the Farm's seed data, so a triage summary quoting the title
 carries the dash and so does the herd page. Data, not our prose; the em-dash rail is on the SOPs and
 the briefs and stays there.
+
+## Owed from M8
+
+### 20. The chaos guard's audit receipts are file-only
+
+**Where it came from.** M8 moved the gate's receipts into `sw_ops.audit_receipts` and made `audit.jsonl`
+a projection (#10). Chaos's `blocked` / `auto_allowed` pairs (`docs/logging.md`) still go only to the
+file: `fire_animal_events` has no ledger session in hand and the writer is `logger.py`, which knows no
+database. So the table holds every receipt the **gate** wrote and none the chaos guard wrote, and a
+reader of the table would not see that a scenario's animal write was refused.
+
+**What it would take.** `chaos.fire_animal_events` takes the session `run_tick` already has open, and
+writes the pair through a small `memory.insert_receipt(session, row)` beside its two log lines. One
+afternoon. Worth doing before M9 shows receipts to a human, if it shows them at all; not worth doing
+before, because the chaos guard is a demo instrument and one process.
 
 ## Known artifacts, not fixable from here
 

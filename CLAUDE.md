@@ -80,7 +80,7 @@ needed is reachable over the wire or already written down in this repo.
 | `src/agent/` | `src/agent/CLAUDE.md` - graph shape, the tick contract, escalation |
 | `src/tools/` | `src/tools/CLAUDE.md` - allowlists, severity ownership, chaos guards |
 | `src/models/` | `src/models/CLAUDE.md` - the Ollama traps, when thinking may be off |
-| `src/api/` | `src/api/CLAUDE.md` - envelope and error conventions |
+| `src/api/` | `src/api/CLAUDE.md` - envelope and error conventions, the six routes, who may approve over HTTP |
 | `data/knowledge_base/` | the SOPs, one file per sensing world, **derived from `docs/sweetwater-ranch.md` and nothing else.** A rule id is citable only if it is a heading in the file the packet carried |
 | `tests/` | `tests/CLAUDE.md` - never Supabase; what each rail proves |
 | architecture | `docs/architecture.md` |
@@ -107,7 +107,8 @@ python main.py --handshake   # prove the deployed ranch is reachable, then exit
 python main.py --once        # exactly one tick        (live, and SPENDS from M2)
 python main.py               # the continuous loop     (live from M4, SPENDS, halts at SPEND_CEILING_USD)
 python main.py --no-spend    # the loop (or --once) stopped at the end of the free pass: no evidence, no model, no bill
-python main.py --api         # read API only           (stub until M8, exits 3)
+python main.py --api         # M8. The read API, its own process: reads sw_ops, never the ranch, never a model. Needs OPS_API_TOKEN (exit 2 without). Default 127.0.0.1:8000
+curl -s http://127.0.0.1:8000/health         # M8. Then /ops/incidents, /ops/report, /ops/gate, and `curl -N .../ops/stream?limit=1` to watch one tick land
 
 pytest
 ruff check .                 # the whole lint gate; `ruff format` is not used, see below
@@ -124,14 +125,21 @@ TIER1_ENABLED=1 TIER_COMPARE=1 python main.py --once  # M7. The measurement: eve
 may carry `proposed_write`; three code checks (shape, tool, grounding against the page) decide
 whether it pauses at all; the pause is a LangGraph `interrupt()` checkpointed in `sw_ops`, so it
 outlives the process and the loop keeps ticking; `python -m src.agent.gate` is where a person says
-yes or no, and both halves land in `logs/audit.jsonl` under one `audit_id`. The gate is for agent
-writes. `CHAOS_ALLOW_WRITES` is a different switch for a different actor and stays one.
+yes or no, or from M8 `POST /ops/gate` with a bearer token from `OPS_API_TOKEN` (`decided_by` is the
+name the token maps to, never a body field), and both halves land in `sw_ops.audit_receipts` under one
+`audit_id` with `logs/audit.jsonl` as the projection. The gate is for agent writes. `CHAOS_ALLOW_WRITES`
+is a different switch for a different actor and stays one.
 
-An unbuilt mode exits **3** with a `not_implemented` line naming the milestone that
-brings it, rather than failing as if it were broken. The loop's other exits: **0** is a clean
-drain after Ctrl+C, SIGTERM, or SIGBREAK; **1** is a second Ctrl+C or a tick raising outside
-its own guard; **2** is a config refusal; **4** is the spend ceiling, chosen so a restart policy
-does not relaunch and spend again and nobody reads it as an outage.
+**The read API never calls the ranch and never calls a model.** It reads `sw_ops`, and that sentence is
+the whole architecture: a browser refresh cannot spend a token or fire a sweep. From M8 the loop writes
+every tick line to `sw_ops.ticks` and every shift report to `sw_ops.shift_reports` beside the log line,
+best-effort and never failing the tick, so `--api` on another box sees exactly what the loop saw.
+
+Exits: **0** is a clean drain after Ctrl+C, SIGTERM, or SIGBREAK; **1** is a second Ctrl+C or a tick
+raising outside its own guard; **2** is a config refusal (including `--api` without a usable
+`OPS_API_TOKEN`); **4** is the spend ceiling, chosen so a restart policy does not relaunch and spend
+again and nobody reads it as an outage. **3** was "not built yet", retired at M8 with the last stub, and
+is not reused.
 
 **The loop has a hard per-run spend ceiling, and it HALTS.** `SPEND_CEILING_USD` (default
 $10, must be positive, no unlimited value) is checked after every tick against the summed

@@ -32,7 +32,7 @@ from src.utils.config import get_settings
 
 # Never written to a log, at any level, in any stream. Prompts and responses are
 # the token bill and they are enormous; secrets are secrets.
-_SECRET_KEYS = frozenset({"anthropic_api_key", "api_key", "database_url", "database_url_test", "authorization", "password", "token"})
+_SECRET_KEYS = frozenset({"anthropic_api_key", "api_key", "database_url", "database_url_test", "authorization", "password", "token", "ops_api_token"})
 _BULK_KEYS = frozenset({"prompt", "prompt_body", "response_body", "messages", "transcript", "system_prompt"})
 
 TICK_STREAM = "sweetwater.tick"

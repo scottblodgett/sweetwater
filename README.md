@@ -34,17 +34,23 @@ A good handshake reports **19 tools, 160 sensors, 32 locations** in about two se
 python main.py --once   # exactly one tick        (live: sweeps, triages, and spends)
 python main.py          # the continuous loop     (live: every TICK_INTERVAL_SECONDS, halts at SPEND_CEILING_USD)
 python main.py --no-spend  # either of the above, stopped at the end of the free pass. No bill
-python main.py --api    # read API only           (stub until M8, exits 3)
+python main.py --api    # the read API, its own process (M8): reads sw_ops, never the ranch, never a model. Needs OPS_API_TOKEN
 ```
 
 `--once` is real from M1 and **costs money from M2**: its last two stages assemble an
 evidence packet and hand it to Opus, once per newly-opened incident. Roughly 24k to 58k
 tokens on a first run against a quiet ledger, falling as incidents become `ongoing`.
 
-An unbuilt mode exits **3** and names the milestone that brings it, so "not written yet"
-never looks like "broken." The loop exits **0** on a clean drain (Ctrl+C once, SIGTERM, or
-SIGBREAK), **1** if forced or broken, and **4** when the per-run spend ceiling halts it. The
-ceiling defaults to $10 and has no unlimited setting.
+The loop exits **0** on a clean drain (Ctrl+C once, SIGTERM, or SIGBREAK), **1** if forced or
+broken, **2** on a config refusal, and **4** when the per-run spend ceiling halts it. The ceiling
+defaults to $10 and has no unlimited setting. Exit 3 was "not built yet" and retired at M8, when the
+last unbuilt mode landed.
+
+`--api` serves `/health`, `/ops/incidents`, `/ops/report`, `/ops/stream` (SSE), and `/ops/gate` on
+`API_HOST:API_PORT` (default `127.0.0.1:8000`), in the same `{data, meta}` envelope the four ranch
+services use. Reads are open; `POST /ops/gate` approves a real write and needs a bearer token from
+`OPS_API_TOKEN`. It reads the `sw_ops` ledger and nothing else, so a browser refresh can never spend a
+token or touch the ranch. Detail: `src/api/CLAUDE.md`.
 
 No Docker is needed; dockerizing is a deferred FUTURE-1 item, not part of the build: the upstreams are already deployed and agent state lives in
 Supabase, so there is nothing local to stand up. A local Postgres is needed only to run

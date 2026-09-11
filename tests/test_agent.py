@@ -38,7 +38,7 @@ import pytest
 import respx
 import structlog
 from langgraph.checkpoint.postgres.base import BasePostgresSaver
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
@@ -72,7 +72,7 @@ from src.agent.executor import (
     run_tick,
     summarize,
 )
-from src.agent.gate import GateError, WriteProposal, build_gate, decide, pending, propose, unpaired_audit_ids
+from src.agent.gate import GateError, WriteProposal, build_gate, decide, pending, propose, record_receipt, unpaired_audit_ids
 from src.agent.gate import main as gate_main
 from src.agent.memory import (
     ALLOWED_SCHEMAS,
@@ -85,6 +85,7 @@ from src.agent.memory import (
     assert_agent_schema,
     assert_droppable_schema,
     assert_local_test_url,
+    audit_receipts,
     build_engine,
     checkpointer,
     connect_args_for,
@@ -94,7 +95,9 @@ from src.agent.memory import (
     open_incidents,
     psycopg_url,
     reconcile,
+    shift_reports,
     store_session,
+    ticks,
 )
 from src.agent.state import Finding, Incident, RanchState, WorkOrder
 from src.agent.workers import (
@@ -189,11 +192,13 @@ def catalog(monkeypatch: pytest.MonkeyPatch) -> RanchMap:
 
 @pytest.fixture
 async def target(migrated_store: str) -> AsyncIterator[StoreTarget]:
-    """A `StoreTarget` on an empty `sw_ops_test`, which is what `main.py` hands `run_tick`."""
+    """A `StoreTarget` on an empty `sw_ops_test`, which is what `main.py` hands `run_tick`.
+    `ticks` and `shift_reports` are emptied too (M8): every test in the process shares one `run_id`,
+    so a previous rail's tick 1 would collide with this one's on `uq_ticks_run_tick`."""
     engine = build_engine(migrated_store, schema=SCHEMA_TEST)
     try:
         async with engine.begin() as conn:
-            await conn.execute(text("truncate table incidents restart identity"))
+            await conn.execute(text("truncate table incidents, ticks, shift_reports restart identity"))
     finally:
         await engine.dispose()
     yield StoreTarget(name="test", url=migrated_store, schema=SCHEMA_TEST)
@@ -302,6 +307,52 @@ async def test_a_tick_holds_a_first_sighting_pending_opens_it_on_the_second_and_
     assert third.opened == () and len(third.ongoing) == 1 and third.ongoing[0].occurrences == 3
     # Nothing new opened, so nothing is handed to a model. This is the entire cost story.
     assert third.routed == {}
+
+
+@respx.mock
+async def test_every_tick_line_is_also_a_row_and_so_is_the_shift_report(catalog: RanchMap, target: StoreTarget) -> None:
+    """M8. The read API is its own process and reads `sw_ops` only, so the tick line and the shift
+    page have to be in the ledger and not just in `logs/`. The row carries the same mapping the
+    line was written with, a `--no-spend` tick still produces a code-assembled report row, and
+    the two share `(run_id, tick)`."""
+    serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
+    with capture_logs() as logs:
+        first = await run_tick(tick=1, store=target, now=T0, spend=False)
+        second = await run_tick(tick=2, store=target, now=T1, spend=False)
+    assert first.error is None and second.error is None
+    line = [entry for entry in logs if entry["event"] == "tick"][-1]  # `capture_logs` skips the contextvars, so no `tick` on the entry; the last line is tick 2
+
+    engine = build_engine(target.url, schema=SCHEMA_TEST)
+    try:
+        async with engine.connect() as conn:
+            rows = (await conn.execute(select(ticks).where(ticks.c.run_id == second.run_id).order_by(ticks.c.tick))).mappings().all()
+            reports = (await conn.execute(select(shift_reports).where(shift_reports.c.run_id == second.run_id).order_by(shift_reports.c.tick))).mappings().all()
+    finally:
+        await engine.dispose()
+
+    assert [r["tick"] for r in rows] == [1, 2] and [r["tick"] for r in reports] == [1, 2]
+    row = rows[1]
+    assert row["store"] == "test" and row["cost_usd"] == 0.0 and row["error"] is None and row["failed_stage"] is None and row["duration_ms"] == line["duration_ms"]
+    assert row["fields"]["opened"] == 1 and row["fields"]["pending"] == 0 and row["fields"]["work_orders"] == 0, "the whole line, as the API will serve it"
+    assert {k: v for k, v in line.items() if k not in ("event", "log_level")} == row["fields"], "the row and the line are one mapping"
+    assert reports[1]["source"] == "code" and reports[1]["work_orders"] == 0 and reports[1]["incident_keys"] == [] and reports[1]["violations"] == []
+
+
+@respx.mock
+async def test_a_ledger_that_cannot_take_the_row_costs_a_warning_not_the_tick(monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
+    """The tick line is the heartbeat and was already written when the row is attempted, so a row
+    that fails is a warning naming the API as the thing that is missing it, and the tick stands."""
+    async def _boom(*_a: object, **_k: object) -> int:
+        raise RuntimeError("pooler said no")
+
+    monkeypatch.setattr("src.agent.executor.insert_tick", _boom)
+    serve(respx.mock, {"alkali-flat-water": 1.2, "east-allotment-fence": 6.4, "home-place-bin": 900.0})
+    with capture_logs() as logs:
+        state = await run_tick(tick=1, store=target, now=T0, spend=False)
+    assert state.error is None and state.failed_stage is None
+    assert any(entry["event"] == "tick" for entry in logs), "the line was written"
+    warning = next(entry for entry in logs if entry["event"] == "tick_row_failed")
+    assert "pooler said no" in warning["error"] and warning["log_level"] == "warning"
 
 
 @respx.mock
@@ -2597,6 +2648,34 @@ async def test_a_proposal_pauses_and_a_new_connection_still_finds_it(gate_target
         waiting = await pending(build_gate(saver, perform=_perform_ok))
     assert [(p.audit_id, p.tool, p.args, p.agent, p.tick) for p in waiting] == [(outcome.audit_id, "restock_feed", {"sku": "alkali-flat-water-2", "quantity": 16.7}, "water_feed", 1)]
     assert unpaired_audit_ids(logs) == {outcome.audit_id: 1}, "one line while paused: visible as a dangling record, not an absence"
+
+
+async def test_a_receipt_is_a_row_before_it_is_a_line_and_a_third_one_cannot_be_inserted(gate_target: StoreTarget) -> None:
+    """M8, `docs/issues.md` #10. Both halves of the pair land in `sw_ops.audit_receipts`, the primary
+    key `(audit_id, phase)` refuses a third, and the refusal on the `decided` half is an error line
+    rather than an exception, because by then the write on the ranch may already have happened."""
+    with capture_logs() as logs:
+        async with checkpointer(gate_target) as saver:
+            gate = build_gate(saver, perform=_perform_ok)
+            outcome = await propose(gate, _proposal())
+            await decide(gate, audit_id=outcome.audit_id, decision="approve", decided_by="scooter")
+            # A third receipt for the same id and phase: the constraint says no, the caller hears a warning.
+            await record_receipt(saver, {"audit_id": outcome.audit_id, "phase": "decided", "at": datetime.now(UTC), "run_id": "run-1", "tick": 1, "tool": "restock_feed", "incident_key": "alkali-flat-water:water_low", "decision": "approve", "decided_by": "again"})
+            with pytest.raises(Exception):  # noqa: B017 - the strict half raises whatever psycopg raised, and the caller maps it to `dropped`
+                await record_receipt(saver, {"audit_id": outcome.audit_id, "phase": "proposed", "at": datetime.now(UTC), "run_id": "run-1", "tick": 1, "tool": "restock_feed", "incident_key": "alkali-flat-water:water_low"}, strict=True)
+
+    engine = build_engine(gate_target.url, schema=SCHEMA_TEST)
+    try:
+        async with engine.connect() as conn:
+            rows = (await conn.execute(select(audit_receipts).where(audit_receipts.c.audit_id == outcome.audit_id).order_by(audit_receipts.c.phase.desc()))).mappings().all()
+    finally:
+        await engine.dispose()
+    assert [r["phase"] for r in rows] == ["proposed", "decided"], "exactly two, whatever anyone tried afterwards"
+    assert rows[0]["proposed_by"] == "water_feed" and rows[0]["args"] == {"sku": "alkali-flat-water-2", "quantity": 16.7} and rows[0]["incident_key"] == "alkali-flat-water:water_low" and rows[0]["tick"] == 1
+    assert rows[1]["decision"] == "approve" and rows[1]["decided_by"] == "scooter" and rows[1]["result"] == "written" and rows[1]["latency_to_decision_ms"] >= 0
+    assert unpaired_audit_ids(logs) == {}, "the file still says exactly twice"
+    failed = [entry for entry in logs if entry["event"] == "audit_receipt_failed"]
+    assert len(failed) == 1 and failed[0]["receipt_phase"] == "decided" and "pk_audit_receipts" in failed[0]["error"]
 
 
 async def test_the_same_write_for_the_same_incident_is_asked_once(gate_target: StoreTarget) -> None:

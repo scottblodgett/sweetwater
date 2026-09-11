@@ -49,7 +49,8 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 from src.agent.agent import RESPONDERS, owners_for, route, synthesize
 from src.agent.gate import WriteProposal, build_gate, pending, propose
@@ -58,6 +59,8 @@ from src.agent.memory import (
     checkpointer,
     counts_by_status,
     held_incident_keys,
+    insert_shift_report,
+    insert_tick,
     live_animal_subjects,
     reconcile,
     record_held,
@@ -85,7 +88,7 @@ log = get_logger(__name__)
 EXIT_OK = 0  #: clean shutdown: the in-flight tick drained and its line was written
 EXIT_UNRECOVERABLE = 1  #: a tick raised outside its own guard, or a second interrupt forced the stop
 EXIT_CONFIG = 2  #: refused to start; nothing was attempted against the ranch
-EXIT_NOT_IMPLEMENTED = 3  #: an unbuilt mode, naming the milestone that brings it
+#: 3 was "an unbuilt mode, naming the milestone that brings it" and retired at M8 with the last stub. Not reused.
 EXIT_SPEND_CEILING = 4  #: stopped on purpose at the per-run ceiling. Not 0, so a restart policy does not relaunch and spend again; not 1, so nobody goes hunting for an outage
 
 # --------------------------------------------------------------------------- #
@@ -307,6 +310,26 @@ async def _chaos_step(session: object, *, state: RanchState, catalog: RanchMap, 
         await chaos.fire_animal_events(fired)
 
 
+async def _record_tick(target: StoreTarget, *, run_id: str, tick: int, fields: dict[str, Any], state: RanchState | None = None) -> None:
+    """M8. The tick line as a row in `sw_ops.ticks`, and the shift report as a row in
+    `sw_ops.shift_reports`, so `python main.py --api` in another process can show ticks landing.
+
+    Best-effort, and the asymmetry is the point: the log line is the heartbeat and was already
+    written before this is called, so a ledger that cannot take the row costs a warning on the
+    console and never a failed tick. Both rows go in one session because a report without its
+    tick is a page nobody can place.
+    """
+    at = datetime.now(UTC)
+    try:
+        async with store_session(url=target.url, schema=target.schema) as session:
+            row_id = await insert_tick(session, run_id=run_id, tick=tick, at=at, fields=fields)
+            if state is not None and state.shift_report is not None:
+                await insert_shift_report(session, run_id=run_id, tick=tick, at=at, report=state.shift_report.model_dump(), incident_keys=[o.incident_key for o in state.work_orders])
+        log.debug("tick_recorded", row_id=row_id, shift_report=state is not None and state.shift_report is not None)
+    except Exception as exc:
+        log.warning("tick_row_failed", error=f"{type(exc).__name__}: {exc}"[:200], hint="the tick line in logs/tick.jsonl is the record; the read API is missing this tick")
+
+
 async def run_tick(
     *,
     tick: int = 1,
@@ -354,7 +377,10 @@ async def run_tick(
         state.skipped_upstreams = tuple(sorted(skipping))
         state.held = tuple(sorted(held_in))
         log.warning("tick_skipped", skipped=state.skipped_upstreams, held=len(state.held))
-        log_tick(duration_ms=watch.ms, store=target.name, skipped_upstreams=list(state.skipped_upstreams), held=len(state.held), cost_usd=0.0, error=None, failed_stage=None)
+        skipped_fields: dict[str, Any] = {"duration_ms": watch.ms, "store": target.name, "skipped_upstreams": list(state.skipped_upstreams), "held": len(state.held), "cost_usd": 0.0, "error": None, "failed_stage": None}
+        log_tick(**skipped_fields)
+        if UPSTREAM_SW_OPS not in skipping:  # the ledger in backoff is the one upstream the row cannot go to
+            await _record_tick(target, run_id=state.run_id, tick=tick, fields=skipped_fields)
         return state
 
     try:
@@ -537,7 +563,7 @@ async def run_tick(
     tiers_used = {o.tier for o in state.work_orders} | ({TIER2} if state.shift_report and state.shift_report.source == "model" else set())
     escalation_reasons = [o.escalation for o in state.work_orders if o.escalation]
 
-    log_tick(
+    fields: dict[str, Any] = dict(
         duration_ms=watch.ms,
         store=target.name,
         catalog_source=state.catalog_source,
@@ -599,6 +625,10 @@ async def run_tick(
         error=state.error,
         failed_stage=state.failed_stage,
     )
+    log_tick(**fields)
+    # M8: the same mapping, as a row, after the line. A failed tick gets its row too, because a
+    # window that cannot see the failure is a window that reports a calm ranch.
+    await _record_tick(target, run_id=state.run_id, tick=tick, fields=fields, state=state)
     return state
 
 
@@ -691,7 +721,9 @@ async def run_loop(
             # loop that looks exactly like a loop that never started, and then it stops: a
             # loop retrying a bug is the tight billing loop this module exists to prevent.
             detail = f"{type(exc).__name__}: {exc}"
-            log_tick(duration_ms=int((clock() - started) * 1000), store=target.name, cost_usd=0.0, error=detail, failed_stage="tick")
+            broken: dict[str, Any] = {"duration_ms": int((clock() - started) * 1000), "store": target.name, "cost_usd": 0.0, "error": detail, "failed_stage": "tick"}
+            log_tick(**broken)
+            await _record_tick(target, run_id=get_run_id(), tick=tick, fields=broken)
             log.error("loop_unrecoverable", tick=tick, error=detail)
             return EXIT_UNRECOVERABLE
 

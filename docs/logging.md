@@ -224,6 +224,33 @@ Chaos writes go direct over REST rather than through MCP, so its lines read
 `"tool":"PATCH /animals/:animalId"`. Naming a tool it never called would be a tidier field
 and a false receipt.
 
+## From M8, two of the three streams and the receipt are also rows
+
+`python main.py --api` is its own process, on its own box if need be, and it reads `sw_ops` and
+nothing else: never a log file, because a file is what a second process cannot see. So the loop
+writes three things to the ledger **beside** the log line, and the API is a projection of the ledger.
+
+| Table | Written by | Holds | Read by |
+| --- | --- | --- | --- |
+| `sw_ops.ticks` | `executor._record_tick`, after `log_tick`, on every tick including a failed one and the loop's own line for a tick that raised outside its guard | `run_id`, `tick`, `at`, `store`, `duration_ms`, `cost_usd`, `error`, `failed_stage` as columns, and the **whole tick line as `fields` jsonb**. Unique on `(run_id, tick)`. `id` is the SSE cursor | `GET /ops/stream` |
+| `sw_ops.shift_reports` | the same call, when the tick produced a report (a `--no-spend` tick does, assembled in code) | the `ShiftReport` fields plus `incident_keys`, the keys the page was handed, so `linked` stays checkable | `GET /ops/report` |
+| `sw_ops.audit_receipts` | `gate.propose` (the `proposed` row, then the file line) and `gate._execute` (the `decided` row, then the line), through the checkpointer's own connection | the two halves of a receipt, primary key `(audit_id, phase)` | nothing yet; the constraint is the point |
+
+Two rules about the order. **The tick line is written first and the row second**, because the line is
+the heartbeat and must not depend on the ledger being up: a row that fails is `tick_row_failed` on the
+console (a warning naming the API as the thing missing the tick) and never a failed tick. **The receipt
+row is written first and the file line second**, because the table is the record and the file is the
+projection: `docs/issues.md` #10 closed here. A `proposed` row that cannot be written takes the same
+`dropped` path as a checkpointer failure; a `decided` row that cannot be written is `audit_receipt_failed`
+(with `receipt_phase`, not `phase`, so the audit rail does not count the console line as a receipt), and
+the decision still finishes and still reaches the file, because by then the write on the ranch may
+already have happened. The primary key makes "every `audit_id` appears exactly twice" a constraint the
+database enforces, and a rail inserts a third to prove it is refused.
+
+**What stays file-only.** The chaos guard's `blocked` / `auto_allowed` pairs below have no row
+(`docs/issues.md` #20); the tick's `fields` jsonb is the line as written, so a field added to the line
+appears in the row with no migration.
+
 ## `chaos_*` on the console stream - the overlay says so out loud
 
 **There are three JSONL files and there is no fourth.** `chaos_*` lines go to the console
@@ -276,11 +303,11 @@ documented in its naive form first, and it failed on all three counts at once.
 | --- | --- | --- |
 | `tick.jsonl` | 10 MB, 5 back | a diagnostic; oldest is discardable |
 | `agent.jsonl` | 10 MB, 5 back | same |
-| `audit.jsonl` | daily, **no size cap** | a receipt. A size cap on an audit trail means the trail ends exactly when the ranch got busiest. |
+| `audit.jsonl` | daily, **no size cap** | a receipt. A size cap on an audit trail means the trail ends exactly when the ranch got busiest. From M8 a projection of `sw_ops.audit_receipts`, so a rotation colliding with a decision from another process (`docs/issues.md` #10) loses at worst a projected line. |
 
 ## Never logged
 
-`ANTHROPIC_API_KEY`, `DATABASE_URL`, or any full prompt or response body. Secrets are
+`ANTHROPIC_API_KEY`, `DATABASE_URL`, `OPS_API_TOKEN`, an `Authorization` header, or any full prompt or response body. Secrets are
 replaced with `[redacted]`; bulk bodies with `[omitted: set LOG_TRANSCRIPTS=1]` rather
 than deleted, so a reader can tell "there was a prompt we chose not to store" from
 "there was no prompt."

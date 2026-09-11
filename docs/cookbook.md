@@ -993,6 +993,77 @@ legitimate case. The prompt was never steered (STATE decision 27 holds).
 
 **Found:** M7A, tick F.
 
+## 43. A dependency with process-global state bound to an event loop is a flake waiting for a second loop
+
+**Pain.** The SSE rail passed on its own and failed in the suite: the stream returned an empty body, the
+console showed `ExceptionGroup: unhandled errors in a TaskGroup` and asyncpg terminating a connection
+mid-query. Standalone, against the same app, three requests in a row worked.
+
+**Why.** `sse-starlette` keeps one module-level exit event and creates it lazily on the first event loop
+it sees; it also patches uvicorn's exit handler at import. pytest-asyncio gives every test its own loop,
+so the second stream test awaited an event bound to a dead loop, the task group holding the generator
+tore down, and the generator was cancelled inside its first query.
+
+**Fix.** Twenty lines of the wire format on Starlette's own `StreamingResponse` (`routes.tick_events`
+and `_frame`), a ping comment from the poll loop, no dependency. Starlette already cancels the generator
+on client disconnect. The package came out of `requirements.txt` the same hour.
+
+**Lesson.** Before taking a small dependency for a small format, read its module-level names. Anything
+global that touches a loop, a signal, or a server object is going to show up as "works alone, fails in the
+suite", and the suite is where you find out.
+
+**Found:** M8, `test_the_latest_tick_is_sent_on_connect_and_last_event_id_resumes_after_it`.
+
+## 44. A console line that carries the receipt's field names is counted as a receipt
+
+**Pain.** The receipt rail (`unpaired_audit_ids`) said one `audit_id` appeared **three** times after a
+deliberate third insert was refused by the primary key. The table had exactly two rows. The file had
+exactly two lines.
+
+**Why.** The refusal was logged as `audit_receipt_failed` with `audit_id=` and `phase=`, and the rail
+counts any line with an `audit_id` and a `phase` in `("proposed", "decided")`. The console line looked
+exactly like a receipt to the thing whose job is to count receipts.
+
+**Fix.** `receipt_phase` on the console line. The M6 rule already said a console line must never grow an
+`audit_id` and get counted; this is the second half of it, which is that the field **names** on a line
+about a receipt are part of the contract too.
+
+**Lesson.** When a rail is a grep over field names, every new log line near the thing it greps for is a
+candidate false positive. Name the fields on commentary lines differently from the fields on the record.
+
+**Found:** M8, by the rail written for the constraint.
+
+## 45. Starlette answers a 500 from above your middleware
+
+**Pain.** `X-Request-ID` was echoed on every response except the one a person most needs it on: the 500.
+The rail asked for the header on an injected exception and got `KeyError`.
+
+**Why.** `ServerErrorMiddleware` is the outermost layer Starlette builds, above every `add_middleware`,
+and it sends the `Exception` handler's response through the raw `send`, so a header-adding middleware
+never sees it.
+
+**Fix.** The 500 handler reads the id off `scope["state"]` (the middleware put it there on the way in)
+and sets the header itself. Every other status still gets it from the middleware.
+
+**Found:** M8.
+
+## 46. Do not write source through a shell heredoc
+
+**Pain.** An f-string with `\n` in it landed in `routes.py` with real newlines inside the quotes, three
+times in a row, each time after a "fixed" that changed nothing. Syntax error at the same line each time.
+
+**Why.** The command channel unescaped `\\n` to `\n` before bash saw the heredoc, and the patch
+script then looked for a string that no longer differed from the one it was replacing. The tool said
+"patched"; the file said otherwise.
+
+**Fix.** Write patch scripts to a file with the editor tool and run the file, or edit the source with the
+editor tool directly. In the source itself, the line separator became a named constant (`LF = chr(10)`)
+so the wire format is not a literal one escape away from a newline.
+
+**Lesson.** A patch that reports success without a diff is a patch you have not verified. Read the file.
+
+**Found:** M8, repeatedly.
+
 ---
 
 _Candidates still known from the design and not yet paid for: none._

@@ -55,7 +55,10 @@ had drifted from the tree without a single gate noticing. `conftest.py` holds th
 wrong, the argument is with the plan, not with the layout. The gate (M6) is section 8 of
 `test_agent.py`: the audit rail, the planted-bad-proposal suite, the pause on Postgres across two
 connections, the tick-level rails, the held column, and the CLI. The allowlist half of it, the
-seam after the flip, stays in `test_tools.py` with the slice counts.
+seam after the flip, stays in `test_tools.py` with the slice counts. `test_api.py` (M8) is httpx
+against the ASGI app with its lifespan run by hand, five sections: the envelope and the errors, the
+reads, the gate over HTTP, the stream, and config. It plants pauses with M6's method and injects a
+performer, so no rail there reaches a ranch or a port.
 
 ## What each rail is actually protecting
 
@@ -112,6 +115,15 @@ pass is the failure mode this file exists to prevent.
 | a supervisor that never answered still produces a page | the person coming on shift is briefed whatever failed upstream | the fallback stopped carrying the work orders or the receipt |
 | a tick told not to spend produces zero work orders | the free pass is genuinely free | a spend stage ran above the `spend` check |
 | nothing a model reads carries an em dash | the house convention reaches the prompt too | a rewrite of the brief or an SOP |
+| every tick line is also a row, and the shift report with it | the read API is a projection of the ledger, not of a log file another process cannot see | `_record_tick` stopped being called, or a `--no-spend` tick stopped producing a code report |
+| a ledger that cannot take the row costs a warning, not the tick | the tick line is the heartbeat and the row is the projection; the order of those two is the design | somebody made `insert_tick` fail the tick, or moved it above `log_tick` |
+| a receipt is a row before it is a line, and a third one cannot be inserted | `docs/issues.md` #10: the "exactly twice" rail is the primary key on `audit_receipts` | `record_receipt` grew an `ON CONFLICT`, or a console line grew `audit_id` and `phase` together |
+| the envelope and the error shape on every route, including a 404 for an unknown path and a 500 | the window reads five services one way | an exception handler was removed, or a route returned a bare list |
+| a bad `limit` is 422 naming the field; a body that is not JSON is 400 | the ranch's status split, copied | the two were merged, or `details.field` became a byte offset again |
+| `/health` answers with the database URL pointed at nothing | liveness is not database health | somebody added a `SELECT 1` to make it "more useful" |
+| a `POST /ops/gate` without the token is 401 and changes nothing; `decided_by` is the token's name | an approval anyone who can reach the port can make is not a gate | the dependency was dropped, or `decided_by` was read from the body |
+| a second decision over HTTP is 409, an unknown id 404, a bare reject 422 | the three `GateError` subclasses are three answers, never 200 with a shrug | the subclasses were collapsed and the route matched on message text |
+| one SSE event lands from a row inserted after the connection opened; `Last-Event-ID` resumes after the cursor | the window watches ticks land from another process | the cursor became a timestamp, or latest-on-connect was dropped |
 | the unbriefed and the briefed answer are **both** clean | the honest limit of every rail above: they grade one incident, not scope | nothing. It is a pinned finding, not a rail. See below |
 
 ## Graded, not asserted

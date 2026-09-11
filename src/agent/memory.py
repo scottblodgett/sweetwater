@@ -21,6 +21,7 @@ goes wrong:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
@@ -177,6 +178,80 @@ chaos_events = Table(
     Index("uq_chaos_active_target_fault", "target_id", "fault", unique=True, postgresql_where=text("status = 'active'")),
     Index("ix_chaos_events_status_expires", "status", "expires_at"),
     Index("ix_chaos_events_group", "group_id"),
+)
+
+#: M8. The tick line as a row, so a process that is not the loop can see ticks land. Mirrors
+#: migration 0007. `fields` is the whole line the logger wrote; the typed columns are what the API
+#: sorts and filters on. `id` is the SSE cursor.
+ticks = Table(
+    "ticks",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("run_id", Text, nullable=False),
+    Column("tick", Integer, nullable=False),
+    Column("at", DateTime(timezone=True), nullable=False),
+    Column("store", Text, nullable=False, server_default=""),
+    Column("duration_ms", Integer, nullable=False, server_default="0"),
+    Column("cost_usd", Float, nullable=False, server_default="0"),
+    Column("error", Text, nullable=True),
+    Column("failed_stage", Text, nullable=True),
+    Column("fields", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Index("uq_ticks_run_tick", "run_id", "tick", unique=True),
+    Index("ix_ticks_at", "at"),
+)
+
+#: M8. The supervisor's page as a row. `incident_keys` is what the page was handed, kept beside
+#: `linked` so the fusion claim stays checkable after the fact.
+shift_reports = Table(
+    "shift_reports",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("run_id", Text, nullable=False),
+    Column("tick", Integer, nullable=False),
+    Column("at", DateTime(timezone=True), nullable=False),
+    Column("source", Text, nullable=False),
+    Column("headline", Text, nullable=False, server_default=""),
+    Column("situation", Text, nullable=False, server_default=""),
+    Column("priorities", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("linked", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("escalations", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("worlds", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("incident_keys", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("work_orders", Integer, nullable=False, server_default="0"),
+    Column("violations", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("provider", Text, nullable=False, server_default=""),
+    Column("model", Text, nullable=False, server_default=""),
+    Column("finish_reason", Text, nullable=False, server_default=""),
+    Column("latency_ms", Integer, nullable=False, server_default="0"),
+    Column("input_tokens", Integer, nullable=False, server_default="0"),
+    Column("output_tokens", Integer, nullable=False, server_default="0"),
+    Index("uq_shift_reports_run_tick", "run_id", "tick", unique=True),
+    Index("ix_shift_reports_at", "at"),
+)
+
+#: M8, `docs/issues.md` #10. The gate's receipt as a row, keyed on `(audit_id, phase)`, so "every
+#: audit_id appears exactly twice" is a constraint and `logs/audit.jsonl` is a projection. Written
+#: by `src/agent/gate.py` through the checkpointer's own connection (`ThreadedPostgresSaver.record_receipt`),
+#: because the process holding a pause is the process that has that connection open.
+audit_receipts = Table(
+    "audit_receipts",
+    metadata,
+    Column("audit_id", Text, primary_key=True),
+    Column("phase", Text, primary_key=True),
+    Column("at", DateTime(timezone=True), nullable=False),
+    Column("run_id", Text, nullable=False, server_default=""),
+    Column("tick", Integer, nullable=False, server_default="0"),
+    Column("tool", Text, nullable=False),
+    Column("incident_key", Text, nullable=False, server_default=""),
+    Column("proposed_by", Text, nullable=True),
+    Column("args", JSONB, nullable=True),
+    Column("decision", Text, nullable=True),
+    Column("decided_by", Text, nullable=True),
+    Column("result", Text, nullable=True),
+    Column("reason", Text, nullable=True),
+    Column("upstream", Text, nullable=True),
+    Column("latency_to_decision_ms", Integer, nullable=True),
+    Index("ix_audit_receipts_at", "at"),
 )
 
 
@@ -489,6 +564,10 @@ async def record_held(session: AsyncSession, *, reasons: dict[str, str], release
 # --------------------------------------------------------------------------- #
 # the checkpointer, M6: where a paused write waits for a human
 # --------------------------------------------------------------------------- #
+#: The receipt row, in insert order. One tuple so the writer and the API's reader cannot disagree.
+RECEIPT_COLUMNS = ("audit_id", "phase", "at", "run_id", "tick", "tool", "incident_key", "proposed_by", "args", "decision", "decided_by", "result", "reason", "upstream", "latency_to_decision_ms")
+
+
 class CheckpointerNotMigratedError(RuntimeError):
     """The database is behind the installed LangGraph checkpointer, or has no tables for it."""
 
@@ -510,6 +589,8 @@ class ThreadedPostgresSaver(PostgresSaver):
     def __init__(self, conn: Connection[Any]) -> None:
         super().__init__(conn)
         self._lock = asyncio.Lock()
+        #: The same connection, typed as the single connection it is (the library's field admits a pool).
+        self._receipt_conn: Connection[Any] = conn
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         async with self._lock:
@@ -528,6 +609,19 @@ class ThreadedPostgresSaver(PostgresSaver):
     async def aput_writes(self, config: RunnableConfig, writes: Sequence[tuple[str, Any]], task_id: str, task_path: str = "") -> None:
         async with self._lock:
             await asyncio.to_thread(self.put_writes, config, writes, task_id, task_path)
+
+    async def record_receipt(self, row: dict[str, Any]) -> None:
+        """M8. One gate receipt, `proposed` or `decided`, on the connection that holds the pause.
+
+        A plain INSERT with no conflict clause on purpose: the primary key is the rail, and a second
+        `decided` for one `audit_id` is exactly the thing that must fail loudly rather than merge.
+        `args` is passed as JSON text because psycopg does not adapt a dict on its own.
+        """
+        cols = RECEIPT_COLUMNS
+        values = [json.dumps(row.get("args")) if c == "args" and row.get("args") is not None else row.get(c) for c in cols]
+        placeholders = ", ".join("%s::jsonb" if c == "args" else "%s" for c in cols)
+        async with self._lock:
+            await asyncio.to_thread(self._receipt_conn.execute, f"INSERT INTO audit_receipts ({', '.join(cols)}) VALUES ({placeholders})", values)
 
 
 def psycopg_url(url: str) -> str:
@@ -638,3 +732,66 @@ async def expire_chaos_events(session: AsyncSession, *, now: datetime, force_all
 async def chaos_counts_by_status(session: AsyncSession) -> dict[str, int]:
     rows = (await session.execute(select(chaos_events.c.status, text("count(*)")).group_by(chaos_events.c.status))).all()
     return {str(status): int(n) for status, n in rows}
+
+
+# --------------------------------------------------------------------------- #
+# M8: the tick, the shift report, and what the read API selects
+# --------------------------------------------------------------------------- #
+# The loop writes the first two beside the log line; the API reads all of it and writes nothing
+# here (its one write goes through the gate). Every reader orders newest first and by `id` second,
+# because two rows can share a timestamp and the window must never see them swap places.
+async def insert_tick(session: AsyncSession, *, run_id: str, tick: int, at: datetime, fields: dict[str, Any]) -> int:
+    """One tick line as a row. Returns the row id, which is the SSE cursor.
+
+    `fields` is the exact mapping `log_tick` was called with, so the row and the line cannot
+    disagree; the typed columns are lifted out of it rather than passed twice.
+    """
+    stmt = pg_insert(ticks).values(run_id=run_id, tick=tick, at=at, store=str(fields.get("store") or ""), duration_ms=int(fields.get("duration_ms") or 0), cost_usd=float(fields.get("cost_usd") or 0.0), error=fields.get("error"), failed_stage=fields.get("failed_stage"), fields=fields).returning(ticks.c.id)
+    row_id = int((await session.execute(stmt)).scalar_one())
+    await session.commit()
+    return row_id
+
+
+async def insert_shift_report(session: AsyncSession, *, run_id: str, tick: int, at: datetime, report: dict[str, Any], incident_keys: Sequence[str]) -> int:
+    """The supervisor's page as a row. `report` is `ShiftReport.model_dump()`; a mapping here rather
+    than the model, because `agent.py` imports this module."""
+    stmt = pg_insert(shift_reports).values(
+        run_id=run_id, tick=tick, at=at, source=str(report.get("source") or "code"), headline=str(report.get("headline") or ""), situation=str(report.get("situation") or ""),
+        priorities=list(report.get("priorities") or ()), linked=list(report.get("linked") or ()), escalations=list(report.get("escalations") or ()), worlds=list(report.get("worlds") or ()),
+        incident_keys=sorted(incident_keys), work_orders=int(report.get("work_orders") or 0), violations=list(report.get("violations") or ()),
+        provider=str(report.get("provider") or ""), model=str(report.get("model") or ""), finish_reason=str(report.get("finish_reason") or ""), latency_ms=int(report.get("latency_ms") or 0),
+        input_tokens=int(report.get("input_tokens") or 0), output_tokens=int(report.get("output_tokens") or 0),
+    ).returning(shift_reports.c.id)
+    row_id = int((await session.execute(stmt)).scalar_one())
+    await session.commit()
+    return row_id
+
+
+async def latest_shift_report(session: AsyncSession) -> dict[str, Any] | None:
+    row = (await session.execute(select(shift_reports).order_by(shift_reports.c.at.desc(), shift_reports.c.id.desc()).limit(1))).mappings().first()
+    return dict(row) if row else None
+
+
+async def latest_tick(session: AsyncSession) -> dict[str, Any] | None:
+    row = (await session.execute(select(ticks).order_by(ticks.c.id.desc()).limit(1))).mappings().first()
+    return dict(row) if row else None
+
+
+async def ticks_after(session: AsyncSession, *, after_id: int, limit: int = 100) -> tuple[dict[str, Any], ...]:
+    """Every tick row with an id past the cursor, oldest first, so the stream replays in order."""
+    rows = (await session.execute(select(ticks).where(ticks.c.id > after_id).order_by(ticks.c.id).limit(limit))).mappings().all()
+    return tuple(dict(r) for r in rows)
+
+
+async def list_incidents(session: AsyncSession, *, status: str | None = None, owner: str | None = None, subject_type: str | None = None, limit: int = 100, offset: int = 0) -> tuple[Incident, ...]:
+    """Newest first by `last_seen_at`. The three filters are the ones the window asked for at M7A,
+    when animals and sensors started sharing this table. Validation of the values is the API's."""
+    q = select(incidents)
+    if status is not None:
+        q = q.where(incidents.c.status == status)
+    if owner is not None:
+        q = q.where(incidents.c.owner == owner)
+    if subject_type is not None:
+        q = q.where(incidents.c.subject_type == subject_type)
+    rows = (await session.execute(q.order_by(incidents.c.last_seen_at.desc(), incidents.c.id.desc()).limit(limit).offset(offset))).mappings().all()
+    return tuple(_to_incident(dict(r)) for r in rows)
