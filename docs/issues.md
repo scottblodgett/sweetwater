@@ -1,7 +1,7 @@
 # Issues
 
-Open items observed across M0 through M8, first written at the M4 boundary on 2026-09-10 and
-extended at each boundary since. Nothing here is a failing gate. These are deferred verifications, owed
+Open items observed across M0 through M9, first written at the M4 boundary on 2026-09-10 and
+extended at each boundary since, the last time at the M9 boundary on 2026-09-11, the close of the M phases. Nothing here is a failing gate. These are deferred verifications, owed
 pieces, decisions waiting on a person, and known artifacts. Each one says where it came from and
 what it would take, so it can be picked up cold.
 
@@ -257,8 +257,73 @@ reader of the table would not see that a scenario's animal write was refused.
 
 **What it would take.** `chaos.fire_animal_events` takes the session `run_tick` already has open, and
 writes the pair through a small `memory.insert_receipt(session, row)` beside its two log lines. One
-afternoon. Worth doing before M9 shows receipts to a human, if it shows them at all; not worth doing
-before, because the chaos guard is a demo instrument and one process.
+afternoon. M9's window shows the gate's receipts (the decided envelope) and not the chaos guard's, so
+this did not block it; still worth doing before a reader of the table is told it holds every receipt.
+
+## Owed from M9
+
+### 21. The ranch map has no source. **Needs a yes: migration `0008`, a catalog snapshot in `sw_ops`.**
+
+**Where it came from.** `docs/Plan.md`'s M9 paragraph said the map needs no new backend work because
+sensor coordinates are already in the catalog. They are, and the catalog is `ranch://sensors/map`,
+which is the ranch. The read API never calls the ranch and neither does a browser, so the window has
+no source for a coordinate. M9 ships the map panel as a placeholder that says exactly this, rather
+than a panel that quietly calls the Sensor API from a browser. One thing talks to the ranch.
+
+**What it would take.** Three small pieces, one migration, one yes.
+
+1. The migration. Proposed DDL, to be applied to Supabase only with Scott's explicit yes:
+
+```sql
+CREATE TABLE sw_ops.catalog_snapshots (
+    id            BIGSERIAL PRIMARY KEY,
+    run_id        TEXT        NOT NULL,
+    tick          INTEGER     NOT NULL,
+    at            TIMESTAMPTZ NOT NULL,
+    source        TEXT        NOT NULL,          -- 'mcp_resource' or 'sensor_api', the same catalog_source the tick line carries
+    sensor_count  INTEGER     NOT NULL,
+    digest        TEXT        NOT NULL,          -- sha256 of the canonical JSON, so an unchanged catalog writes no row
+    sensors       JSONB       NOT NULL           -- [{sensor_id, sensor_type, location, unit, lat, lon}], the catalog as read
+);
+CREATE UNIQUE INDEX uq_catalog_snapshots_digest ON sw_ops.catalog_snapshots (digest);
+CREATE INDEX ix_catalog_snapshots_at ON sw_ops.catalog_snapshots (at DESC);
+```
+
+2. The loop. `run_tick` already reads the catalog every tick (`catalog_source` on the line). After
+`log_tick`, best-effort like `ticks` and `shift_reports`: hash it, `INSERT ... ON CONFLICT (digest) DO
+NOTHING`. A ranch that does not change writes one row per process lifetime, not one per tick.
+3. The API. `GET /ops/catalog`, the latest snapshot in the envelope, 404 `CATALOG_NOT_FOUND` on an empty
+ledger. A seventh route, asked for here the way the sixth was asked for at M8, and `src/api/CLAUDE.md`
+edited first. Then the window draws from it and the placeholder comes down.
+
+About a day, plus the yes. The coordinates' field names in `sensors` are whatever the catalog resource
+carries and are confirmed on the wire when the snapshot is first written, not copied from the other
+repo's source.
+
+### 22. A tool the ranch does not have is reported as an outage
+
+**Where it came from.** M9's first browser approve was on a planted pause naming `add_care_note`, a
+tool that is not one of the 19, planted on purpose so an approve could not write. The ranch answered
+`McpError: Tool add_care_note not found`, and the receipt says `transport_McpUnavailableError`, because
+`ranch_session` wraps everything raised inside it as an MCP outage. M6 hit the same wrapping one layer
+up (`WriteGateError` came back as an outage) and moved the belt check ahead of the session; this is the
+next layer down. A missing tool is a refusal, not an outage, and a `transport_*` result reads as "try
+again later" when the honest reading is "never".
+
+**What it would take.** In `gate.perform_write`, before the session opens: `assert tool in
+DEPLOYED_TOOLS` and return a `refused_unknown_tool` result, the way `assert_callable` already refuses a
+tool outside the allowlist. Ten lines and a rail. Not done at M9 because the Python gate was frozen for
+the phase by design; the first thing to do when it is next open.
+
+### 23. The Vercel deploy, and "three ticks land without a refresh at the Vercel URL"
+
+**Where it came from.** `docs/Plan.md`'s M9 verification item 7. Vercel cannot reach `127.0.0.1`, and
+where the loop and the API run is #5, a decision and not this phase's. The window is built and verified
+against `next dev` on this machine with the API local. Not faked with a tunnel.
+
+**What it would take.** #5 landing on a host Vercel can reach, `OPS_API_URL` and `OPS_API_TOKEN` set
+server-side in the Vercel project, `API_CORS_ORIGINS` untouched (same-origin proxy, no CORS), and one
+browser tab left open for three cadences. `web/README.md`, "Deploying".
 
 ## Known artifacts, not fixable from here
 
@@ -296,3 +361,8 @@ for by measuring rather than by tripping). The list at the bottom of `docs/cookb
 - A calm tick costs exactly $0.00, and `synthesize` assembles in code below two worlds.
 - The loop's held set and miss check being in-process is a scoped choice (issues 3 and 4), not an
   oversight.
+- The window's browser never calls the API directly and never sees `OPS_API_TOKEN`; every call goes
+  through its own route handlers. Same origin, so `API_CORS_ORIGINS` staying empty is correct, not a gap.
+- An approve in the window performs the write on the deployed ranch. That is the gate doing its job,
+  not a missing belt; the window asks once before sending it. A demo that wants to exercise approve
+  plants a tool the ranch does not have (cookbook #47).

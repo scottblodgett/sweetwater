@@ -35,6 +35,7 @@ python main.py --once   # exactly one tick        (live: sweeps, triages, and sp
 python main.py          # the continuous loop     (live: every TICK_INTERVAL_SECONDS, halts at SPEND_CEILING_USD)
 python main.py --no-spend  # either of the above, stopped at the end of the free pass. No bill
 python main.py --api    # the read API, its own process (M8): reads sw_ops, never the ranch, never a model. Needs OPS_API_TOKEN
+cd web && npm install && cp .env.example .env.local && npm run dev   # the window (M9): http://localhost:3000, against the API above
 ```
 
 `--once` is real from M1 and **costs money from M2**: its last two stages assemble an
@@ -52,9 +53,19 @@ services use. Reads are open; `POST /ops/gate` approves a real write and needs a
 `OPS_API_TOKEN`. It reads the `sw_ops` ledger and nothing else, so a browser refresh can never spend a
 token or touch the ranch. Detail: `src/api/CLAUDE.md`.
 
+The window (`web/`) is a Next.js App Router app that reads that API and nothing else. Its route
+handlers proxy every `/ops/*` call server-side, so the bearer token lives in `web/.env.local` and never
+reaches a browser. One page: the token gauge off the SSE stream, the incident feed with filters, the
+rails read off the latest tick line, the shift report, the gate with approve and reject, and a ranch-map
+placeholder that says why it is empty. Verified against `next dev` on this machine; the Vercel deploy
+waits on where the API runs (`docs/issues.md` #5, #23). Detail: `web/README.md`.
+
 No Docker is needed; dockerizing is a deferred FUTURE-1 item, not part of the build: the upstreams are already deployed and agent state lives in
 Supabase, so there is nothing local to stand up. A local Postgres is needed only to run
-the store tests, which must never point at Supabase.
+the store tests, which must never point at Supabase. Node 22 is needed only for the window.
+
+The build ran M0 through M9 and every phase is landed; M9 was the last. What a session picks up
+next is in `docs/STATE.md`'s Next row and `docs/issues.md`.
 
 ## Verifying a build
 
@@ -63,7 +74,11 @@ pytest                        # rails; passes offline, never touches Supabase
 ruff check .
 mypy src main.py              # strict
 python main.py --handshake    # the live check: 19 tools, 160 sensors, 32 locations
+cd web && npx tsc --noEmit && npm run lint && npm run build   # the window's gate, three commands
 ```
+
+`pytest` **drops and re-migrates the local `sw_ops_test` schema**, so it cannot run while a demo or a
+`SW_OPS_TARGET=test` loop is using that ledger. Two sessions cannot run it at once either.
 
 The handshake exits **0** on success and **1** on failure, and writes a line to
 `logs/tick.jsonl` either way. That last part is deliberate: a run that produces no line is
@@ -92,7 +107,12 @@ Three streams: `tick.jsonl` (the heartbeat), `agent.jsonl` (the instrument),
 | [docs/sweetwater-ranch.md](docs/sweetwater-ranch.md) | the scenario canon |
 | [docs/model-routing.md](docs/model-routing.md) | local by default, Opus where it earns it (a ledger) |
 | [docs/logging.md](docs/logging.md) | the three log streams |
-| [docs/JOURNEY.md](docs/JOURNEY.md) | what actually happened, and where it diverged |
+| [docs/JOURNEY.md](docs/JOURNEY.md) | what actually happened, and where it diverged, written at every boundary |
+| [docs/cookbook.md](docs/cookbook.md) | 48 lessons, ordered by the pain that produced each one; numbers are stable |
+| [docs/issues.md](docs/issues.md) | what is still open across phases, and what each would take |
+| [docs/STATE.md](docs/STATE.md) | the session-start briefing: where the build stands, decisions made, the verified environment |
+| [docs/Plan.md](docs/Plan.md) | the plan and the tree, which is the authority the layout matches |
+| [web/README.md](web/README.md) | the window: the proxy, the panels, the three-command gate |
 | [CLAUDE.md](CLAUDE.md) | orientation for AI assistants; nested files per package |
 
 ## Two ideas the whole thing rests on

@@ -1,82 +1,100 @@
-# agent-lab-ui
+# web/ - the window (M9)
 
-A localhost **mission-control dashboard** for watching the Phase II agent-lab runs.
-The scripts only print to a terminal, which hides the *shape over time* that is the
-whole Phase-II lesson (tokens climb in II.1, go flat in II.2). This shows that shape:
-a live **token-gauge** line chart plus a scrolling **verdict feed**.
+What the agents decided, on one page. The window reads the M8 read API and nothing else, and the
+browser never holds the API token: Next.js route handlers proxy every call server-side.
 
-Full design brief: [`docs/agent-lab-ui-plan.md`](../docs/agent-lab-ui-plan.md).
-
-> **Status: built.** Shipped: the `emit()` seam, the `RunEvent` schema, the server (live
-> spawn + replay over SSE), and the full panel set — token gauge, verdict feed, **rails**,
-> a **summary card** (the end-of-run footer, promoted out of the raw console), and an
-> **interactive gate** with real approve/reject buttons that pipe the decision to the
-> child's stdin. Six rungs are wired — **II.1** (`sweep-loop`), **II.2** (`truncate-loop`),
-> **II.3** (`compress-loop`), **II.4** (`memory-loop`), **II.6** (`ii6-loop`, gated), and
-> **II.7** (`gate-demo`, the real keyboard gate) — plus a **model selector** (qwen2.5 →
-> qwen3.5 → kimi → opus, worst→best, via `agent-lab/model.mjs`). The one spec item still
-> open is the gauge→transcript drill-down drawer.
+The old UI (`agent-lab-ui`, landed here untouched as the first M9 commit) showed what the sensors
+said. This one shows what the agents decided, from `sw_ops` through `/ops/*`.
 
 ## Run
 
 ```bash
-cd agent-lab-ui
-npm install          # tsx + typescript + @types/node (standalone, not a workspace)
-npm run dev          # → http://localhost:4500   (PORT=4599 npm run dev to change)
+cd web
+npm install                   # Node 22; its own project, not a workspace
+cp .env.example .env.local    # OPS_API_URL (default http://127.0.0.1:8000) and OPS_API_TOKEN
+npm run dev                   # http://localhost:3000
 ```
 
-Then open the URL and use the footer controls:
+`OPS_API_TOKEN` here is **one secret** from the API's `OPS_API_TOKEN` (the part after `name:`), not the
+`name:secret` pair. The API maps it back to the name, and that name is `decided_by` on every gate
+receipt this window produces. `.env*.local` is gitignored at the repo root and here.
 
-- **Replay** (no model needed): pick a `*.run.txt` capture and hit ▶ run. Note: only
-  captures produced *after* `emit()` landed carry the machine-readable `@@` lines the
-  gauge needs — older captures replay into the raw-console pane only (they degrade
-  gracefully, no crash). Re-capture with the command below.
-- **Live**: pick a rung, a **model** (the selector — qwen2.5/qwen3.5 need a local Ollama
-  up; kimi needs a funded Moonshot key; opus needs AWS creds for Bedrock), set **N** small
-  (e.g. 10) so it's watchable, hit ▶ run, and watch `sent` climb in II.1 vs stay flat
-  (while `full` climbs) in II.2 — the money shot. Every rung now goes through **one shared
-  LangChain actor** (`agent-lab/model.mjs`), so the same run works on any of the four
-  models; II.7 (the gate) ignores the model entirely — it has no reasoner.
+The API has to be up: `python main.py --api` from the repo root, on the same ledger you want to
+watch (`SW_OPS_TARGET=test` for the local one). With the API down every panel says so in a sentence
+and the header says `reconnecting`; nothing is blank and nothing retries a write.
 
-## The `emit()` seam
-
-The scripts keep their exact terminal output. Alongside each meaningful `console.log`,
-they call `emit(evt)` (`emit.mjs`), which prints one extra line: `@@` + JSON. A plain
-terminal shows those as harmless noise; strip them with `grep -v '^@@'`. The UI parses
-*only* the `@@` lines. This is why the terminal experience is unchanged and the UI needs
-no brittle regex over the three different pretty-print formats.
-
-The event shapes are a TypeScript discriminated union in **`events.ts`** — the single
-reusable artifact that survives a future Next.js migration. `emit.mjs` stays plain `.mjs`
-so the `node`-run scripts import it with zero build step.
-
-## Re-capturing a replay file
+## The gate, in three commands
 
 ```bash
-# from repo root, with Ollama up:
-node agent-lab/sweep-loop.mjs   > agent-lab/sweep-loop.run.txt
-node agent-lab/truncate-loop.mjs > agent-lab/truncate-loop.run.txt
+npx tsc --noEmit    # no type errors
+npm run lint        # eslint-config-next, zero problems
+npm run build       # next build succeeds
 ```
 
-The capture now contains both the human lines and the `@@` events, so replay populates
-the gauge and verdict feed exactly like a live run.
+All three are in the root `CLAUDE.md` Commands block and re-run at every phase close. The Python gate
+(`pytest`, `ruff`, `mypy`) does not know this directory exists, on purpose.
 
-## Architecture note (why a Next.js port later is a wrapper swap, not a rewrite)
+## The proxy: why the browser never calls the API
 
-All server capability lives in **exported functions** in `server.ts`
-(`listRuns`, `startLiveStream`, `startReplayStream`, `sendGateDecision`). The Node `http`
-handler is a thin router that only parses the request and calls one of them — no business
-logic inline. A Next.js route handler would import the same functions verbatim. The one
-piece a Next.js version *would* rewrite is the hand-rolled canvas gauge in `app.js`
-(swapped for a real chart lib); everything else ports directly.
+`POST /ops/gate` approves a real write on the deployed ranch and needs a bearer token. A token in
+browser JavaScript is a token in every visitor's dev tools. So:
+
+| Browser calls | Handler | Forwards to | Notes |
+| --- | --- | --- | --- |
+| `GET /api/ops/incidents?…` | `app/api/ops/[...path]/route.ts` | `GET $OPS_API_URL/ops/incidents?…` | query string verbatim |
+| `GET /api/ops/report` | same | `GET /ops/report` | 404 `REPORT_NOT_FOUND` passes through; the panel renders it as "no shift report yet" |
+| `GET /api/ops/stream` | same | `GET /ops/stream` | the SSE body is piped, not buffered; `Last-Event-ID` forwarded, so a reconnect resumes |
+| `GET /api/ops/gate` | same | `GET /ops/gate` | |
+| `POST /api/ops/gate` | same | `POST /ops/gate` + `Authorization: Bearer` | the only call that carries the token; 503 `WINDOW_NOT_CONFIGURED` if the window has none |
+| `GET /api/health` | `app/api/health/route.ts` | `GET /health` | |
+
+`lib/proxy.ts` is the whole thing: it forwards `X-Request-ID` if the browser sent one, mints one if not,
+and echoes the API's back, so one id names a request in both logs. An unreachable API is a 502
+`API_UNREACHABLE` in the same `{error: {code, message, details}}` envelope, so the client has one error
+shape to render. Anything under `/api/ops/` that is not one of the four paths is a 404 here, never a
+probe upstream. `API_CORS_ORIGINS` on the API is moot for this window: same origin, always.
+
+`lib/proxy.ts` runs only in route handlers. Nothing under `components/` or `lib/client.ts` may import it.
+
+## The panels, and what each reads
+
+| Panel | Reads | What it shows |
+| --- | --- | --- |
+| Token gauge | `/ops/stream`, one point per tick row | input and output tokens per tick on one chart, `cost_usd` per tick on a second beneath it on the same x-axis. Two charts and not a dual axis: tokens and dollars never share a scale. Cost seen this session in the legend |
+| Rails | the latest tick row's `fields`, plus the pending count from `/ops/gate` | eight chips: tick, upstreams, herd, orders, cascade, report, held, gate. The API carries no work orders, so per-order violations stay in `logs/agent.jsonl`; what the line carries is counts, and a count that should be zero and is not is a rail that fired |
+| Shift report | `/ops/report` | `source` first (`code` is the fallback having shipped), headline, situation, priorities, `linked`, escalations, violations, and who wrote it |
+| Gate | `/ops/gate`, decisions through `POST` | every pending write with agent, tool, args, age. **Approve asks once**, naming the tool and args, because it performs the write on the deployed ranch. Reject needs a reason. A pause answered this session stays on screen with its buttons, so a second answer shows the API's 409 as a sentence naming the earlier decision |
+| Incidents | `/ops/incidents?limit=100` with `status`, `owner`, `subject_type` filters | newest first: severity, status, key, owner, summary and last value |
+| Ranch map | nothing yet | a placeholder that says why: coordinates live in the ranch's catalog, the API never calls the ranch, and neither does this window. Waits on `docs/issues.md` #21 |
+
+The stream is the clock. Every tick that lands refreshes the feed, the report, and the gate; the gate
+also polls every 20s, because a decision made at the CLI does not land a tick. `EventSource` reconnects
+on its own and the proxy forwards its `Last-Event-ID`.
 
 ## Files
 
-| File           | Role                                                                 |
-| -------------- | -------------------------------------------------------------------- |
-| `emit.mjs`     | The one file the agent-lab scripts import. Prints `@@`-JSON lines.   |
-| `events.ts`    | `RunEvent` union + `parseEventLine()`. The reusable contract.        |
-| `server.ts`    | `tsx`-run dev server: exported capabilities + thin `http`/SSE router.|
-| `index.html`   | Dashboard layout.                                                    |
-| `app.js`       | Client: EventSource → panels; hand-rolled canvas gauge (plain JS).   |
-| `style.css`    | Styling.                                                             |
+| File | Role |
+| --- | --- |
+| `app/layout.tsx`, `app/page.tsx` | the shell and the one page; the stream hook and the three loaders live in `page.tsx` |
+| `app/globals.css` | the light-mode stylesheet, carried over from `agent-lab-ui/style.css` and extended |
+| `app/api/ops/[...path]/route.ts`, `app/api/health/route.ts` | the proxy's route handlers |
+| `lib/proxy.ts` | server only: forward one request, token, request id, streaming body |
+| `lib/client.ts` | browser only: same-origin fetch, `OpsError` with the sentence a human reads |
+| `lib/types.ts` | the wire shapes, mirroring `src/api/schemas.py` by hand |
+| `lib/format.ts` | times, dollars, counts, ages |
+| `components/` | `Gauge`, `Rails`, `Summary`, `Gate`, `Feed`, `MapPlaceholder` |
+
+## What carried over from `agent-lab-ui`, and what did not
+
+Carried: the panel set (gauge, feed, rails, summary card, interactive gate), the grid layout, the
+light-mode styling, the `EventSource` client pattern, the approve/reject UX. Left behind, because
+none of it has a job here: `emit.mjs` and the `@@` line seam, `events.ts`, `server.ts` and the run
+spawner, replay, the model selector, and the hand-rolled canvas gauge, which the old README itself said
+was the one piece a port should replace with a chart library.
+
+## Deploying
+
+Not yet. Vercel cannot reach `127.0.0.1`, and where the loop and API run is `docs/issues.md` #5. When
+that lands on a reachable host, set `OPS_API_URL` and `OPS_API_TOKEN` in the Vercel project's
+environment (server-side, never `NEXT_PUBLIC_`), and the plan's "three ticks land without a refresh at
+the Vercel URL" is the check. It is owed, not faked with a tunnel.

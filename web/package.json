@@ -1,15 +1,27 @@
 {
-  "name": "agent-lab-ui",
+  "name": "sweetwater-window",
+  "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "description": "Mission-control dashboard to watch Phase II agent-lab runs (token gauge, verdict feed).",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "next": "16.3.5",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "recharts": "^3.10.1"
+  },
   "devDependencies": {
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2",
-    "@types/node": "^22.10.2"
-  }
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.5",
+    "typescript": "^5"
+  },
+  "description": "The Sweetwater ops window (M9). Reads sw_ops through the M8 read API, proxied server-side so OPS_API_TOKEN never reaches a browser."
 }

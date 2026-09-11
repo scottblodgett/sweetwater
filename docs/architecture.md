@@ -140,6 +140,11 @@ a frozen server.
 The only path to ranch data is HTTP through the deployed APIs. Cross-service IDs are
 plain strings, never foreign keys, and orphans are allowed on purpose.
 
+Two readers sit on `sw_ops` and neither can reach the ranch: the read API (`--api`, M8) reads the
+ledger and serves it in the ranch's envelope, and the window (`web/`, M9) reads the API through its
+own server-side proxy, so a browser holds no token and cannot spend one. The orchestrator is the
+only process that talks upstream.
+
 ## Milestones
 
 M0 skeleton + logging + handshake · M1 the free pass · M2 one agent, Opus only · M3 the

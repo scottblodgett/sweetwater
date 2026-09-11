@@ -81,6 +81,7 @@ needed is reachable over the wire or already written down in this repo.
 | `src/tools/` | `src/tools/CLAUDE.md` - allowlists, severity ownership, chaos guards |
 | `src/models/` | `src/models/CLAUDE.md` - the Ollama traps, when thinking may be off |
 | `src/api/` | `src/api/CLAUDE.md` - envelope and error conventions, the six routes, who may approve over HTTP |
+| `web/` | `web/README.md` - the window: the proxy, the panels and what each reads, the three-command gate, what did not carry over from `agent-lab-ui` |
 | `data/knowledge_base/` | the SOPs, one file per sensing world, **derived from `docs/sweetwater-ranch.md` and nothing else.** A rule id is citable only if it is a heading in the file the packet carried |
 | `tests/` | `tests/CLAUDE.md` - never Supabase; what each rail proves |
 | architecture | `docs/architecture.md` |
@@ -119,6 +120,12 @@ python -m src.agent.gate list      # M6. The writes agents proposed and nobody h
 
 TIER1_ENABLED=1 python main.py --once                 # M7. The cascade: warning-severity work orders on the local model, Opus for critical and for every escalation. Ships OFF
 TIER1_ENABLED=1 TIER_COMPARE=1 python main.py --once  # M7. The measurement: every local order shadowed by Opus on the same page into logs/compare.jsonl. SPENDS
+
+cd web && npm install            # M9. The window, its own npm project (Node 22). Once
+cd web && npm run dev            # M9. http://localhost:3000 against the API named in web/.env.local (OPS_API_URL, OPS_API_TOKEN; copy web/.env.example)
+cd web && npx tsc --noEmit       # M9. The window's gate, part 1 of 3: no type errors
+cd web && npm run lint           # M9. Part 2: the linter the template ships with (eslint-config-next), zero problems
+cd web && npm run build          # M9. Part 3: `next build` succeeds
 ```
 
 **A model never performs a write. From M6 it may propose one, and a human answers.** A work order
@@ -134,6 +141,16 @@ is a different switch for a different actor and stays one.
 the whole architecture: a browser refresh cannot spend a token or fire a sweep. From M8 the loop writes
 every tick line to `sw_ops.ticks` and every shift report to `sw_ops.shift_reports` beside the log line,
 best-effort and never failing the tick, so `--api` on another box sees exactly what the loop saw.
+
+**The window (`web/`, M9) talks to the read API and nothing else, and the browser never holds the token.**
+Next.js App Router; route handlers under `web/app/api/ops/*` proxy every call server-side with `OPS_API_URL`
+and `OPS_API_TOKEN` from the window's own environment (`web/.env.local`, gitignored), forward `X-Request-ID`,
+and pipe the SSE stream through. Six panels: the token gauge off `/ops/stream`, the incident feed, the rails
+read off the latest tick line, the shift report, the gate with approve and reject (approve asks once, because
+it performs the write on the deployed ranch), and a ranch-map placeholder that says why it is empty (the
+catalog is the ranch's, and one thing talks to the ranch: `docs/issues.md` #21). The window has its own gate,
+the three `web/` commands above, and it is verified against `next dev` on this machine; the Vercel deploy waits
+on where the API lives (#5) and is owed, not faked. `web/README.md` is the detail.
 
 Exits: **0** is a clean drain after Ctrl+C, SIGTERM, or SIGBREAK; **1** is a second Ctrl+C or a tick
 raising outside its own guard; **2** is a config refusal (including `--api` without a usable

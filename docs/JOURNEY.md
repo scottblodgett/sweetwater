@@ -1520,3 +1520,152 @@ performs a real write on the ranch, and the rail proves it with an injected perf
 | `?limit=N` on the stream | the only way to curl it or test it through the ASGI app, which buffers a response until it ends |
 | `Settings.ops_tokens()` raising, and `_SECRET_KEYS` gaining `ops_api_token` | the refusal has to happen before a port is bound, and the token must never reach a log line |
 | `test_no_route_here_imports_a_ranch_client_or_a_model_client` | the rule in `src/api/CLAUDE.md`, as a grep, so it cannot erode quietly |
+
+
+## M9 - The window, the last M phase
+
+**What was planned.** `docs/Plan.md`'s M9 paragraph and Scott's brief: Next.js App Router against
+`/ops/*`, light mode, the panel set lifted from `agent-lab-ui` (moved into this repo as `web/` and
+committed untouched first, so every later diff reads as the port), the token never reaching the browser,
+the gate verified from a browser on a planted pause, a three-command gate of its own, and the doc close
+that used to be M10's. Two questions were to be answered in the check-in before code: where the map's
+coordinates come from, and where the API is reachable from.
+
+**What actually happened, in order.**
+
+**The two questions, answered before code.** *The map.* The plan said the coordinates are already in
+the catalog, and they are; the catalog is `ranch://sensors/map`, which is the ranch, and neither the
+read API nor a browser calls the ranch. So the map panel is a placeholder that says exactly that, and
+the source it needs, a catalog snapshot the loop writes to `sw_ops` and the API exposes, is written up
+with its DDL as `docs/issues.md` #21 for a yes, rather than migrated in on the window's coattails.
+*Where the API lives.* Vercel cannot reach `127.0.0.1`, and where the loop and API run is #5, a
+decision and not this phase's. Built and verified against `next dev` on this machine with `--api` local;
+the Vercel deploy is #23, owed and not faked with a tunnel.
+
+**The panel mapping held in four places out of five.** Gauge, feed, summary, and gate map onto the API
+as briefed. **Rails did not**: the API carries no work orders and no per-order violations, and there is
+no orders route. What the tick line carries is counts (`work_orders_rejected`, `escalations` with
+reasons, `shift_report_violations`, `skipped_upstreams`, `herd_error`, `held`), and a count that should be
+zero and is not is a rail that fired. So the rails are eight chips read off the latest tick row, plus
+the pending count from `GET /ops/gate`, and the API was not bent to fit a panel.
+
+**The first commit was `web/` as it sat.** Twelve files from `agent-lab-ui`, byte for byte, with
+`.gitignore` gaining `web/node_modules/`, `web/.next/`, `web/.env*.local`, and `docs/Plan.md`'s tree and
+Structure row gaining `web/`. Scott offered to rename it `old-web/` so the scaffold could land clean;
+declined, because then git sees a delete and a create and the history of `style.css` snaps. The
+scaffold (`create-next-app`, TypeScript, ESLint, App Router, no Tailwind, no `src/`) went into a temp
+directory and was copied over the top. `style.css` became `app/globals.css` by `git mv`, so its diff is
+a diff. Deleted after that commit: `emit.mjs`, `events.ts`, `server.ts`, `readme.txt`, `index.html`,
+`app.js`, the old `package.json`, lock, and `tsconfig.json`. The old README's architecture note was
+right about what survives a port and right that the canvas gauge is the one thing to replace; Recharts
+replaced it. Next 16.3.5, React 19.2.8, Recharts 3.10.1, Node 22.
+
+**The proxy is the design, not a CORS workaround.** `POST /ops/gate` needs the bearer token, and a
+token in browser JavaScript is a token in every visitor's dev tools. `web/lib/proxy.ts` forwards every
+`/api/ops/*` call server-side with `OPS_API_URL` and `OPS_API_TOKEN` from the window's own environment,
+attaches the token only on the POST, forwards `X-Request-ID` or mints one and echoes the API's back,
+forwards `Last-Event-ID`, and pipes bodies as streams so the SSE stream is never buffered. An
+unreachable API is a 502 in the same `{error}` envelope. `API_CORS_ORIGINS` is moot: same origin.
+
+**Two charts, not a dual axis.** Tokens and dollars are different measures and never share a scale, so
+the gauge is input and output tokens per tick on one chart and `cost_usd` per tick on a second beneath
+it, one x-axis, one point per tick row from the stream. The two series colours are the old UI's
+`--sent` and `--full`, run through a palette validator before use (both pass on the white surface).
+
+**The window's own gate.** `npx tsc --noEmit`, `npm run lint` (`eslint-config-next`), `npm run build`.
+Three problems on the first run, all fixed before the first browser load: the template's `LayoutProps`
+is a global type Next generates during a build, so `tsc` alone cannot see it (the layout types its own
+props now), and the React Compiler lint rule refused two `setState`-shaped calls inside effects (the
+first load now rides on the stream's `open` or its first `error`, and a filter change calls the loader
+directly). All three commands went into the root `CLAUDE.md` Commands block and were re-run at the close.
+
+### The live run, three processes and a browser, test ledger, 2026-09-11
+
+`SW_OPS_TARGET=test LOG_DIR=logs/m9-close TICK_INTERVAL_SECONDS=20 python main.py --no-spend` and
+`SW_OPS_TARGET=test LOG_DIR=logs/m9-close python main.py --api` as two processes, `next dev` on 3000
+with `web/.env.local` holding the API URL and one secret, three pauses planted through `propose()` from
+a third process. Then, in the browser:
+
+| | audit id | tool | decision | result | to decision |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `a8012fd5…` | `add_care_note` (not one of the 19) | approve | `transport_McpUnavailableError`: `Tool add_care_note not found` | 489,696 ms |
+| 2 | `3839d1a1…` | `restock_feed` (real) | reject, reason typed in the box | `not_executed` | 516,837 ms |
+| 1 again | `a8012fd5…` | | approve | **409** `GATE_ALREADY_DECIDED`, rendered as a sentence naming the earlier decision, the code, the status, and the request id | |
+| 3 | `ceefaefe…` | `add_care_note` | approve | `transport_McpUnavailableError` | 14,611 ms |
+
+`decided_by` was `scooter` on all three, from the token and never from the body. The pending rows
+disappeared from the panel on the refresh the decision triggered, the gate rail flipped from
+`1 write waiting on a human` to `no writes waiting` without a reload, and `sw_ops_test.audit_receipts`
+held both rows for every id. `logs/m9-close/audit.jsonl` held both halves for the third under one id;
+the first two had only their `decided` lines there, because the planting script skipped
+`configure_logging` and its `proposed` lines reached only the console. That is cookbook #33 biting the
+harness, not the system, and the third plant was the fix. Every route went through the proxy: the
+network log shows `/api/ops/stream` open once, then `/api/ops/incidents`, `/api/ops/report`,
+`/api/ops/gate` on every tick and the gate every 20s, and no request from the browser to port 8000.
+
+**The approve is real, and the phase almost proved it the wrong way.** The gate has no belt of its own,
+by design: a human's yes is the belt for agent writes, and `CHAOS_ALLOW_WRITES` is a different actor's
+switch. So approving the planted `restock_feed` from a browser tab would have restocked a real feed bin.
+The plan avoided it by luck (the first plant used a made-up tool name); the recipe now says it as a rule
+(`docs/STATE.md`, cookbook #47), the window asks once before sending an approve, and the misleading
+`transport_*` label on a missing tool is `docs/issues.md` #22, left in the Python gate on purpose.
+
+**An orphan on the test ledger.** The gauge's x-axis interleaved two runs: this phase's, and run
+`4d7cb8db15cb`, a `--no-spend` loop and an `--api` started at 14:33 local, thirty minutes before this
+session, at a 20s cadence on `sw_ops_test`. That profile is the M8 close's live check, never killed. It
+spent nothing and hit the live ranch every 20s for nobody, and it would have had its ledger dropped by
+`pytest`. Killed at Scott's go (he did not recognise it either), 114 ticks in. Written down so the next
+session checks for stray `main.py` processes before it plants anything.
+
+### What diverged from the plan
+
+| Planned | Happened | Why |
+| --- | --- | --- |
+| a ranch map from the catalog, "no new backend work" | a placeholder that says why, and #21 with the DDL for a catalog snapshot | the catalog is the ranch, and neither the API nor a browser calls it |
+| rails from violation counts on the work orders | eight chips off the latest tick line plus the pending count from `/ops/gate` | the API carries no work orders; the line carries counts |
+| Vercel, "three ticks land without a refresh at the Vercel URL" | `next dev` on this machine, ticks and three decisions landing without a refresh; Vercel is #23 | Vercel cannot reach `127.0.0.1`; where the API lives is #5 |
+| the token gauge as one chart | two charts on one x-axis | tokens and dollars never share a scale |
+| scaffold into an empty `web/` | scaffold into a temp directory and copy over the untouched commit | `create-next-app` refuses a non-empty directory, and renaming the old tree would snap `style.css`'s history |
+| approve from the browser | approve on a tool the ranch does not have; reject on the real one; a confirm on approve | an approve performs the write on the deployed ranch |
+
+### Defects the phase caught in itself
+
+1. **Feed rows keyed on incident key plus run collided.** A key legitimately resolves and reopens
+   inside one run, so the ledger holds two rows for it; React warned on 145 of 500. Rows key on the row
+   id now.
+2. **The gate rail read `writes_pending` off the tick line**, which is null on a tick that proposed
+   nothing, and said "no writes waiting" beside two pauses. It reads the pending count from
+   `GET /ops/gate` now. Cookbook #48.
+3. **`LayoutProps` is not visible to `tsc` without a build.** A gate that only passes after `next build`
+   has run is a gate with an order dependency; the layout types its props itself.
+4. **Two effects called `setState`-shaped loaders synchronously** and the React Compiler rule refused
+   them. The first load rides on the stream's `open` / first `error`; filters call the loader directly.
+5. **Source through a shell heredoc failed again, three times**: a batch of five files died on an
+   unmatched quote and wrote nothing, a `\n` inside a template literal came out as a real newline, and
+   this entry itself would not go through one. Cookbook #46. The Write tool wrote the files.
+6. **The planting script skipped `configure_logging`**, so two `proposed` audit lines reached only the
+   console. Cookbook #33, on the harness this time.
+7. **`add_care_note` came back as an MCP outage.** Not the window's defect and not fixed this phase;
+   `docs/issues.md` #22.
+
+### Work not asked for, and why each one is here
+
+| Added | Why it was not optional |
+| --- | --- |
+| a confirm on approve, naming the tool and args | the one click on the page that performs a write on the deployed ranch |
+| "answered this session" cards that keep their buttons | the only way a human can produce the 409 the brief asked to see rendered |
+| the gate list polling every 20s beside the stream | a decision made at the CLI does not land a tick, and the panel would lie until the next one |
+| 502 `API_UNREACHABLE` and 503 `WINDOW_NOT_CONFIGURED` in the API's own envelope | one error shape for the client to render; a dead API is a sentence in every panel, not a blank page |
+| a 404 at the proxy for any `/api/ops/*` path the API does not have | the proxy is not a general forwarder; an unknown path is never a probe upstream |
+| `docs/issues.md` #21 with the full DDL | the map's source is a migration, and a migration is a yes, not a drive-by |
+| the cookbook re-sectioned by pain with stable numbers and an index | the M9 brief; stable numbers because every `#N` in this file and `issues.md` has to keep meaning what it meant |
+| killing two orphaned `main.py` processes | they blocked `pytest` and hit the live ranch every 20s for nobody; Scott's go |
+
+### The M phases, closed
+
+M0 through M9 are landed, in the order `git log` says rather than the order the numbers say (M5 before
+M3's close, the debounce between M4 and M6, M7A inserted before M8). Every phase closed with the same
+four steps, and this file was written at every boundary, so this final pass is a read for consistency
+and not a reconstruction. What a session picks up next is in `docs/STATE.md`'s Next row: #12 and the
+cascade re-measure, the M7A four (#16 to #19), and the decisions waiting on Scott (#5 to #8, #21).
+FUTURE-1, dockerizing, stays deferred until #5 lands on a host that wants a container.
