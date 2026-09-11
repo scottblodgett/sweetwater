@@ -75,7 +75,7 @@ before it opens; until then the row is `pending`: live in the ledger, covered by
 index and the unread guard, but never routed, paged, or billed. A pending row that reads clean is
 `dismissed`, never `resolved`, because nothing was alarmed. Unread is not read-clean, for pending
 exactly as for opened. The seven permanently-bad sensors and every chaos scenario (minimum TTL
-two ticks) still open on their second sweep. Migration `0003`, `docs/STATE.md` decision 6.
+two ticks) still open on their second sweep. Migration `0003`, `docs/state.md` decision 6.
 
 **Every read failing is the Sensor API being down, and it fails the sweep.** One dark sensor is
 a per-sensor `SweepError` and the sweep carries on; all of them dark is an outage, and without
@@ -141,30 +141,16 @@ events are in the observed set from M7A, through the herd sweep.
 
 Two different questions share a word here. `escalate` / `escalate_reason` on the `WorkOrder` is the
 **model** saying a human above the crew should know. Escalation between **tiers** is `routing.tier_for`
-(before the call) and `routing.escalation_reason` (after it), inside `workers.judge_packet`, built at M7. Per incident, escalate to Tier 2 when **any** holds, and the reason
-lands on the order as `escalation` and on the tick line in `escalation_reasons`:
+(before the call) and `routing.escalation_reason` (after it), inside `workers.judge_packet`. The predicate
+itself (critical before the call; a blocking rail, `insufficient_information`, a proposed write, or no answer
+after it) is `docs/model-routing.md`'s and `docs/state.md` decisions 28 and 29. What this module has to get right:
 
-- `triage.py` marked the incident **critical** (the one pre-call condition; Tier 1 is never asked)
-- the Tier-1 order failed a **blocking rail** (`rejected`)
-- the Tier-1 judge returned **`insufficient_information`**, a schema field it may set on purpose
-- the Tier-1 order **proposed a write** (only a Tier-2 proposal may reach the gate)
-- Tier 1 **never answered** (`no_answer`: transport or truncation; Opus is standing right there)
-
-Escalation is a **rewrite from the identical page**, never a review and never a retry at the same
-tier. Opus's order is stored with the Tier-1 attempt on it as `tier1_*`; a Tier-2 rejection is
-stored as rejected, as it always was.
-
-**"Two or more sensing worlds" is not on this list, and the plan had it there.** It says nothing
-about what one packet contains, and per incident it would send every order on every storm tick to
-Opus. What it decides is whether the tick needs someone reading across the ranch, which is
-`synthesize` at `FUSION_THRESHOLD`, already Tier 2. One constant, one meaning
-(`docs/STATE.md` decision 28).
-
-**The rail: a Tier-1 model may never produce an all-clear.** Code already flagged the
-incident, so "nothing is wrong here" from the cheap judge is a contradiction, not a
-finding. `all_clear` rejects it and the rejection escalates. Do not relax this to make a test pass.
-The cascade ships **off** (`TIER1_ENABLED=0`) after the M7 measurement; the predicate is live code
-either way and every path has a planted test.
+- Escalation is a **rewrite from the identical page**, never a review and never a retry at the same tier.
+  Opus's order is stored with the Tier-1 attempt on it as `tier1_*`; a Tier-2 rejection is stored as rejected.
+- **A Tier-1 model may never produce an all-clear.** Code already flagged the incident, so `all_clear` rejects it
+  and the rejection escalates. Do not relax this to make a test pass.
+- The cascade ships **off** (`TIER1_ENABLED=0`); the predicate is live code either way and every path has a
+  planted test.
 
 ## The five rails on a work order, and what each one reads
 
@@ -223,9 +209,8 @@ contract between a sub-agent and the supervisor:** a sub-agent inherits nothing 
 inherits nothing back, so anything the supervisor needs must be written in the order rather than
 assumed to be in shared context. `render_shift_page` is the whole of what it gets.
 
-That claim is not asserted, it is measured. `docs/transcripts/no-brief-transcript.md` and
-`docs/transcripts/with-brief-transcript.md` are the same model on the same packet with one brief removed, and
-the unbriefed answer passes every rail while naming no neighbour at all.
+That claim is measured, not asserted: the no-brief pair in `docs/transcripts/`, and what the rails cannot see
+about it, is `tests/CLAUDE.md`, "The two things a rail cannot see".
 
 `WorkOrder` is split down the middle on purpose: everything above `status` is the model's
 prose, everything from `status` down is code's verdict on it, and `severity` is triage's

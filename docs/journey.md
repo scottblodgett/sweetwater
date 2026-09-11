@@ -5,7 +5,7 @@ than reconstructed at the end, because a reconstruction only records the decisio
 worked.
 
 File names are as they were at the time. In the post-M9 review (2026-09-11) `docs/architecture.md` and
-`docs/logging.md` were folded into `docs/Plan.md`, `docs/issues.md` became `docs/open-issues.md` (issue numbers
+`docs/logging.md` were folded into `docs/plan.md`, `docs/issues.md` became `docs/open-issues.md` (issue numbers
 unchanged), the three transcripts moved to `docs/transcripts/`, and the per-phase defect lists below were trimmed
 to one line each where `docs/cookbook.md` holds the full entry.
 
@@ -110,12 +110,12 @@ else; the defect needed a second library in the process to exist. Cookbook #7.
 
 Writing the triage thresholds, the fastest route looked like reading the deployed Sensor API's generator in
 `C:\temp\MCP-Farm`. Did it, then retracted it: a constant lifted out of another service is a value nothing here
-can verify. Thresholds derive from `docs/sweetwater-ranch.md` and the observed distributions in `docs/STATE.md`.
-Cookbook #5, and the rule is sharpened in root `CLAUDE.md` and `docs/STATE.md`.
+can verify. Thresholds derive from `docs/sweetwater-ranch.md` and the observed distributions in `docs/state.md`.
+Cookbook #5, and the rule is sharpened in root `CLAUDE.md` and `docs/state.md`.
 
 ### The defect this phase caught in itself: the tree stopped matching the plan
 
-Found at the boundary, when Scott asked whether `docs/Plan.md` still described the repo. It did not, in four
+Found at the boundary, when Scott asked whether `docs/plan.md` still described the repo. It did not, in four
 ways, none of which any test could see:
 
 | Plan says | M1 shipped |
@@ -125,7 +125,7 @@ ways, none of which any test could see:
 | three test modules | seven |
 | eleven named leaves exist | absent, including the whole of `src/prompts/` |
 
-The `routing.py` one was the live grenade: `docs/Plan.md` also names `src/models/routing.py` for a different
+The `routing.py` one was the live grenade: `docs/plan.md` also names `src/models/routing.py` for a different
 question (which model **tier**, not which **agent**), and two modules with one name doing unrelated work is a
 mis-import that type-checks. Fixed both ways: `git mv` to conform the code (the seven-into-two test merge
 verified by diffing the sorted set of collected test names, 89 before and 89 after), eleven docstring-only
@@ -135,7 +135,7 @@ tree. Cookbook #9.
 ### And the process defect underneath it
 
 **M1's first commit did step 1 of the phase-close ritual and skipped step 2 entirely.** No
-`STATE.md`, no `JOURNEY.md`, no `cookbook.md`. So for one commit the session-start briefing
+`state.md`, no `journey.md`, no `cookbook.md`. So for one commit the session-start briefing
 told the next session that HEAD was `ab4d2ff`, that M1 was "not started," and that a
 cookbook entry it had promised was still coming.
 
@@ -193,7 +193,7 @@ but `east-allotment-water` cited only `WATER-02`. Worth watching, not a defect.
 
 ### Divergence: the credential is Bedrock, not first-party Anthropic
 
-`ANTHROPIC_API_KEY` was empty and `docs/STATE.md` called it a hard M2 blocker. It was not
+`ANTHROPIC_API_KEY` was empty and `docs/state.md` called it a hard M2 blocker. It was not
 one: this session authenticates to Bedrock (`us-east-1`, `us.anthropic.claude-opus-5`), so
 `resolve_provider()` picks first-party when a key exists and Bedrock otherwise, scoping the
 model id on the Bedrock path only so `TIER2_MODEL` stays one setting for both.
@@ -213,7 +213,7 @@ dependency it is.
 
 ### Divergence: `src/agent/workers.py` is new to the plan's tree
 
-`docs/Plan.md` had `agent.py` carrying the routing table **and** the worker factories. M2 split
+`docs/plan.md` had `agent.py` carrying the routing table **and** the worker factories. M2 split
 the second half into `workers.py`, because the two answer different questions: `agent.py` says
 which agent owns a category, `workers.py` says what an agent's answer must satisfy. Folding the
 rails, the checker, and the fan-out into a 113-line routing table reproduces the exact confusion
@@ -316,26 +316,12 @@ handshake and not in `pytest`, because `pytest` has to pass on a plane.
 
 ### The number that came before `asyncio.gather`
 
-Asked for and delivered before the fan-out was wired, then re-measured live at the boundary. Two
-`--once` runs against a ledger that had just been refilled:
-
-| | tick A | tick B |
-| --- | --- | --- |
-| newly-opened, so calls | 15 across 3 worlds | 14 across 3 worlds |
-| tick total tokens | 104,500 in / 15,308 out | 91,468 in / 15,545 out |
-| wall clock | 85 s | 96 s |
-| calls that failed a rail | 0 of 16 | 0 of 15 |
-
-At an assumed $15/M in and $75/M out that is **$2.72 and $2.54**. The rate is an assumption stated
-in one place, because the pricing table and `cost_usd` on the tick line are M7's and inventing them
-early would have put a number in the ledger nothing measured. **A calm tick is $0.00 exactly**, not
-approximately: zero newly-opened incidents is zero responder calls, and one world synthesizes in
-code. And the supervisor is about 13% of the bill for one call against fourteen, which makes it the
-cheapest thing in the tick per unit of value, because it is the only call that reads across worlds.
-
-Neither tick is a steady-state budget and `docs/model-routing.md` says so with the arithmetic
-attached: 288 ticks a day at tick B is roughly $730, and that figure is fiction. M4 runs unattended
-for 30 minutes and measures the real thing.
+Asked for and delivered before the fan-out was wired, then re-measured live at the boundary: two `--once` runs
+against a freshly refilled ledger, 15 and 14 newly-opened across three worlds each, 104,500 and 91,468 tokens in,
+85 and 96 seconds, zero rail failures. The tables and the arithmetic are the M3 rows in `docs/model-routing.md`.
+Two things worth saying here: **a calm tick is $0.00 exactly**, and the supervisor is about 13% of the bill for one
+call against fourteen, the cheapest thing in the tick per unit of value because it is the only call that reads
+across worlds. Neither tick is a steady-state budget; M4 measures that.
 
 ### The experiment disagreed with its own hypothesis, which is why it was worth running
 
@@ -363,7 +349,7 @@ brief says which part is yours. Cookbook #22.
 **`agent_prompts.py` is a new module, and `MANDATES` moved out of `system_prompts.py`.** M2 put the
 one brief it needed beside the schemas. Four briefs plus a supervisor's is a different thing from a
 schema, and `system_prompts.py` keeps what a machine consumes while `agent_prompts.py` keeps what a
-model reads. `docs/STATE.md` said the mandates lived in `system_prompts.py`; that line is now
+model reads. `docs/state.md` said the mandates lived in `system_prompts.py`; that line is now
 corrected rather than left to be discovered.
 
 **Four briefs, not five.** Chaos's brief arrives with chaos. It is not a responder, it is never a
@@ -378,7 +364,7 @@ anything the supervisor needs has to be *in* the order rather than assumed to be
 
 **`herd_health` was handed nothing on both live ticks and logged nothing about it.** It cannot read
 a sensor, so no sensor incident can route to it, and it stays idle until chaos writes real animal
-events. That is `docs/STATE.md` decision 5 working, so it is not warned about: a line per tick per
+events. That is `docs/state.md` decision 5 working, so it is not warned about: a line per tick per
 idle agent trains everyone to ignore the log.
 
 ### The gate
@@ -391,11 +377,11 @@ verification, in five parts:
 | `--handshake` | 19 tools, 160 sensors, 32 locations, 13 types, and the deployed list matches `DEPLOYED_TOOLS` exactly |
 | `--once`, tick A | 15 packets across 3 worlds, 16/16 shipped, and the truncated supervisor found |
 | `--once`, tick B after both fixes | 14 packets, 15/15 shipped, `shift_report=model`, `shift_report_violations=[]` |
-| the cross-domain fusion the phase was supposed to prove | 3 worlds in one tick, both runs, so the storm front arrived for free exactly as `docs/STATE.md` predicted and the supervisor fused it rather than concatenating two unrelated pages |
+| the cross-domain fusion the phase was supposed to prove | 3 worlds in one tick, both runs, so the storm front arrived for free exactly as `docs/state.md` predicted and the supervisor fused it rather than concatenating two unrelated pages |
 | bare `python main.py` and `--api` | exit 3, naming M4 and M8 |
 
 The chaos CLI's read-only commands (`status`, `plan --ticks 3`) were re-run too, since they are
-in `docs/STATE.md` and this repo's rule is that a documented command is a command that gets run.
+in `docs/state.md` and this repo's rule is that a documented command is a command that gets run.
 
 ### Step 2 found two doc defects, and one of them is the interesting kind
 
@@ -627,7 +613,7 @@ That run also found a defect in the other phase's code: the supervisor's shift r
 **truncated at `max_tokens=1024`** and fell back to `shift_report=code`. `docs/logging.md`
 describes that exact signature as a config bug rather than a weak model, which is why it took
 one line to spot. It is in the other session's file, so it is reported and recorded in
-`docs/STATE.md`'s owed row rather than fixed here. Fixing another session's file quietly is
+`docs/state.md`'s owed row rather than fixed here. Fixing another session's file quietly is
 how a parallel build turns into a merge nobody can review.
 
 ---
@@ -726,21 +712,11 @@ repointed mid-run; killing the proxy is the upstream dying (`docs/cookbook.md` #
 ### The paid run: two ticks, then the ceiling did its job
 
 Run `f1376b4e8bbc`, prod ledger, `CHAOS_ENABLED=0` set explicitly (see defect 2), cadence 120s,
-`SPEND_CEILING_USD=3.00` so the halt would be exercised for real if the ranch was busy. It was.
-
-| | tick 1 | tick 2 |
-| --- | --- | --- |
-| newly-opened, so calls | 12 across 3 worlds | 14 across 2 worlds |
-| responder tokens in / out | 72,692 / 10,523 | 82,086 / 13,060 |
-| shift report | `model`, fused | `model`, fused |
-| `cost_usd` | **2.16** | **2.54** |
-| wall clock | 80s | 90s |
-| rail failures | 0 of 13 | 0 of 15 |
-
-**26 work orders, 26 shipped, 0 rejected, 0 no-answer, 0 held.** After tick 2 the run stood at
-**$4.70 against a $3.00 ceiling**, `loop_halted` was written with `reason=spend_ceiling`, and the
-process **exited 4** on its own before a third tick started. The overshoot is the one tick the
-design allows. Full numbers and the steady-state finding: `docs/model-routing.md`.
+`SPEND_CEILING_USD=3.00` so the halt would be exercised for real if the ranch was busy. It was: 12 then 14
+newly-opened, 26 work orders, 26 shipped, 0 rejected, 0 no-answer, 0 held, both reports fused. After tick 2 the
+run stood at **$4.70 against a $3.00 ceiling**, `loop_halted` was written with `reason=spend_ceiling`, and the
+process **exited 4** on its own before a third tick started. The overshoot is the one tick the design allows. The
+table and the steady-state finding it overturned: the M4 rows in `docs/model-routing.md`.
 
 ### Divergences from the plan
 
@@ -858,21 +834,13 @@ themselves, `text` not graded because a `reason` cannot be on the page verbatim.
 
 ### The spike, and what it measured
 
-Sixty lines against `sw_ops_test` before `gate.py` existed (`docs/cookbook.md` #34). The pause
-survives a new connection. `config["metadata"]` reaches the checkpoint row, so a filter finds gate
-threads, but only on the run that passed it, so the resume passes it too. A resume on a finished
-thread is a silent no-op that returns the final state, which is why `decide()` checks for a live
-interrupt itself and refuses by name. An unknown thread is empty `values`. And **the node runs
-twice**: everything above `interrupt()` re-executes on resume, so the `proposed` line is written
-outside the graph (#29).
-
-Two platform facts the spike also paid for. `AsyncPostgresSaver` refuses Windows' default event
-loop, so the checkpointer is the sync saver in a worker thread behind one lock
-(`memory.ThreadedPostgresSaver`, #30), and the sync saver's own async methods raise
-`NotImplementedError`. And `setup()` would create the checkpointer's tables silently on whichever
-database the loop was pointed at, which decision 1 forbids, so migration `0004` runs the library's
-own `MIGRATIONS` list through alembic and `memory.checkpointer()` refuses a database behind the
-installed library (#31).
+Sixty lines against `sw_ops_test` before `gate.py` existed answered five questions about the checkpointer in one
+run (cookbook #34): the pause survives a new connection; the metadata filter finds only the run that passed it;
+a resume on a finished thread is a silent no-op, so `decide()` checks for a live interrupt itself; an unknown
+thread is empty `values`; and the node runs twice, so the `proposed` line is written outside the graph (#29).
+Two platform facts came with it: `AsyncPostgresSaver` refuses Windows' default event loop, so the checkpointer is
+the sync saver in a thread (#30), and `setup()` would create tables on prod silently, so migration `0004` runs
+the library's own DDL through alembic and `memory.checkpointer()` refuses a database behind the library (#31).
 
 ### The rails, in the order they were written
 
@@ -996,7 +964,7 @@ rows were rewritten before any code.
 **The design conversation changed the predicate.** Scott worked it from the readings up: code owns
 detection, code owns the page, the model writes; where can a cheaper model still miss? Not in
 finding, which is code's, but in reading the page thinly and in the cross-world pattern, which only
-the shift report sees. Two consequences, both decisions now (`docs/STATE.md` 28 and 29): "two or
+the shift report sees. Two consequences, both decisions now (`docs/state.md` 28 and 29): "two or
 more worlds" gates fusion only and is not a per-incident trigger; and escalation is a rewrite from
 the identical page, triggered after the call by a rail rejection, `insufficient_information`, a
 proposed write, or no answer, and before it only by critical.
@@ -1068,7 +1036,7 @@ so, and it names the change that would earn the next attempt: the forecast on th
 
 ## M7A - The herd sweep, the coyote gap
 
-**What was planned.** The M7A paragraph in `docs/Plan.md`: a second free sweep off the Farm and Care
+**What was planned.** The M7A paragraph in `docs/plan.md`: a second free sweep off the Farm and Care
 APIs, animal categories in triage, migration `0006`, `knowledge_base/herd.md`, `herd_health` handed
 its first real work, and one paid run that closes `docs/open-issues.md` #1, #2, #11, and #15. Two wire facts
 to read first: the herd count, and whether observations list ranch-wide.
@@ -1183,7 +1151,7 @@ made real. 407 tests, ruff and mypy clean.
 
 ## M8 - The read API
 
-**What was planned.** `docs/Plan.md`'s M8 paragraph and `src/api/CLAUDE.md`: FastAPI, five routes
+**What was planned.** `docs/plan.md`'s M8 paragraph and `src/api/CLAUDE.md`: FastAPI, five routes
 (`/health`, `/ops/incidents`, `/ops/report`, `/ops/stream`, `/ops/gate`), the ranch's `{data, meta}`
 envelope and error shape, `X-Request-ID` on every request, and the one rule that decides everything
 else: the API never calls the ranch and never calls a model, it reads `sw_ops`. Scott's brief added two
@@ -1227,7 +1195,7 @@ rail, on pytest-asyncio's second loop, had its generator cancelled mid-query. `t
 twenty lines on `StreamingResponse` with a ping comment from the poll loop. Cookbook #43.
 
 **`app.py` folded into `routes.py`.** The factory, the middleware and the handlers were first written as
-`src/api/app.py`. `docs/Plan.md` names `routes.py` and `schemas.py`, and the tree matches the plan, so
+`src/api/app.py`. `docs/plan.md` names `routes.py` and `schemas.py`, and the tree matches the plan, so
 the factory moved to the bottom of `routes.py` and the file was deleted before the commit.
 
 ### The live run, two processes on this machine, test ledger, 2026-09-11
@@ -1316,7 +1284,7 @@ performs a real write on the ranch, and the rail proves it with an injected perf
 
 ## M9 - The window, the last M phase
 
-**What was planned.** `docs/Plan.md`'s M9 paragraph and Scott's brief: Next.js App Router against
+**What was planned.** `docs/plan.md`'s M9 paragraph and Scott's brief: Next.js App Router against
 `/ops/*`, light mode, the panel set lifted from `agent-lab-ui` (moved into this repo as `web/` and
 committed untouched first, so every later diff reads as the port), the token never reaching the browser,
 the gate verified from a browser on a planted pause, a three-command gate of its own, and the doc close
@@ -1342,7 +1310,7 @@ zero and is not is a rail that fired. So the rails are eight chips read off the 
 the pending count from `GET /ops/gate`, and the API was not bent to fit a panel.
 
 **The first commit was `web/` as it sat.** Twelve files from `agent-lab-ui`, byte for byte, with
-`.gitignore` gaining `web/node_modules/`, `web/.next/`, `web/.env*.local`, and `docs/Plan.md`'s tree and
+`.gitignore` gaining `web/node_modules/`, `web/.next/`, `web/.env*.local`, and `docs/plan.md`'s tree and
 Structure row gaining `web/`. Scott offered to rename it `old-web/` so the scaffold could land clean;
 declined, because then git sees a delete and a create and the history of `style.css` snaps. The
 scaffold (`create-next-app`, TypeScript, ESLint, App Router, no Tailwind, no `src/`) went into a temp
@@ -1395,12 +1363,10 @@ harness, not the system, and the third plant was the fix. Every route went throu
 network log shows `/api/ops/stream` open once, then `/api/ops/incidents`, `/api/ops/report`,
 `/api/ops/gate` on every tick and the gate every 20s, and no request from the browser to port 8000.
 
-**The approve is real, and the phase almost proved it the wrong way.** The gate has no belt of its own,
-by design: a human's yes is the belt for agent writes, and `CHAOS_ALLOW_WRITES` is a different actor's
-switch. So approving the planted `restock_feed` from a browser tab would have restocked a real feed bin.
-The plan avoided it by luck (the first plant used a made-up tool name); the recipe now says it as a rule
-(`docs/STATE.md`, cookbook #47), the window asks once before sending an approve, and the misleading
-`transport_*` label on a missing tool is `docs/open-issues.md` #22, left in the Python gate on purpose.
+**The approve is real, and the phase almost proved it the wrong way.** Approving the planted `restock_feed` from a
+browser tab would have restocked a real feed bin; the first plant used a made-up tool name by luck. The rule is
+cookbook #47 and the demo recipe in `docs/state.md`; the misleading `transport_*` label on a missing tool is
+`docs/open-issues.md` #22.
 
 **An orphan on the test ledger.** The gauge's x-axis interleaved two runs: this phase's, and run
 `4d7cb8db15cb`, a `--no-spend` loop and an `--api` started at 14:33 local, thirty minutes before this
@@ -1458,6 +1424,6 @@ session checks for stray `main.py` processes before it plants anything.
 M0 through M9 are landed, in the order `git log` says rather than the order the numbers say (M5 before
 M3's close, the debounce between M4 and M6, M7A inserted before M8). Every phase closed with the same
 four steps, and this file was written at every boundary, so this final pass is a read for consistency
-and not a reconstruction. What a session picks up next is in `docs/STATE.md`'s Next row: #12 and the
+and not a reconstruction. What a session picks up next is in `docs/state.md`'s Next row: #12 and the
 cascade re-measure, the M7A four (#16 to #19), and the decisions waiting on Scott (#5 to #8, #21).
 FUTURE-1, dockerizing, stays deferred until #5 lands on a host that wants a container.

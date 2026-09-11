@@ -145,13 +145,13 @@ Fan-out does not change the per-call cost, it changes how many calls a tick make
 | calls that failed a rail | 0 of 16 | 0 of 15 |
 
 **Tokens are the measurement here; dollars are arithmetic on top of it.** The pricing table lands
-at M7 and `cost_usd` joins the tick line with it (`docs/Plan.md`), so until then any figure below
+at M7 and `cost_usd` joins the tick line with it (`docs/plan.md`), so until then any figure below
 is a rate times a token count and the rate is an assumption, stated so it can be corrected in one
 place. At **$15/M in and $75/M out**, tick A is **$2.72** and tick B **$2.54**.
 
 **The assumption was wrong by 3x, found at M7.** Claude Opus 5 lists at **$5/M in and $25/M out**
-on the first-party API. Every dollar figure from M2 through M6 in this file, `STATE.md`, and
-`JOURNEY.md` is three times the real bill: the "$0.16 per work order" is about **$0.05**, and the
+on the first-party API. Every dollar figure from M2 through M6 in this file, `state.md`, and
+`journey.md` is three times the real bill: the "$0.16 per work order" is about **$0.05**, and the
 "$28 an hour" storm was about **$9**. The rows are left as written because the tokens in them are
 the measurement and the rate was one line. From M7 `cost_usd` is computed from
 `llm_client.PRICE_TABLE` per model; Bedrock's public pricing page did not render an Opus 5 row, so
@@ -192,7 +192,7 @@ ceiling**, exit 4, one tick of overshoot as designed.
 prod ledger was not freshly refilled; it had 25 live incidents from M3 and had churned for
 hours. Tick 1 still opened 12 and tick 2 opened 14, and the 30-minute free run at a 60s
 cadence opened **10 to 24 per tick, every tick, for 30 ticks.** The reason is in
-`docs/STATE.md`: the deployed Sensor API synthesizes a fresh reading on every call, unanchored
+`docs/state.md`: the deployed Sensor API synthesizes a fresh reading on every call, unanchored
 to the last one, so healthy sensors draw extreme values a fraction of the time and the ledger
 churns 10 to 20 opened and 10 to 20 resolved on every tick regardless of cadence. On this ranch
 **every tick is a storm tick.** At 300s that is roughly $2.30 x 12 = **$28 an hour, $670 a
@@ -223,11 +223,8 @@ failure still says it was a budget failure.**
 
 ## The Ollama traps
 
-See `src/models/CLAUDE.md` for the code-level versions. In short: `ChatOllama` not the
-OpenAI shim (the shim silently ignores `num_ctx`, which produced an entire investigation
-that looked like "small models are too weak" and was a 4,096-token default);
-`num_ctx` always explicit; `reasoning_effort` an explicit per-call argument, never an
-ambient env var; every actor built in `llm_client.py` and nowhere else.
+Code-level, in `src/models/CLAUDE.md`: `ChatOllama` not the OpenAI shim, `num_ctx` explicit, `reasoning_effort`
+a per-call argument, every actor built in `llm_client.py`, `finish_reason` logged against the healthy set.
 
 ## Measurement log
 
@@ -236,7 +233,7 @@ One row per job that moved tiers. No row, no move.
 | Date | Job | From | To | Evidence | Verdict |
 | --- | --- | --- | --- | --- | --- |
 | 2026-09-10 | evidence-packet judging **plus** work-order write, `water_feed` | - | Tier 2 | 3 live ticks, 19 work orders. 58,339 then 38,328 then 24,161 tokens as the ledger grew 25 to 65 rows. 19/19 shipped, 0 rejected, all `tool_use`. Rule citations discriminate: `WATER-05` on 12 of 19, but `east-allotment-water` cited only `WATER-02` | **baseline set.** The number to beat, not a decision |
-| 2026-09-10 | the same job across **four** responders, fanned out | - | Tier 2 | 2 live ticks, 29 work orders, 3 worlds each. 29/29 shipped, 0 rejected, 0 no-answer. Per-call cost unchanged from the row above, so fan-out multiplies calls and not price. `herd_health` was handed nothing on both ticks and logged nothing about it, which is `docs/STATE.md` decision 5 working | **baseline widened.** Still no move |
+| 2026-09-10 | the same job across **four** responders, fanned out | - | Tier 2 | 2 live ticks, 29 work orders, 3 worlds each. 29/29 shipped, 0 rejected, 0 no-answer. Per-call cost unchanged from the row above, so fan-out multiplies calls and not price. `herd_health` was handed nothing on both ticks and logged nothing about it, which is `docs/state.md` decision 5 working | **baseline widened.** Still no move |
 | 2026-09-10 | the free pass with the debounce (`INCIDENT_CONFIRM_SWEEPS = 2`, migration `0003`) | - | none | 3 free ticks on the prod ledger right after the migration: would-have-opened 14 / 17 / 21, actually opened **0 / 2 / 1**, dismissed 0 / 12 / 16. Nothing a model was asked about changed; what changed is how many times it is asked | **not a tier move, a count move.** Roughly $2.30 a tick to roughly $0.20 to $0.40 at the same per-call price. M7 now optimizes the price of a real incident, not the price of a dice roll |
 | 2026-09-10 | the whole tick, in the loop, unattended | - | Tier 2 | 2 paid ticks on the prod ledger at 120s cadence: 12 then 14 newly-opened, $2.16 then $2.54, 26/26 shipped, fused both times, halted at the $3 ceiling with exit 4. 30 free ticks at 60s cadence opened 10 to 24 each. Steady state on this ranch is a storm every tick, not a handful | **no move.** The bill is now measured; the lever is a debounce or M7, not a cheaper tick |
 | 2026-09-10 | shift-report synthesis, the supervisor | - | Tier 2 | 1 call per tick, gated at `FUSION_THRESHOLD = 2` worlds, so most ticks make none. 14,093 in / 1,646 out on a 14-order page, `tool_use`, 0 violations. The design table above puts "shift-report assembly" in Tier 1; that is still the intent, and it is not this job. Assembly in code is what a calm tick already does for free | **not moved, and the table's Tier-1 row is about `assemble_shift_report`, not about fusion** |
@@ -281,7 +278,7 @@ the test ledger, so nothing a demo reads from was touched:
    where the SOP names a fact the packet does not carry, and on this ranch that is most packets.
 3. **Where the local prose was thinner, it was thinner about the neighbour and the herd.** Both
    are on the page, both are what a rancher reads the order for, and the rails cannot see either
-   (`docs/STATE.md`, the no-brief finding). Opus named the degraded tank probe beside the open gate,
+   (`docs/state.md`, the no-brief finding). Opus named the degraded tank probe beside the open gate,
    the empty bin beside the low one, and 111 head on every page that had them. The local model
    named the bin and not the other two, and the head count once in four.
 

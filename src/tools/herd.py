@@ -6,7 +6,7 @@ by chaos was invisible to the monitor. This is the discovery path. It goes direc
 `sensors.py`, for the same reason: there is no judgment in "is this animal's status `deceased`",
 so there is no reason to pay a tool call for it.
 
-**The shape was decided by two wire facts, both read on 2026-09-11 and both in `docs/STATE.md`.**
+**The shape was decided by two wire facts, both read on 2026-09-11 and both in `docs/state.md`.**
 
   * **The herd is 1,195 head and `GET /animals` runs at roughly 90 ms a row.** `limit=100` takes
     9s, `limit=200` 17s, and `limit=500` hits the API Gateway 30-second wall and comes back 503

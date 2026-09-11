@@ -634,7 +634,7 @@ def assert_checkpointer_migrated(conn: Connection[Any]) -> None:
     """Refuse a database whose checkpointer tables are missing or behind the installed library.
 
     The alternative is `saver.setup()`, which would create or upgrade the tables silently on
-    whichever database the process is pointed at. Decision 1 in `docs/STATE.md` says a Supabase
+    whichever database the process is pointed at. Decision 1 in `docs/state.md` says a Supabase
     migration is an alembic revision Scott has seen. So migration 0004 runs the library's own
     DDL, and this check is what turns a newer library into an error naming the next revision
     rather than an unreviewed schema change on prod.

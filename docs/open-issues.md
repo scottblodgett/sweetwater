@@ -10,7 +10,7 @@ Each issue has four parts: what is wrong, why it matters, what it would take, an
 session" means the work is scoped and anyone picking up the repo can do it. "Nobody yet" means there is a
 fork in the road and no one has chosen.
 
-Numbers are stable. `#12` here is the same `#12` that `docs/JOURNEY.md` and `docs/cookbook.md` refer to.
+Numbers are stable. `#12` here is the same `#12` that `docs/journey.md` and `docs/cookbook.md` refer to.
 New items in this review start at #24.
 
 ---
@@ -348,7 +348,7 @@ twenty findings a tick, why the debounce exists, and why the evidence page label
 trend only. Three more, all on the Farm and Care APIs: the `status` filter on the animal list cannot find
 a non-active animal; the animal list fails with HTTP 500 when more than six pages are requested at once;
 and marking an animal deceased clears her pasture. Every one is worked around in code and recorded in
-`docs/STATE.md`. None is a bug we can file, and every future measurement has to be read knowing them.
+`docs/state.md`. None is a bug we can file, and every future measurement has to be read knowing them.
 
 ### 19. Care task titles carry em dashes
 
@@ -364,11 +364,11 @@ stays there.
 ### 24. The docs were written incrementally and there were too many of them
 
 **What was wrong.** About 6,950 lines across 19 markdown files, every one written at a phase boundary and
-never read across. `Plan.md` and `architecture.md` both carried the diagram, the tier table, and the
-milestone list. `STATE.md` was 544 lines and is the file every session is told to read in full before
-doing anything, so its length was a per-session cost, not a one-time one. `JOURNEY.md` was 1,671 lines
+never read across. `plan.md` and `architecture.md` both carried the diagram, the tier table, and the
+milestone list. `state.md` was 544 lines and is the file every session is told to read in full before
+doing anything, so its length was a per-session cost, not a one-time one. `journey.md` was 1,671 lines
 and `cookbook.md` 1,199. Three transcript files sat in `docs/` beside the design docs, and an empty
-`docs/decisions/` folder promised ADRs that were written into `STATE.md` instead.
+`docs/decisions/` folder promised ADRs that were written into `state.md` instead.
 
 **Why it mattered.** A new session spent its first ten minutes reading, and read the same fact in three
 places, sometimes in three versions. When two copies disagree, a reader cannot tell which one the code
@@ -381,39 +381,55 @@ deleted without its content landing somewhere; git history holds every original.
 | File | Before | Where the content went | After |
 | --- | --- | --- | --- |
 | `README.md` | 126 | kept: how to run it. Docs table rewritten for the new set | 127 |
-| `CLAUDE.md` (root) | 215 | kept: what this is, the one rule, the ritual, the commands, the signposts. The seven explanatory paragraphs moved to the nested files and `STATE.md` where they already lived (#25) | 104 |
+| `CLAUDE.md` (root) | 215 | kept: what this is, the one rule, the ritual, the commands, the signposts. The seven explanatory paragraphs moved to the nested files and `state.md` where they already lived (#25) | 104 |
 | `src/agent/CLAUDE.md` | 305 | kept, minus a stale paragraph that said escalation was not built and two history asides | 297 |
 | `src/tools/CLAUDE.md` | 209 | kept | 209 |
 | `src/models/CLAUDE.md` | 129 | kept | 129 |
 | `src/api/CLAUDE.md` | 69 | kept | 69 |
 | `tests/CLAUDE.md` | 172 | kept, transcript paths updated | 172 |
 | `web/README.md` | 100 | kept | 100 |
-| `docs/STATE.md` | 544 | kept: where the build stands, the module table, the 37 decisions, the environment, the live ranch facts, the demo recipe, and one list of traps. The seven "what Mn actually produces" histories went; what was durable in them became a knobs table, a cost paragraph, and one list of fourteen traps | 241 |
-| `docs/Plan.md` | 455 | kept, and absorbed `architecture.md` and `logging.md` in place of its own older copies of the diagram, the tool table, and the log schemas. Its pre-M7 model-routing essay became a pointer to the ledger | 769 |
-| `docs/architecture.md` | 154 | into `Plan.md`. Deleted | 0 |
-| `docs/logging.md` | 362 | into `Plan.md`. Deleted | 0 |
-| `docs/JOURNEY.md` | 1,671 | kept, trimmed where a defect was retold in full and the cookbook already holds it. Each such defect is now one line and a cookbook number (M0 to M5); M6 to M9 already were | 1,464 |
+| `docs/state.md` | 544 | kept: where the build stands, the module table, the 37 decisions, the environment, the live ranch facts, the demo recipe, and one list of traps. The seven "what Mn actually produces" histories went; what was durable in them became a knobs table, a cost paragraph, and one list of fourteen traps | 241 |
+| `docs/plan.md` | 455 | kept, and absorbed `architecture.md` and `logging.md` in place of its own older copies of the diagram, the tool table, and the log schemas. Its pre-M7 model-routing essay became a pointer to the ledger | 769 |
+| `docs/architecture.md` | 154 | into `plan.md`. Deleted | 0 |
+| `docs/logging.md` | 362 | into `plan.md`. Deleted | 0 |
+| `docs/journey.md` | 1,671 | kept, trimmed where a defect was retold in full and the cookbook already holds it. Each such defect is now one line and a cookbook number (M0 to M5); M6 to M9 already were | 1,464 |
 | `docs/cookbook.md` | 1,199 | kept. Three pairs that were the same lesson twice merged: #23 into #13, #44 into #32, #41 into #18. The numbers stay in the index and point at the merged entry. 45 entries, 48 numbers | 1,159 |
 | `docs/model-routing.md` | 305 | kept as is, the ledger | 305 |
 | `docs/issues.md` | 368 | this file. Deleted | 0 |
 | `docs/open-issues.md` | 0 | new | 492 |
 | `docs/sweetwater-ranch.md` | 115 | kept, the canon | 115 |
 | `docs/transcripts/no-brief-transcript.md`, `docs/transcripts/with-brief-transcript.md`, `docs/transcripts/m7-compare-transcript.md` | 348 | moved to `docs/transcripts/`, unchanged | 348 |
-| `docs/decisions/` | 0 | removed. The decisions are the numbered list in `STATE.md` | |
+| `docs/decisions/` | 0 | removed. The decisions are the numbered list in `state.md` | |
 | **Total** | **6,946** | | **6,200** |
 
 The "after" column is the real count at the merge commit. The total fell by about 750 lines rather than the
-1,350 estimated, because `Plan.md` grew by 314 absorbing two files that only overlapped it in part. The cost that
+1,350 estimated, because `plan.md` grew by 314 absorbing two files that only overlapped it in part. The cost that
 mattered fell by more: the file every session reads in full went from 544 lines to 241.
+
+**A second pass, the same day, on Scott's "fix the duplications."** The first pass removed duplicate files; this
+one removed content repeated across the files that remain, so each fact has one home and the others point at it.
+`src/models/CLAUDE.md` lost its copy of the model-routing design (110 lines, was 130); `docs/model-routing.md` lost
+its copy of the Ollama traps; `src/tools/CLAUDE.md` lost the wire facts `state.md` holds and keeps the code
+consequences (197, was 210); `src/agent/CLAUDE.md` points at the routing ledger for the predicate instead of
+restating it (283, was 298); `docs/plan.md` lost its second copy of the gate mechanics, the chaos guards, the
+quick start, the nested-file table, and the `jq` queries (744, was 770); `docs/journey.md` lost the three
+measurement tables `model-routing.md` holds (1,430, was 1,464); seven of `state.md`'s decisions were cut to the
+decision and the reason, with the detail left in the nested file. The three capitalized doc names became
+lowercase (`state.md`, `plan.md`, `journey.md`) so `docs/` has one convention.
+
+What is still said twice on purpose: the two ideas the whole thing rests on are in `README.md` for a person and
+`CLAUDE.md` for a session; the tick contract's one sentence ("every tick writes exactly one line") is in
+`src/agent/CLAUDE.md` and the Logging section of `plan.md`; the "by design, not open" list here restates five
+decisions from `state.md` because Scott asked for it to stay.
 
 **Who decided.** Scott, in this review.
 
 ### 25. The root `CLAUDE.md` was 215 lines against its own target of 80
 
-**What was wrong.** `Plan.md`'s table says the root file carries what this is, the one rule, the
+**What was wrong.** `plan.md`'s table says the root file carries what this is, the one rule, the
 commands, and a signpost to each nested file, target under 80 lines. It was 215, and it got there the same
 way the previous project's got to 644 before it was broken up: each phase added a paragraph about the
-thing it built, and the paragraph was also written into the nested file and `STATE.md`.
+thing it built, and the paragraph was also written into the nested file and `state.md`.
 
 **The sort.** Every paragraph in the root file and the three largest nested files, into three piles.
 
@@ -422,8 +438,8 @@ Root `CLAUDE.md`, 215 lines:
 | Pile | Lines | What |
 | --- | --- | --- |
 | A session needs this before its first action | 68 | What this is (8). Starting a session and the four don'ts (17). The one rule (4). How milestones close (20). Two rules that decide most arguments (8). Conventions (11) |
-| A pointer, can be one line | 44 | The upstream is frozen (12, the sharp form is in `STATE.md` and `src/tools/CLAUDE.md`). Tech stack (9, the plan's table has it). The gate paragraph (8, `src/agent/CLAUDE.md`). The read API paragraph (4, `src/api/CLAUDE.md`). The window paragraph (9, `web/README.md`). The venv line (2) |
-| Belongs in `STATE.md`, a nested file, or `Plan.md` | 77 | Exit codes (5, `README.md` has them). The spend ceiling (5, `src/agent/CLAUDE.md`). `--once` costs money and the M7 and M7A cost facts (15, `STATE.md` and `model-routing.md`). Backoff (6, `src/agent/CLAUDE.md`). `SW_OPS_TARGET` (4, `STATE.md` environment). `CHAOS_ENABLED` (5, `STATE.md` demo recipe). The signpost table (17, stays, it is the point of the file). The Commands block (26, stays, every line is re-run at the ritual) |
+| A pointer, can be one line | 44 | The upstream is frozen (12, the sharp form is in `state.md` and `src/tools/CLAUDE.md`). Tech stack (9, the plan's table has it). The gate paragraph (8, `src/agent/CLAUDE.md`). The read API paragraph (4, `src/api/CLAUDE.md`). The window paragraph (9, `web/README.md`). The venv line (2) |
+| Belongs in `state.md`, a nested file, or `plan.md` | 77 | Exit codes (5, `README.md` has them). The spend ceiling (5, `src/agent/CLAUDE.md`). `--once` costs money and the M7 and M7A cost facts (15, `state.md` and `model-routing.md`). Backoff (6, `src/agent/CLAUDE.md`). `SW_OPS_TARGET` (4, `state.md` environment). `CHAOS_ENABLED` (5, `state.md` demo recipe). The signpost table (17, stays, it is the point of the file). The Commands block (26, stays, every line is re-run at the ritual) |
 
 The Commands block and the signpost table stay by instruction. Applying the sort: pile A stays, pile B
 becomes one line each, pile C leaves except the two that stay. Result: about 90 lines. Ten over the
@@ -444,10 +460,10 @@ pointers. Applied: nothing moves.
 
 ### Also closed in this review
 
-- `docs/STATE.md` said a healthy free tick is 3.0 to 3.6 seconds. Since the herd sweep (M7A) it is about
+- `docs/state.md` said a healthy free tick is 3.0 to 3.6 seconds. Since the herd sweep (M7A) it is about
   23 seconds, and at a 20-second demo cadence every tick overruns and says so. Corrected. 2026-09-11.
 - The window's map placeholder named `docs/issues.md` on screen. Repointed. 2026-09-11.
-- `docs/decisions/` was an empty folder promising ADRs. Removed; the decisions live in `STATE.md`. 2026-09-11.
+- `docs/decisions/` was an empty folder promising ADRs. Removed; the decisions live in `state.md`. 2026-09-11.
 - `docs/issues.md` had two items numbered 10. The artifact became #26. 2026-09-11.
 
 ---
@@ -482,7 +498,7 @@ pointers. Applied: nothing moves.
 
 ## Closed
 
-One line each. These are done being written about; the detail is in `docs/JOURNEY.md` under the phase.
+One line each. These are done being written about; the detail is in `docs/journey.md` under the phase.
 
 - **#1** `herd_health` discovering the coyote kill through its own tools. Closed at M7A, 2026-09-11.
 - **#2** A chaos storm front fusing into one shift report. Closed at M7A, 2026-09-11.

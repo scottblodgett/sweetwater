@@ -1,6 +1,6 @@
 """The agent layer: the tick, the routing table, the store, the guards, the instrument.
 
-Five suites in one file, because `docs/Plan.md` says this package gets one test module and
+Five suites in one file, because `docs/plan.md` says this package gets one test module and
 the rails matter more than the filenames. In order:
 
   1. **the tick, end to end** - catalog, sweep, triage, reconcile, route, agreeing on the
@@ -480,7 +480,7 @@ def test_every_owner_is_a_real_agent() -> None:
 
 
 def test_herd_health_owns_animals_and_nothing_else() -> None:
-    """`docs/STATE.md` decision 5, rewritten at M7A. Its tools are the Care API, so no sensor
+    """`docs/state.md` decision 5, rewritten at M7A. Its tools are the Care API, so no sensor
     category may route to it (handing it a dry tank would produce a work order about cattle
     that are fine), and every animal category the herd sweep can emit must, or a dead cow is
     an incident nobody is paged about."""
@@ -1368,7 +1368,7 @@ def test_an_agent_with_no_mandate_is_loud_about_it() -> None:
 
 
 def test_every_responder_has_a_brief_and_chaos_deliberately_does_not() -> None:
-    """`docs/Plan.md` says "the five briefs" and this is four on purpose: `chaos` stays out of
+    """`docs/plan.md` says "the five briefs" and this is four on purpose: `chaos` stays out of
     the graph until M5 and authors nothing a human reads before it has real animal events. The
     absence is asserted rather than assumed, so M5 adding one is a deliberate edit here."""
     assert set(MANDATES) == set(RESPONDERS)
@@ -2694,7 +2694,7 @@ async def test_the_same_write_for_the_same_incident_is_asked_once(gate_target: S
 
 async def test_reject_then_approve_land_their_decided_lines_and_a_second_answer_is_refused(gate_target: StoreTarget) -> None:
     """The verification the plan names, minus the process kill (that is the live check): reject
-    one, approve the other, prove both decided lines land with the fields `docs/Plan.md`
+    one, approve the other, prove both decided lines land with the fields `docs/plan.md`
     promises, and prove the rail is empty once nothing is pending."""
     performed: list[tuple[str, dict[str, object], Approval]] = []
 
@@ -3162,7 +3162,7 @@ async def test_compare_mode_does_not_shadow_an_escalation_because_the_rewrite_is
 
 @respx.mock
 async def test_the_tick_line_carries_tier_escalations_and_reasons_and_bills_each_order_at_its_own_model(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
-    """`docs/Plan.md`'s M7 fields. One local order and one escalated critical on the same tick:
+    """`docs/plan.md`'s M7 fields. One local order and one escalated critical on the same tick:
     `tier` is the highest tier used, `escalation_reasons` is one code per escalated order, and
     `cost_usd` is the Tier-2 half only, since the Tier-1 tokens were free and are still counted."""
     serve(respx.mock, LOW | {"east-allotment-fence": 0.5})  # two incidents: the tank and a dead fence

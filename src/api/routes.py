@@ -7,7 +7,7 @@ than touching the ranch from here: `gate.decide()` does the work, exactly as the
 `create_app` is a factory, not a module-level app, so a rail can hand it the test ledger and a
 fake performer and get a whole API that never opens a ranch connection. `main.py --api` calls it
 with what `resolve_store()` and `Settings` say. One module rather than an `app.py` beside this,
-because `docs/Plan.md` names `routes.py` and `schemas.py` and the tree matches the plan.
+because `docs/plan.md` names `routes.py` and `schemas.py` and the tree matches the plan.
 
 Two rules from `src/api/CLAUDE.md` live in the factory rather than in the routes:
 

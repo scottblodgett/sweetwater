@@ -429,7 +429,7 @@ async def judge_packet(packet: EvidencePacket, *, agent: str = WATER_FEED, reaso
 def _transcribed(order: WorkOrder, *, page: str) -> WorkOrder:
     """Write the page and the stored order to `logs/transcripts/<run>/` when `LOG_TRANSCRIPTS=1`, and
     hand the order back unchanged. The only place a full prompt body is ever written, and only on
-    the flag: `docs/Plan.md` forbids it in the three operational streams."""
+    the flag: `docs/plan.md` forbids it in the three operational streams."""
     write_transcript(tick=current_tick(), agent=order.agent, name=order.incident_key, payload={"incident_key": order.incident_key, "agent": order.agent, "page": page, "order": order.model_dump()})
     return order
 

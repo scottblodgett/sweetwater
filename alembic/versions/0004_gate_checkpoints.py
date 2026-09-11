@@ -10,7 +10,7 @@ lives in these four tables, owned by `langgraph-checkpoint-postgres` and read ba
 `src/agent/gate.py` when a human answers from the CLI.
 
 **The DDL here is the library's own, executed by alembic instead of by `saver.setup()`.**
-Decision 1 in `docs/STATE.md`: every Supabase migration is one alembic revision that ran on
+Decision 1 in `docs/state.md`: every Supabase migration is one alembic revision that ran on
 `sw_ops_test` first and was shown to Scott in full before it touched prod. `setup()` would
 create the same tables at first use, silently, on whichever database the loop happened to be
 pointed at, which is exactly the shape of change that rule exists to prevent. So the

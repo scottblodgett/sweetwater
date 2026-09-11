@@ -1,28 +1,8 @@
 # src/models - two tiers and the traps
 
-Full reasoning and the running ledger live in `docs/model-routing.md`. This file is
-the part you must not get wrong while editing code.
-
-## The one rule about turning thinking off
-
-> **Turning thinking off is free exactly when the model is not the one classifying.**
-
-Measured, not assumed: with severity decided in code and the model only writing prose,
-reasoning off cost nothing. With the model handed the verdict and asked to justify it,
-reasoning off took the same setup from **94/97 correct to 2/100**, fabricating
-justifications for labels it had already been given. Since `triage.py` owns severity
-here, no sub-agent is classifying, which is what makes a local default viable at all.
-
-## The job that breaks local models is navigating, not writing
-
-At full context budget a 9b model on an open-ended tool loop made **16 `list_sensors`
-calls, zero `read_sensor` calls, and never answered**. Handed the map instead, it read
-8 of 28 water sensors and returned a **confident false all-clear** where Opus found 4
-tanks below the floor. The same size model, handed an assembled evidence packet and
-asked to write, produced 72 advisories with 0 retries and 0 check failures.
-
-So: **local models write well and navigate badly.** Give Tier 1 a page to judge, never
-a ranch to explore. That is `evidence.py`'s entire reason to exist.
+The design and the ledger are `docs/model-routing.md`: why thinking is off when code owns severity, why local
+models write well and navigate badly, the two tiers, the predicate, and every measured row. This file is the part
+you must not get wrong while editing code.
 
 ## Ollama specifics that will bite otherwise
 

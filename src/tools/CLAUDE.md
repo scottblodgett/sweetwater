@@ -2,42 +2,29 @@
 
 ## The upstream is frozen
 
-The MCP server and the four REST APIs are deployed and owned by another repo. **19
-flat tool names**, no namespaces. Consequences that are easy to get wrong:
+The MCP server and the four REST APIs are deployed and owned by another repo. **19 flat tool names**, no
+namespaces. The measured facts about the wire (synthesized readings, the two independent draws, the herd's paging
+limits, the name mismatches) are in `docs/state.md` and are not repeated here. The consequences for code:
 
 - An allowlist is an **explicit set of literal names**, never a prefix match.
-- `ranch://sensors/map` is a **resource, not a tool**. LangChain's adapter surfaces
-  tools only, so the map must be read explicitly with `read_resource`. An agent that
-  "should have the map" and does not is almost always this.
-- `GET /sensors` takes **pagination only** - there is no `type` filter. So the catalog
-  is pulled once at `?limit=500` and filtered in Python. This is not a workaround; the
-  map-not-paging pattern is the right shape anyway and arrives here by necessity.
-- `GET /sensors/:id` **synthesizes a fresh value on every call**, unanchored to the
-  previous one. Never cache it, never prefetch it, and never expect two reads a second
-  apart to agree.
-- `GET /sensors/:id/readings` is synthesized the same way and **does not contain the value
-  the sweep read**, even when its newest point carries a later timestamp. M2 printed a
-  packet where triage judged 3.4 gal and the newest history point said 0.8 gal at a later
-  time. Both are honest; they are two independent draws. The packet therefore labels the
-  series as shape and trend only, and says in one line that it is not the current reading,
-  because a model handed two contradictory numbers with no note will pick one.
-- `/animals` and `/pastures` are on the **Farm API**, not the Care API. Easy to get
-  backwards, and the wrong base URL 404s rather than erroring in a way that names itself.
-- A Lambda Function URL routes **every path** to the same handler, so appending a
-  bogus path to `MCP_URL` does not produce a failure. Test failure paths with an
-  unreachable host instead.
+- `ranch://sensors/map` is a **resource, not a tool**. LangChain's adapter surfaces tools only, so the map must
+  be read explicitly with `read_resource`. An agent that "should have the map" and does not is almost always this.
+- The catalog is pulled once at `?limit=500` and filtered in Python; there is no `type` filter upstream.
+- Never cache, prefetch, or compare two reads of `GET /sensors/:id`: each is a fresh draw. The history series is
+  an independent draw too, so the packet labels it shape and trend only and states the current reading once.
+- `/animals` and `/pastures` are on the **Farm API**, not the Care API, and a wrong base URL 404s without naming
+  itself. Mount each service's routes on a different host in a rail, or the mistake is invisible (cookbook #16).
+- A Lambda Function URL routes **every path** to the same handler, so test failure paths with an unreachable host.
+- When a contract is unknown, learn it from a 422 against a nonexistent id, never from the other repo (cookbook #17).
 
 ## herd.py: the second free sweep, and what the wire forced on it (M7A)
 
 `sweep_herd` is `sensors.py`'s shape pointed at the Farm and Care APIs, under the same three rules
-(errors as data, an empty catalog fails the stage, the stage returns the subjects that answered), and
-three wire facts decided everything else. All three are in `docs/STATE.md`; the short form:
+(errors as data, an empty catalog fails the stage, the stage returns the subjects that answered). The wire facts
+that shaped it are `docs/state.md` decision 33 and the herd section there. The code rules:
 
 - **The catalog is the whole `GET /animals` list, paged at 100, in waves of `HERD_PAGE_CONCURRENCY = 6`,
-  stopping at the first short page.** Not the `status` filter: it validates its input and still returned
-  nothing for `status=deceased` with a deceased cow in the list. Not the roster: a deceased PATCH nulls
-  `pastureId` and she leaves it. Not one call: `limit=500` is a 503 at the API Gateway wall. Not 12 at
-  once: 2 of 12 come back HTTP 500 at 12 or 20 in flight, 0 of 12 at 6, measured.
+  stopping at the first short page.** Never the `status` filter, never the roster, never one call.
 - **Observations are read only for the changed set** (non-active status, pending care task, live incident
   from the ledger via `watch`), because they list per animal only and 1,195 reads a tick is 344k Care
   requests a day. What that leaves invisible is `docs/open-issues.md` #16.

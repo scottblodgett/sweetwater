@@ -34,7 +34,7 @@ were proven, and it is not a knob to reach for when something else is failing.
 are deployed and appear in **no** slice. No agent has a reason to move an animal between
 places: that is a crew decision about the ranch's actual operation, not an inference from a
 sensor. They are listed in `DEPLOYED_TOOLS` and in `WRITE_TOOLS` regardless, which is the
-whole point. `docs/Plan.md` marks four write tools with a `*`; the deployed surface
+whole point. `docs/plan.md` marks four write tools with a `*`; the deployed surface
 has eight, and the four extra ones are exactly the kind that get added to a slice later by
 somebody who needed one read out of the same API. Naming them means that edit trips the
 runtime guard instead of PATCHing the Care API on a Tuesday.
@@ -193,7 +193,7 @@ def proposable_tools_for(agent: str) -> frozenset[str]:
 #: Three agents legitimately share the sensor read tools, and that is not carved up here.
 #: The isolation that matters is the brief, the SOP set, and which sensor types each agent
 #: is pointed at, not tool-name exclusivity; carving it further would mean editing a frozen
-#: server. `docs/Plan.md` is honest about this seam and so is this comment.
+#: server. `docs/plan.md` is honest about this seam and so is this comment.
 _SENSOR_READS = frozenset({"list_sensors", "read_sensor", "get_sensor_readings"})
 
 #: The counts are the spec: 7 / 6 / 5 / 5 / 0. A test asserts each one exactly, so a slice

@@ -36,7 +36,7 @@ agent_prompts`, never back.
 
 ## chaos has no brief here, and that is not an omission
 
-`docs/Plan.md` calls this file "the five briefs." It holds four. `chaos` is M5, stays out of
+`docs/plan.md` calls this file "the five briefs." It holds four. `chaos` is M5, stays out of
 the graph until then, and authors nothing a human reads until it has real animal events to
 write prose about. Its brief arrives with it. A placeholder brief written now would be
 written against an imagined packet, which is the exact mistake `system_prompts.py`'s

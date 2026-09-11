@@ -7,11 +7,11 @@ orchestrator runs continuously, driving **five sub-agents** (`water_feed`, `herd
 `compliance`, `chaos`) against a ranch that is genuinely trying to break. Scenario canon:
 `docs/sweetwater-ranch.md`. The ranch itself (four REST APIs and an MCP server with 19 tools) is deployed
 elsewhere, frozen, and read-only from here; this repo adds nothing to it and never reads its source
-(`C:\temp\MCP-Farm`). The contract is the wire. Detail: `docs/STATE.md`, "The boundary rule."
+(`C:\temp\MCP-Farm`). The contract is the wire. Detail: `docs/state.md`, "The boundary rule."
 
 ## Starting a session
 
-**Read `docs/STATE.md` first, then the nested `CLAUDE.md` for the package you are about to touch, then stop
+**Read `docs/state.md` first, then the nested `CLAUDE.md` for the package you are about to touch, then stop
 and check in.** STATE is the briefing: where the build stands, the decisions already made, the environment,
 the live ranch facts already paid for, and the traps. Then, until asked otherwise: do not read the doc set
 to get oriented (the table below says which doc answers which question); do not probe the live ranch to
@@ -25,12 +25,12 @@ comes first.
 
 ## How a phase closes
 
-The build ran M0 through M9 (`docs/Plan.md`); dockerizing is FUTURE-1 and deferred. At the end of every
+The build ran M0 through M9 (`docs/plan.md`); dockerizing is FUTURE-1 and deferred. At the end of every
 phase, in this order, no exceptions: **1.** run the gate (`pytest`, `ruff check .`, `mypy src main.py`, the
 three `web/` commands, and the phase's own live verification), all green or the phase is not done; **2.**
-update the docs (`docs/JOURNEY.md` gets what happened and every defect the phase caught in itself,
+update the docs (`docs/journey.md` gets what happened and every defect the phase caught in itself,
 `docs/cookbook.md` gets any lesson general enough to bite again, `docs/model-routing.md` if a job changed
-tiers, `docs/STATE.md` refreshed, the nested `CLAUDE.md` if a rule changed), then **run every command the
+tiers, `docs/state.md` refreshed, the nested `CLAUDE.md` if a rule changed), then **run every command the
 docs claim works**, because tests do not read markdown; **3.** commit to `master` (not `main`), no feature
 branches, no PRs; **4.** stop and check in with Scott. Do not roll into the next phase unprompted.
 
@@ -46,7 +46,7 @@ A model never performs a write; from M6 it may propose one and a human answers (
 gate). The read API never calls the ranch or a model (`src/api/CLAUDE.md`). The window never holds the API
 token (`web/README.md`). The loop has a spend ceiling that halts with exit 4, backoff per upstream, and a
 heartbeat that never stops (`src/agent/CLAUDE.md`, the loop). `--once` spends from M2, about $0.05 a work
-order; the demo knobs, `SW_OPS_TARGET=test`, and `CHAOS_ENABLED` belonging at 0 are in `docs/STATE.md`.
+order; the demo knobs, `SW_OPS_TARGET=test`, and `CHAOS_ENABLED` belonging at 0 are in `docs/state.md`.
 
 ## Where the detail lives
 
@@ -59,14 +59,14 @@ order; the demo knobs, `SW_OPS_TARGET=test`, and `CHAOS_ENABLED` belonging at 0 
 | `web/` | `web/README.md` - the proxy, the panels, the three-command gate |
 | `data/knowledge_base/` | the SOPs, one file per sensing world, **derived from `docs/sweetwater-ranch.md` and nothing else.** A rule id is citable only if it is a heading in the file the packet carried |
 | `tests/` | `tests/CLAUDE.md` - never Supabase, never a model; what each rail proves |
-| what it is and why: the tree, the architecture, the log schemas, the milestones | `docs/Plan.md` |
+| what it is and why: the tree, the architecture, the log schemas, the milestones | `docs/plan.md` |
 | model cost decisions | `docs/model-routing.md` (a ledger, not a plan) |
-| where the build stands right now | `docs/STATE.md` - the session-start briefing |
-| what actually happened | `docs/JOURNEY.md` |
+| where the build stands right now | `docs/state.md` - the session-start briefing |
+| what actually happened | `docs/journey.md` |
 | the lessons, by pain | `docs/cookbook.md` |
 | what is still open, and what each would take | `docs/open-issues.md` |
 
-Stack and layout: `docs/Plan.md`. Interpreter: `.venv/Scripts/python.exe`, Python 3.11. No Docker.
+Stack and layout: `docs/plan.md`. Interpreter: `.venv/Scripts/python.exe`, Python 3.11. No Docker.
 
 ## Commands
 
@@ -82,7 +82,7 @@ pytest
 ruff check .                 # the whole lint gate; `ruff format` is deliberately not used (it would wrap the long lines E501 permits)
 mypy src main.py
 
-python -m src.tools.chaos status   # M5. Also plan / inject / expire / restore, recipe in docs/STATE.md
+python -m src.tools.chaos status   # M5. Also plan / inject / expire / restore, recipe in docs/state.md
 python -m src.agent.gate list      # M6. The writes agents proposed and nobody has answered. Also approve <audit_id> --by NAME, reject <audit_id> --by NAME --reason TEXT
 
 TIER1_ENABLED=1 python main.py --once                 # M7. The cascade: warning-severity work orders on the local model, Opus for critical and for every escalation. Ships OFF

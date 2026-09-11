@@ -47,7 +47,7 @@ rails did not get stricter, the answer got worse.**
 
 ## Three files, and do not add a fourth
 
-`docs/Plan.md` names exactly `test_agent.py`, `test_tools.py`, and `test_api.py`, and the
+`docs/plan.md` names exactly `test_agent.py`, `test_tools.py`, and `test_api.py`, and the
 tree matches it. Suites inside a file are separated by a section banner, not by splitting
 the file, because one rail per module produced seven modules by the end of M1 and the plan
 had drifted from the tree without a single gate noticing. `conftest.py` holds the
@@ -103,7 +103,7 @@ pass is the failure mode this file exists to prevent.
 | one **agent** raising is not an outage for the other three | a tick survives a whole slice failing, not just one packet | `fan_out` stopped catching per-agent exceptions, or dropped the packets it was carrying |
 | the concurrency ceiling is global across four agents | `AGENT_CONCURRENCY = 4` means four Opus calls in flight, not sixteen | the shared semaphore stopped being passed down and each agent bounds only itself |
 | every routed incident produces a work order | nothing that reached the fan-out is silently dropped | a grouping step lost a key, or an error path returned fewer orders than packets |
-| `herd_health` is handed the dead cow, on the second sweep, and nobody else is | the coyote gap is closed: the herd sweep is `herd_health`'s discovery path (`docs/STATE.md` decision 5, rewritten at M7A) | an animal category left `ROUTES`, or the herd stage stopped feeding triage. The retired M3 rail's other half survives as `an idle herd_health still logs nothing` |
+| `herd_health` is handed the dead cow, on the second sweep, and nobody else is | the coyote gap is closed: the herd sweep is `herd_health`'s discovery path (`docs/state.md` decision 5, rewritten at M7A) | an animal category left `ROUTES`, or the herd stage stopped feeding triage. The retired M3 rail's other half survives as `an idle herd_health still logs nothing` |
 | the herd sweep's three rules: a failed read is data and only that animal stops answering; an empty list fails the stage; a Care outage means nobody answered | the sensor sweep's rules hold for the second sweep | `answered` was widened to "everyone", or the empty list became a quiet success |
 | pages go out in waves and stop at the first short page | the Farm API's measured ceiling (6 in flight) is a wave size in code | somebody put `SWEEP_CONCURRENCY` back on the pages |
 | the animal truth table, with `sold` as an explicit non-finding and the 24h window tested to the second | severity for animals is code's, and the ranch's history cannot open an incident per old note | a row moved, or the window became a debounce |

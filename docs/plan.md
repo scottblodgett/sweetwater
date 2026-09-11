@@ -30,17 +30,10 @@ What gets built is the part that does not exist yet: **one orchestrator running 
 
 ### Run local first, dockerize last
 
-Nothing in M0 through M9 needs a container. The upstreams are already deployed, so there is no local API stack to stand up, and `sw_ops` lives in Supabase, so there is no local database to run either. M9 is the window, and it deploys to Vercel.
-
-```bash
-python -m venv .venv && .venv/Scripts/activate && pip install -r requirements.txt -r requirements-dev.txt
-cp .env.example .env      # fill in MCP_URL, the four API urls, DATABASE_URL, ANTHROPIC_API_KEY
-python main.py            # the tick loop starts talking to the live ranch
-```
-
-`docker-compose.yml` sits in the tree from M0 as a placeholder, and gets filled in at **FUTURE-1**, if and when the hosting decision calls for it. Dockerizing a moving target is how you end up debugging a container when the bug is in your prompt.
-
-**One exception:** the `sw_ops` store tests need a real Postgres and must never point at Supabase, same rule as `farm_systems_test`. They use your existing local Postgres install with a `sw_ops_test` schema. Still no Docker.
+Nothing in M0 through M9 needs a container. The upstreams are already deployed, `sw_ops` lives in Supabase, and
+the window deploys to Vercel. `docker-compose.yml` is a placeholder for **FUTURE-1**, if and when the hosting
+decision (`docs/open-issues.md` #5) calls for it. The one local dependency is a Postgres for the store tests,
+which must never point at Supabase. How to run it: `README.md`.
 
 ## Structure, mapped to your diagram
 
@@ -103,12 +96,12 @@ sweetwater/                                lands at
 │   ├── examples.json              (M5)   chaos scenario catalog + golden fixtures
 │   └── knowledge_base/            (M2)   the SOPs, plus herd.md at M7A. Six files, not four: infrastructure splits into plant / wellhead / sensors, because a packet is billed for every rule in the file it carries (see SOP_FOR_CATEGORY)
 ├── docs/
-│   ├── Plan.md                     M1    this file: what it is and why. The tree above is the authority; the architecture and the log schemas live here since the post-M9 review
-│   ├── STATE.md                    M0    the session-start briefing, refreshed at every boundary
+│   ├── plan.md                     M1    this file: what it is and why. The tree above is the authority; the architecture and the log schemas live here since the post-M9 review
+│   ├── state.md                    M0    the session-start briefing, refreshed at every boundary
 │   ├── sweetwater-ranch.md         M0    the scenario canon, copied from MCP-Farm
 │   ├── model-routing.md            M0    the tier table + the measurement log (what moved down, when, proof)
 │   ├── cookbook.md                 M0    the lessons, as prose, ordered by the pain
-│   ├── JOURNEY.md                  M0    what actually happened, and where it diverged
+│   ├── journey.md                  M0    what actually happened, and where it diverged
 │   ├── open-issues.md              M9+   everything still open, in plain language, and what each would take
 │   └── transcripts/                M3+   the pinned fixtures: the no-brief pair (M3) and the M7 side-by-side
 ├── logs/
@@ -142,17 +135,12 @@ supervisor still lands in `agent.py` at M3.
 
 ### Nested CLAUDE.md, and why
 
-The root file in MCP-Farm grew to 644 lines before it got broken up, and the fix that worked was path-scoped rules plus directory-level files. Start there instead of arriving there.
-
-| File                   | Carries                                                                                                                                                                        |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CLAUDE.md` (root)     | What this is, the one rule (**report back after 5 minutes or when you find work I did not ask for**), the ritual, the commands, and a signpost to each nested file. Target under 80 lines of prose; the Commands block and the signpost table sit on top of that and are re-run and re-read at every close. |
-| `src/agent/CLAUDE.md`  | The graph shape, `RanchState` fields, the tick contract (what a tick must always do even when it fails), the escalation predicate.                                             |
-| `src/tools/CLAUDE.md`  | **The upstream is frozen.** Allowlists are code not prompt. Severity belongs to `triage.py`. Chaos's two injection paths and their guards.                                     |
-| `src/models/CLAUDE.md` | The Ollama gotchas, `reasoning_effort` as an explicit per-call argument, and the one rule about when thinking may be off.                                                      |
-| `src/api/CLAUDE.md`    | The `{data, meta}` envelope and the error shape, matching the ranch APIs.                                                                                                      |
-| `tests/CLAUDE.md`      | Never point tests at Supabase. `sw_ops_test` schema. What each rail proves, so nobody "fixes" a rail by loosening it.                                                          |
-| `.claude/rules/*.md`   | Anything long enough to bloat a directory file, with a `paths:` glob.                                                                                                          |
+The root file in MCP-Farm grew to 644 lines before it got broken up, and the fix that worked was directory-level
+files. Start there instead of arriving there. The root `CLAUDE.md` carries what a session needs before its first
+action, the one rule, the commands, and a signpost to each nested file, and its signpost table is the list of what
+each nested file carries. Target under 80 lines of prose; the Commands block and the signpost table sit on top of
+that and are re-run and re-read at every close. `.claude/rules/*.md` is for anything long enough to bloat a
+directory file, with a `paths:` glob; nothing has needed one yet.
 
 > **`models/embeddings.py` is a seam, not a feature, in V1.** Each sensing world's SOP set is a handful of rules. Loading a whole SOP file into the agent's prompt beats retrieving over it, and pretending otherwise is the cleverer option rather than the simpler one. The file exists so retrieval has an obvious home when the corpus grows past a prompt.
 
@@ -256,25 +244,13 @@ Routing it through the MCP write tools would put it behind the M6 gate for no be
 make the one component whose job is to break things the hardest one to run. `CHAOS_ALLOW_WRITES`
 is its gate, and `CHAOS_ANIMAL_COHORT` is its blast radius.
 
-**How the gate works (M6).** A model still drives no tool loop; it judges one assembled packet
-in one call. What M6 added is one optional field on the work order, `proposed_write`, naming a
-write tool from the agent's slice with its arguments, and three code checks on it (shape, tool,
-grounding of every id and quantity against the page). A proposal that survives pauses in a
-LangGraph `interrupt()` checkpointed in `sw_ops`, one tiny graph per proposal, so the pause
-outlives the process and the tick does not wait for it. A human resumes it from
-`python -m src.agent.gate` with approve or reject, the write is performed through
-`mcp_client.call_tool` carrying an `Approval`, and both halves leave an `audit.jsonl` line
-correlated by `audit_id`. Three boundaries remain, and they are not redundant:
-
-- `tools_for(agent)` is the **declaration**, writes included, and it is what the count tests
-  assert against.
-- `bound_tools_for(agent)` / `proposable_tools_for(agent)` are what a model may be handed and may
-  propose: empty of writes while `GATE_LANDED` is False.
-- `assert_callable(tool, approval=...)` is the belt behind both, raising `WriteGateError` from
-  inside `mcp_client.call_tool` for any write without a human's `Approval`. The filtered lists only
-  protect the paths that remember to use them; a helper written in a hurry is a path that might not.
-
-**`GATE_LANDED` is True since M6 (2026-09-11).** It made writes proposable, not callable. Detail: `src/agent/CLAUDE.md` (the gate) and `src/tools/CLAUDE.md` (the allowlists).
+**The gate (M6).** A model still drives no tool loop. A work order may carry one optional `proposed_write`; three
+code checks (shape, tool, grounding) run on it; a survivor pauses in a LangGraph `interrupt()` checkpointed in
+`sw_ops`, one graph per proposal, so the pause outlives the process and the tick does not wait. A human resumes it
+from `python -m src.agent.gate` or `POST /ops/gate`, and both halves leave a receipt under one `audit_id`.
+`GATE_LANDED` is True since M6 and made writes proposable, not callable. The three boundaries in code
+(`tools_for`, `bound_tools_for` / `proposable_tools_for`, `assert_callable`) are `src/tools/CLAUDE.md`'s; the pause
+and its rules are `src/agent/CLAUDE.md`'s.
 
 **The line worth defending: `herd_health` cannot read a sensor, and nothing but
 `water_feed` can touch feed.** That is what makes the supervisor real rather than
@@ -311,9 +287,15 @@ The antagonist. Its job is to make the ranch a genuinely hard place so the other
 
 ### Two injection paths, and the asymmetry is forced
 
-**Sensor faults go to an overlay in `sw_ops`.** The deployed Sensor API is stateless, DB-free, and synthesizes every reading in code, so there is nowhere to write a fault into it. Its own fault injector (`chaos.ts`, from II.12) **deliberately refuses to register when `AWS_LAMBDA_FUNCTION_NAME` is set**, specifically so deployed prod can never be faulted. That guard is correct and stays. So: chaos writes rows to `sw_ops.chaos_events`, and `tools/sensors.py` applies them on top of the honest live read before triage ever sees it. **The deployed API stays truthful; the new repo owns the lie, in one place, under test.**
+**Sensor faults go to an overlay in `sw_ops.chaos_events`**, applied by `tools/sensors.py` on top of the honest
+live read before triage sees it. The deployed Sensor API is stateless and synthesizes every reading in code, and
+its own fault injector refuses to arm on Lambda, so there is nowhere to write a fault into it. **The deployed API
+stays truthful; this repo owns the lie, in one place, under test.**
 
-**Animal events are written for real** through `PATCH /animals/:animalId` and `POST /animals/:animalId/observations`. A coyote kill is a status change plus an observation a human would actually read, and `herd_health` discovers it through its real tools with no overlay at all. Guarded by `CHAOS_ALLOW_WRITES` and confined to a configurable animal-id cohort so the rest of the herd stays pristine for other demos.
+**Animal events are written for real**, `PATCH /animals/:animalId` on the Farm API and
+`POST /animals/:animalId/observations` on the Care API, so `herd_health` discovers them through its own sweep with
+no overlay at all. Guarded by `CHAOS_ALLOW_WRITES` and confined to `CHAOS_ANIMAL_COHORT`. The request shapes, the
+enums, and the guards: `src/tools/CLAUDE.md`.
 
 ### Event catalog (`data/examples.json`)
 
@@ -333,11 +315,9 @@ The correlated scenarios are the interesting ones. Independent random faults tes
 
 ### Deterministic, and it heals
 
-- **Seeded.** A `random.Random(CHAOS_SEED)` picks scenario, targets, and timing, so a given seed replays the same demo. Chaos that cannot be reproduced is a flake, not a fixture, and that lesson was paid for once already.
-- **Every event has a TTL.** Expiry restores the sensor, which is what produces `resolved` incidents and exercises the reconcile logic. Without healing, everything is broken an hour in and the feed goes quiet.
-- **The model is not in the load-bearing path.** The seeded PRNG picks _what breaks_; an optional LLM pass authors the observation prose a human reads. Code owns anything a machine consumes, the model owns what a human judges. Same ownership rule that settled the severity question.
-
-Decided at M5: chaos is a peer node in the graph and its decision core is deterministic code, not a model.
+Seeded (`CHAOS_SEED`, a pure `plan()`, `randrange` never `choices`), so a seed replays a demo; every event has a
+TTL, and expiry is what produces `resolved` incidents. The PRNG picks what breaks; no model is anywhere in it.
+Decided at M5: chaos is a peer node in the graph and its decision core is deterministic code.
 
 ---
 
@@ -358,7 +338,7 @@ cascade was built at M7, measured, and ships **off**, and the one change that wo
 
 Implementation: `src/utils/logger.py`. Wired at **M0**, before anything it measures existed, because an
 instrument added after the fact only measures what you already suspected. This section is the schema
-for the three files and the tables the loop writes beside them; `docs/JOURNEY.md` has how each field arrived.
+for the three files and the tables the loop writes beside them; `docs/journey.md` has how each field arrived.
 
 ### Why structlog, and why over the stdlib
 
@@ -508,10 +488,7 @@ Truncation means the model never got to answer; completion means it answered and
 badly. One is a config bug, one is a model-selection decision, and **in the response
 text they look identical**. Telling them apart cost a real investigation once.
 
-**The vocabulary is per provider.** Anthropic returns `tool_use`, `end_turn`,
-`stop_sequence`, `max_tokens`; Ollama and the OpenAI-shaped APIs return `stop`, `length`,
-`tool_calls`. Any query over this field has to name the healthy **set**, not one healthy
-value, or it flags an entire provider as broken. See below, and `src/models/CLAUDE.md`.
+**The vocabulary is per provider**, so any query over this field names the healthy **set** (`src/models/CLAUDE.md`, cookbook #10).
 
 **Written immediately on return, before validation runs**, so a response that fails a
 check still leaves a receipt of what was actually returned rather than vanishing into a
@@ -733,7 +710,7 @@ Each ends runnable and verifiable. **M0 through M9 need no containers and no new
 
 **M8 The read API.** `api/routes.py`: `/ops/incidents`, `/ops/report`, `/ops/stream` (SSE), `/ops/gate` for approve/reject, `/health`. Same envelope conventions as the ranch APIs so the whole system reads consistently.
 
-**M9 The window.** Next.js on Vercel: incident feed and ranch map against `/ops/*`. Light mode. Sensor coordinates are already in the catalog, so the map needs no new backend work. This replaces the `agent-lab-ui/` dashboard and the half-built `demo-site/` from MCP-Farm, neither of which comes over: both read the ranch directly, and this one reads `sw_ops` through the M8 API and shows what the agents decided rather than what the sensors said. **M9 is the last M phase**, so its close also carries what the old M10 held: `README.md` brought current, `docs/cookbook.md` ordered by the pain rather than the technique, and `docs/JOURNEY.md`'s final pass, which is a pass and not a reconstruction because it was written at every boundary.
+**M9 The window.** Next.js on Vercel: incident feed and ranch map against `/ops/*`. Light mode. Sensor coordinates are already in the catalog, so the map needs no new backend work. This replaces the `agent-lab-ui/` dashboard and the half-built `demo-site/` from MCP-Farm, neither of which comes over: both read the ranch directly, and this one reads `sw_ops` through the M8 API and shows what the agents decided rather than what the sensors said. **M9 is the last M phase**, so its close also carries what the old M10 held: `README.md` brought current, `docs/cookbook.md` ordered by the pain rather than the technique, and `docs/journey.md`'s final pass, which is a pass and not a reconstruction because it was written at every boundary.
 
 **FUTURE-1 Dockerize. Deferred, renamed from M10 on 2026-09-11.** Not part of the build; picked up if and when issue #5 (where the loop runs) lands on a host that wants a container. When it does: a `Dockerfile` for the orchestrator, a second for the API, and `docker-compose.yml` wiring them plus an optional local Postgres for offline work. The same image is what a Lambda container or a small always-on box would run, so this is the last step and also the first step of whatever hosting you pick. The doc close that used to live here moved to M9.
 
@@ -755,10 +732,7 @@ Named so nothing gets quietly resurrected:
 3. Read a shift report by eye. Right sensing world, real sensor, real reading, and would a hand on shift know what to do.
 4. Human gate by hand: let a tick want a care write, watch it block, kill the process, restart, reject, then approve.
 5. Replay determinism: same `CHAOS_SEED`, two runs, identical event sequence.
-6. Read the logs, which is the real test of whether the instrument works:
-   - `jq -r '[.tick,(.input_tokens//0),(.output_tokens//0),(.work_orders_shipped//0),(.escalated//0)]|@tsv' logs/tick.jsonl` - cost flat on calm ticks, spikes only where an escalation is logged alongside it.
-   - `jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl` - anything here is a config bug, not a weak model. It names the healthy **set** because the providers disagree: Anthropic says `tool_use` and `end_turn`, Ollama says `stop`. The single-value version of this query shipped in four files and reported every healthy Opus call as broken, see cookbook #10.
-   - every `audit_id` in `audit.jsonl` appears twice. A single occurrence is a pause nobody answered.
+6. Read the logs, which is the real test of whether the instrument works: the four queries under "Reading the logs" in the Logging section above. Cost flat on calm ticks; nothing outside the healthy `finish_reason` set; every `audit_id` twice or once while its pause is open.
 7. Load the Vercel URL and watch three ticks land without a refresh.
 
 ## Open items

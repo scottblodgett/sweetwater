@@ -2,7 +2,7 @@
 
 The patterns, ordered by **the pain that produced them** rather than by when each landed. Reordered at
 the M9 boundary, the close of the M phases; until then entries sat in the order they were paid for.
-**The numbers are stable**: `#33` means the same entry it meant in every `JOURNEY.md` and `open-issues.md`
+**The numbers are stable**: `#33` means the same entry it meant in every `journey.md` and `open-issues.md`
 reference, so the index below is how to find one by number. Three entries that were one lesson twice were merged
 in the post-M9 review (#23 into #13, #41 into #18, #44 into #32); their numbers stay in the index and say where.
 
@@ -180,7 +180,7 @@ be re-run when the decision changes. Same family as #10.
 
 **What went wrong.** The window's gate rail read `writes_pending` off the latest tick line and said "no
 writes waiting" while two pauses sat in the gate panel beside it. `writes_pending` is null on a tick that
-proposed nothing and did not open the gate (`docs/Plan.md`), and a pause planted by another process
+proposed nothing and did not open the gate (`docs/plan.md`), and a pause planted by another process
 between ticks is not this tick's business at all. The line was honest; the rail read it as an answer to
 a question it never asked.
 
@@ -402,7 +402,7 @@ tools, chosen because a made-up name cannot write) and one `restock_feed` (real)
 and came back refused by the ranch; the second was rejected with a reason. Had the tools been swapped,
 the receipt would have read `written`.
 
-**The fix.** Two rules for a gate demo, now in `docs/STATE.md`'s recipe. When the point is the approve
+**The fix.** Two rules for a gate demo, now in `docs/state.md`'s recipe. When the point is the approve
 path, plant a tool the ranch does not have, so the whole pipe is exercised and the ranch says no at the
 end. When the pause names a real tool, reject it with a reason; reject exercises every line but the
 write. And the window asks once before sending an approve, naming the tool and the args, because that
@@ -427,7 +427,7 @@ is the 19 tools, the `ranch://sensors/map` resource, and the four REST surfaces,
 can be re-measured over the wire at any time.
 
 **Fix.** Derive from what lives here and can be re-measured: the ranch mission in
-`docs/sweetwater-ranch.md` and the observed distributions in `docs/STATE.md`. If a fact is
+`docs/sweetwater-ranch.md` and the observed distributions in `docs/state.md`. If a fact is
 genuinely only knowable from the other side's source, that is a scoped conversation about
 the other repo, not a drive-by copy.
 
@@ -482,7 +482,7 @@ instead of a 422 mid-demo.
 **The caveat, learned the hard way.** A ghost id protects against mutating something real;
 it does **not** protect against creating something. The fifth probe body was valid and
 returned **201**, creating an orphan observation against an animal that does not exist. The
-upstream is append-only, so it cannot be deleted (see `docs/JOURNEY.md`, M5). **Probe with
+upstream is append-only, so it cannot be deleted (see `docs/journey.md`, M5). **Probe with
 bodies you are confident are invalid, and stop the moment one succeeds.**
 
 **Found:** M5, learning the write path without reading the frozen upstream.
@@ -564,7 +564,7 @@ belongs to and check for the class. Sentinels travel in families.
 
 ### 10. A field whose vocabulary is per provider, and a query that hardcoded one word
 
-**Pain.** `src/models/CLAUDE.md`, `README.md`, and `docs/Plan.md` all shipped
+**Pain.** `src/models/CLAUDE.md`, `README.md`, and `docs/plan.md` all shipped
 `jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl` with the comment "should be empty.
 Anything in it is a config bug." Run against M2's first real `agent.jsonl`, it returned
 **every single line**, all 19 of them, all healthy.
@@ -579,7 +579,7 @@ about everything gets ignored, and then it is not there when one line really is 
 `select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)`. Both
 vocabularies pass, and both truncation spellings still fail. `ModelResponse.ok` and
 `.truncated` hold the same sets in code, and they are the definition. Fixed in all four files
-that carried it: `src/models/CLAUDE.md`, `README.md`, `docs/Plan.md`, `docs/Plan.md`.
+that carried it: `src/models/CLAUDE.md`, `README.md`, `docs/plan.md`, `docs/plan.md`.
 
 **The first attempt at that fix was also broken, and running it is the only reason we know.**
 It was written `select(["stop",…]|index(.finish_reason)|not)`, which is wrong in a way that
@@ -1109,13 +1109,13 @@ The two places a mistake hides where no test looks.
 
 ### 9. A diagram is a claim, and no test reads a diagram
 
-**Pain.** `docs/Plan.md` says the loop lives in `executor.py` and routing lives in
+**Pain.** `docs/plan.md` says the loop lives in `executor.py` and routing lives in
 `agent.py`. M1 shipped `tick.py` and a separate `routing.py`, plus seven test modules where
 the plan names three, and eleven named files that simply did not exist. Every gate was green.
 
 **Why.** Tests read code. `mypy` reads code. `ruff` reads code. The plan's tree is prose, so
 nothing in the gate can disagree with it, and drift accumulates at exactly the rate you stop
-looking. The `routing.py` case was live: `docs/Plan.md` also names `src/models/routing.py`
+looking. The `routing.py` case was live: `docs/plan.md` also names `src/models/routing.py`
 for a different question entirely, which model **tier** runs a job rather than which **agent**
 owns a finding. Two modules with one name doing unrelated work is a mis-import that
 type-checks.

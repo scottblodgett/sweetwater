@@ -76,7 +76,7 @@ ROUTES: dict[str, str] = {
     "range_dry": COMPLIANCE,
     "stream_flow_low": COMPLIANCE,
     # The animals. M7A: the herd sweep's four categories, and `herd_health` owns animals and
-    # nothing else (`docs/STATE.md` decision 5, rewritten). It still cannot read a sensor, so
+    # nothing else (`docs/state.md` decision 5, rewritten). It still cannot read a sensor, so
     # nothing above this comment may ever route here.
     "deceased": HERD_HEALTH,
     "inactive": HERD_HEALTH,

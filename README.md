@@ -65,7 +65,7 @@ Supabase, so there is nothing local to stand up. A local Postgres is needed only
 the store tests, which must never point at Supabase. Node 22 is needed only for the window.
 
 The build ran M0 through M9 and every phase is landed; M9 was the last. What a session picks up
-next is in `docs/STATE.md`'s Next row and `docs/open-issues.md`.
+next is in `docs/state.md`'s Next row and `docs/open-issues.md`.
 
 ## Verifying a build
 
@@ -91,13 +91,11 @@ tail -f logs/tick.jsonl | jq -r '[.tick,(.opened//0),(.ongoing//0),(.resolved//0
 jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl
 ```
 
-The second one should be empty. It names the healthy **set** rather than one healthy value
-because the two providers disagree: Anthropic says `tool_use` and `end_turn`, Ollama says
-`stop`. This file previously shipped `select(.finish_reason!="stop")`, which flagged every
-healthy Opus call as a config bug.
+The second one should be empty. It names the healthy **set** because the two providers spell their stop reasons
+differently (cookbook #10).
 
 Three streams: `tick.jsonl` (the heartbeat), `agent.jsonl` (the instrument),
-`audit.jsonl` (the receipt). Schemas in [docs/Plan.md](docs/Plan.md), under Logging.
+`audit.jsonl` (the receipt). Schemas in [docs/plan.md](docs/plan.md), under Logging.
 
 ## Docs
 
@@ -105,11 +103,11 @@ Nine files, each answering one question a reader actually has.
 
 | | |
 | --- | --- |
-| [docs/STATE.md](docs/STATE.md) | where the build stands right now: the module map, the decisions made, the verified environment, the live ranch facts, the demo recipe. The session-start briefing |
-| [docs/Plan.md](docs/Plan.md) | what it is and why: the tree, the architecture, the tool slices, the chaos agent, the three log streams and the tables beside them, the milestones |
+| [docs/state.md](docs/state.md) | where the build stands right now: the module map, the decisions made, the verified environment, the live ranch facts, the demo recipe. The session-start briefing |
+| [docs/plan.md](docs/plan.md) | what it is and why: the tree, the architecture, the tool slices, the chaos agent, the three log streams and the tables beside them, the milestones |
 | [docs/sweetwater-ranch.md](docs/sweetwater-ranch.md) | the scenario canon, the one source the SOPs derive from |
 | [docs/model-routing.md](docs/model-routing.md) | local by default, Opus where it earns it: the design and the ledger of what moved tiers, with proof |
-| [docs/JOURNEY.md](docs/JOURNEY.md) | what actually happened, and where it diverged, written at every boundary |
+| [docs/journey.md](docs/journey.md) | what actually happened, and where it diverged, written at every boundary |
 | [docs/cookbook.md](docs/cookbook.md) | the lessons, ordered by the pain that produced each one; 48 stable numbers, 45 entries after three merges |
 | [docs/open-issues.md](docs/open-issues.md) | everything still open, in plain language: what is wrong, why it matters, what it would take, who decides |
 | [docs/transcripts/](docs/transcripts/) | the pinned fixtures: the no-brief pair (M3) and the M7 local-versus-Opus pairs |

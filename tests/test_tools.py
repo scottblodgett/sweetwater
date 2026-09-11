@@ -1,6 +1,6 @@
 """The tool layer: the sweep, and the triage truth table.
 
-Two suites in one file, per `docs/Plan.md`:
+Two suites in one file, per `docs/plan.md`:
 
   1. **the sweep** - errors come back as data, gates stay boolean, fan-out stays bounded,
      and nothing in this layer retries
@@ -691,7 +691,7 @@ async def test_assembling_nothing_costs_nothing() -> None:
 # =========================================================================== #
 # 3b. the herd sweep (M7A): three rules inherited from sensors.py, then the animal truth table,
 #     then the cow's packet. All against fake Farm and Care hosts; the wire facts these encode
-#     (per-animal observations, honoured status filter, roster with animalIds) are in STATE.md
+#     (per-animal observations, honoured status filter, roster with animalIds) are in docs/state.md
 # =========================================================================== #
 HERD_NOW = datetime(2026, 9, 10, 14, 0, tzinfo=UTC)  # its own name: the chaos suite below rebinds NOW at import time
 OLD_ISO = "2026-08-09T09:00:00.000Z"  # cow-0777's real mobility note is this old; outside the window
@@ -1169,7 +1169,7 @@ async def test_call_tool_refuses_a_write_before_it_reaches_the_wire() -> None:
 # supervisor and faking either would be worse than deferring it:
 #   * a storm front producing ONE fused work order rather than four unrelated ones
 #   * `herd_health` discovering the coyote kill through its own tools, with no overlay
-# Both are recorded as deferred in `docs/JOURNEY.md` and are owed at the M3 boundary.
+# Both are recorded as deferred in `docs/journey.md` and are owed at the M3 boundary.
 # =========================================================================== #
 #: Two hosts, not one. `/animals` is on the FARM API and only the observation is on CARE. M5
 #: shipped this as a single base URL and it would have 404'd on the first real coyote kill.

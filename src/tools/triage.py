@@ -7,7 +7,7 @@ consumes (severity, category, the incident key). The model owns only what a huma
 judges, and it never sees a threshold comparison.
 
 **Where these numbers come from.** The ranch mission in `docs/sweetwater-ranch.md` says
-which failures are losses, and the observed per-type distributions in `docs/STATE.md`
+which failures are losses, and the observed per-type distributions in `docs/state.md`
 say what normal looks like on this ranch. They are NOT lifted from the upstream sensor
 service's source: a constant copied out of the frozen upstream's internals is a value
 nothing here can verify, and it fails silently the day the other side retunes it.
