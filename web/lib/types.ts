@@ -28,7 +28,7 @@ export interface ShiftReport {
   latency_ms: number; input_tokens: number; output_tokens: number;
 }
 
-/** One row of sw_ops.ticks. `fields` is the whole tick line (docs/logging.md); the names the panels read are typed below. */
+/** One row of sw_ops.ticks. `fields` is the whole tick line (docs/Plan.md); the names the panels read are typed below. */
 export interface Tick {
   id: number; run_id: string; tick: number; at: string; store: string; duration_ms: number; cost_usd: number; error: string | null; failed_stage: string | null;
   fields: TickFields;

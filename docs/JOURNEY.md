@@ -4,6 +4,11 @@ What actually happened, and where it diverged from the plan. Written as we go ra
 than reconstructed at the end, because a reconstruction only records the decisions that
 worked.
 
+File names are as they were at the time. In the post-M9 review (2026-09-11) `docs/architecture.md` and
+`docs/logging.md` were folded into `docs/Plan.md`, `docs/issues.md` became `docs/open-issues.md` (issue numbers
+unchanged), the three transcripts moved to `docs/transcripts/`, and the per-phase defect lists below were trimmed
+to one line each where `docs/cookbook.md` holds the full entry.
+
 ---
 
 ## M0 - Skeleton, logging, and a live handshake
@@ -33,46 +38,17 @@ No plan content depends on 3.12.
 
 ### Three defects M0 caught in itself
 
-The first two are the reason logging lands first rather than last; the third is the
-reason `mypy --strict` is in the gate rather than aspirational.
+The first two are the reason logging lands first rather than last; the third is the reason `mypy --strict`
+is in the gate rather than aspirational. Each is a cookbook entry.
 
-**1. `failed_stage: null` on a connect failure.** `failed_stage` was only assigned once
-inside the session context, so a connection failure produced an error line that said a
-tick died without saying where, which is the single question the field exists to answer.
-Now set **before** each stage is attempted.
-
-**2. `unhandled errors in a TaskGroup (1 sub-exception)`.** The MCP transport runs on
-anyio task groups, so every underlying failure surfaced as that string, identical whether
-the host refused the connection, DNS failed, or the server returned a 401. A message that
-looks like information and carries none is worse than no message. Added
-`flatten_exception()`, which unwraps `ExceptionGroup` to the leaves and deduplicates
-them - the same failure now reads `ConnectError: All connection attempts failed`.
-Deduplication matters because 160 concurrent reads failing the same way otherwise produce
-160 identical leaves.
-
-The catch also had to widen from `Exception` to `BaseException` (re-raising
-`KeyboardInterrupt` and `SystemExit`): an `ExceptionGroup` from the transport does not
-reliably inherit from `Exception`, so the narrower catch let the real cause escape
-unreported.
-
-**3. `getattr(c, "text", None)` type-checked by accident.** Both content readers picked
-text out of an MCP response with a duck-typed attribute probe. MCP tool content is a union
-of five block types (text, image, audio, resource link, embedded resource), and a
-`getattr` probe does not narrow a union, so `mypy --strict` flagged four `union-attr`
-errors. The runtime consequence was worse than the typing one: if the upstream ever
-returned a non-text block, the probe would quietly contribute an empty string and the
-caller would parse `""` as "the tool returned nothing" rather than "we could not read
-this." Replaced with `isinstance(c, TextContent)` and `isinstance(c, TextResourceContents)`.
-
-Worth noting the shape of this one: the code **worked** against the live server and the
-tests passed. Only the type checker knew, which is the argument for having it in the gate.
+1. **`failed_stage: null` on a connect failure.** The marker was assigned inside the block it described. Set before each stage now. Cookbook #2.
+2. **`unhandled errors in a TaskGroup (1 sub-exception)`** for every transport failure. `flatten_exception()` walks the group to its leaves and deduplicates; the catch widened to `BaseException`. Cookbook #1.
+3. **`getattr(c, "text", None)` type-checked by accident** on a five-way union and would have read a non-text block as "the tool returned nothing." `isinstance` now. The code worked and the tests passed; only the type checker knew. Cookbook #4.
 
 ### A found fact worth writing down
 
-**A Lambda Function URL routes every path to the same handler.** The first attempt to test
-the failure path appended a bogus path to `MCP_URL` and the handshake **succeeded** - the
-MCP server answers at any path. Failure paths have to be tested against an unreachable
-host. Filed here because the invalid test looked exactly like a passing test.
+**A Lambda Function URL routes every path to the same handler**, so a bogus path on `MCP_URL` is a passing
+handshake. Failure paths are tested against an unreachable host. Cookbook #3.
 
 ### Doc audit after the gate closed, and a fourth defect
 
@@ -121,42 +97,26 @@ schemas.
 
 ### The `-500` fault, and why the fix is a window rather than a case
 
-`docs/STATE.md` records one temperature sensor reading `-500` with `status: "online"`. The
-obvious fix is to special-case `-500`. That is a fix for exactly one sentinel, and the next
-one the upstream picks walks straight through it. So `triage.py` carries a **per-type
-physical-plausibility window** instead: a value outside what the instrument could physically
-report is a sensor fault, not a reading, whatever the number is. Same cost, catches the case
-that has not happened yet.
+One temperature sensor reads `-500` with `status: "online"`. `triage.py` carries a per-type physical-plausibility
+window rather than a special case for one sentinel, so the next sentinel the upstream picks is caught too. Cookbook #6.
 
 ### An M0 defect that only M1 could find
 
-**Foreign stdlib records skipped the structlog processor chain.** M0's logging looked
-correct because M0 only ever logged through structlog. M1 was the first phase to pull in
-libraries that log on their own, and `alembic` and `httpx` lines came out with no level, no
-timestamp, and no `run_id`. The three streams join on `run_id` and `tick`, so a line without
-them is not in the stream, it is beside it. Pinned the chain so foreign records go through
-the same processors.
-
-Worth the note because M0's gate was genuinely green: the defect needed a second library in
-the process before it could exist.
+**Foreign stdlib records skipped the structlog processor chain.** `alembic` and `httpx` lines came out with no
+`run_id`, so they were beside the stream rather than in it. M0's gate was green because M0 logged through nothing
+else; the defect needed a second library in the process to exist. Cookbook #7.
 
 ### Reaching into the frozen upstream, and retracting it
 
-Writing the triage thresholds, the fastest way to get 13 types right looked like reading
-the deployed Sensor API's own generator in `C:\temp\MCP-Farm`. Did it, then retracted it.
-
-The clone is there and reading it feels like research, but a constant lifted out of another
-service's internals is a value **nothing in this repo can verify**, and it fails silently
-when the other side retunes it: the code keeps running and starts being wrong. The
-thresholds are derived from the ranch mission in `docs/sweetwater-ranch.md` and the observed
-distributions in `docs/STATE.md`, both of which live here and can be re-measured over the
-wire. Full entry as cookbook #5, and the rule is now sharpened in root `CLAUDE.md` and
-`docs/STATE.md`: **the contract is the tools and the REST surface, not that repo's source.**
+Writing the triage thresholds, the fastest route looked like reading the deployed Sensor API's generator in
+`C:\temp\MCP-Farm`. Did it, then retracted it: a constant lifted out of another service is a value nothing here
+can verify. Thresholds derive from `docs/sweetwater-ranch.md` and the observed distributions in `docs/STATE.md`.
+Cookbook #5, and the rule is sharpened in root `CLAUDE.md` and `docs/STATE.md`.
 
 ### The defect this phase caught in itself: the tree stopped matching the plan
 
-Found at the boundary, when Scott asked whether `docs/Plan.md` still described the repo. It
-did not, in four ways, none of which any test could see:
+Found at the boundary, when Scott asked whether `docs/Plan.md` still described the repo. It did not, in four
+ways, none of which any test could see:
 
 | Plan says | M1 shipped |
 | --- | --- |
@@ -165,24 +125,12 @@ did not, in four ways, none of which any test could see:
 | three test modules | seven |
 | eleven named leaves exist | absent, including the whole of `src/prompts/` |
 
-The `routing.py` one was the live grenade. `docs/Plan.md` also names
-`src/models/routing.py`, a completely different question (which model **tier** runs a job,
-not which **agent** owns a finding), which lands at M7. Two modules called `routing.py`
-doing unrelated work is a mis-import that type-checks. Folding the table into `agent.py`
-costs one rename now and would have cost an afternoon at M7.
-
-The absent leaves were the subtler half. An empty `src/prompts/` directory is
-indistinguishable from a forgotten one, and it read to Scott as a hole in the build rather
-than as M2 not having happened yet. Fixed both ways: eleven docstring-only placeholders,
-each naming the milestone that fills it and carrying the decision already made about it, and
-a **"lands at" marker column** on every line of the plan's tree, so unbuilt reads as unbuilt.
-No prompt text was drafted, because a brief written against an imagined evidence packet
-reads fine and grounds nothing.
-
-Renames done with `git mv` so the history survives, and the seven-into-two test merge
-verified by diffing the sorted set of collected test function names before and after: **89
-before, 89 after, identical set.** A merge that silently drops a rail is the one outcome
-that would have made the whole exercise negative.
+The `routing.py` one was the live grenade: `docs/Plan.md` also names `src/models/routing.py` for a different
+question (which model **tier**, not which **agent**), and two modules with one name doing unrelated work is a
+mis-import that type-checks. Fixed both ways: `git mv` to conform the code (the seven-into-two test merge
+verified by diffing the sorted set of collected test names, 89 before and 89 after), eleven docstring-only
+placeholders naming the milestone that fills each, and a "lands at" marker column on every line of the plan's
+tree. Cookbook #9.
 
 ### And the process defect underneath it
 
@@ -276,74 +224,26 @@ rather than repeated: the defect there was **silent** drift, and no test reads a
 
 ### Five defects M2 caught in itself
 
-Full entries as cookbook #10 through #15. The first three are all consequences of printing
-the packet first.
+Full entries as cookbook #10 through #15. The first three are all consequences of printing the packet first.
 
-**1. A name join across two services returned an empty set, not an error.** The first packet
-had **zero** siblings and no pasture. `ranch://sensors/map` spells a location
-`"Alkali Flat (alkali-flat)"` where REST says `"Alkali Flat"`, and the Farm API's pasture for
-sensor location `"East Allotment"` is `"East BLM Allotment"`. Now slugified to the id and
-matched on that. The dangerous part is that "no siblings here" and "no animals in this
-pasture" are plausible facts about a ranch, so the packet read as complete and merely thin.
-
-**2. Two honest numbers on one page with no note about precedence.** Triage judged 3.4 gal
-while the newest history point said 0.8 gal at a *later* timestamp. Both are honest -
-`/sensors/:id` and `/sensors/:id/readings` are synthesized independently - but a model handed
-two contradictory numbers picks one and sounds equally confident either way. `render()` now
-says in one line that the series is shape and trend only.
-
-**3. The token estimate was off 4x.** Sized `MAX_OUTPUT_TOKENS = 1536` against a guess of
-~1,400 in / ~450 out. Measured **5,555 in / 1,137 out**. The SOP file, loaded whole, is the
-majority of the input and had been filed mentally as "just a few rules." Raised to 2,048 with
-the measured numbers in the comment. The finding underneath it: **the cost lever is the SOP,
-not the evidence**, which matters before M7 optimizes the wrong half.
-
-**4. The grader's own failure case caught the grader.** `ungrounded_numbers()` asserted that
-`300` and `40` in an invented sentence were both ungrounded; it found only `300`. `"40"` is a
-substring of the timestamp `13:40:00` in the rendered packet, so a substring test grounded an
-invented head count against an unrelated minute field. Now strips ISO timestamps and compares
-number **tokens** on both sides, which made the grader strictly harder to pass. It only
-surfaced because the grader had a red case at all.
-
-**5. Ten test rails were about to start billing.** `run_tick` grew two spend stages and ten
-existing rails called it. Fixed twice over: `spend=False` at every call site, and an autouse
-`conftest.no_model_calls` fixture that raises if anything constructs a real client. The flag
-is the intent, the fixture is what happens when somebody forgets it. Same shape as
-`assert_local_test_url` keeping the suite off Supabase.
+1. **A name join across two services returned an empty set, not an error.** Zero siblings, no pasture; the map and REST spell a location differently. Slugified to the id. Cookbook #15.
+2. **Two honest numbers on one page with no note about precedence.** Triage judged 3.4 gal, the newest history point said 0.8 gal later. `render()` says the series is shape and trend only. Cookbook #12.
+3. **The token estimate was off 4x.** `MAX_OUTPUT_TOKENS = 1536` against a guess; measured 5,555 in / 1,137 out, the SOP the majority. Raised to 2,048 with the numbers in the comment. **The cost lever is the SOP, not the evidence.** Cookbook #13.
+4. **The grader's own failure case caught the grader.** `"40"` was a substring of `13:40:00`. Number tokens on both sides now. Cookbook #11.
+5. **Ten test rails were about to start billing.** `spend=False` at every call site and an autouse `no_model_calls` fixture. Cookbook #14.
 
 ### The doc defect, and this time step 2 is what found it
 
-M0 concluded "re-run every command the docs claim works." M2 is the first phase where one of
-those commands had real data to run against, and it failed immediately:
+M0 concluded "re-run every command the docs claim works." M2 is the first phase where one of those commands had
+real data to run against, and it failed immediately: the documented `jq` that selects `finish_reason != "stop"`
+returned **all 19 lines, every one healthy**, because Anthropic never emits `stop`. It shipped in four files and
+survived two milestones. The first fix was also broken, in a way that produced no output and looked healthy;
+a negative control caught it. Cookbook #10 has the whole story. The same audit found `tokens_in` / `tokens_out`
+printed where the code writes `input_tokens` / `output_tokens`, and two docs still calling `--once` a stub.
 
-> `jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl` **# should be empty**
-
-It returned **all 19 lines, every one healthy.** Anthropic's stop reasons are `tool_use`,
-`end_turn`, `stop_sequence`, `max_tokens`; `stop` is the OpenAI and Ollama spelling and no
-Anthropic call has ever produced it. So the diagnostic written to find config bugs reported a
-100% config-bug rate on a phase that worked perfectly. It shipped in **four** files -
-`src/models/CLAUDE.md`, `README.md`, `docs/logging.md`, `docs/Plan.md` - and survived two
-milestones, because no test reads a `jq` line out of a markdown file.
-
-**And the first fix was broken too.** Written as
-`select(["stop",…]|index(.finish_reason)|not)`, which is wrong in a way that reads perfectly:
-inside the pipe `.` is the array, so it tries to index an array with a string and every line
-errors. Thirty errors on stderr, nothing on stdout, and `wc -l` reports `0` - identical to a
-healthy log. Caught only by adding a **negative control** (`IN("stop")` alone must list all 30
-Anthropic lines) and running it. A diagnostic that fails by producing no output cannot be
-verified by running it once; see cookbook #10 and #11, which arrive at the same rule from
-opposite directions.
-
-Fixed by naming the healthy **set** rather than one healthy value, in all four files, with
-`ModelResponse.ok` and `.truncated` holding the same sets in code as the definition. The same
-audit found `docs/logging.md` and `docs/Plan.md` printing `tokens_in` / `tokens_out` where the
-code writes `input_tokens` / `output_tokens`, which is a query that returns `null` and looks
-like a calm ranch, plus `README.md` and root `CLAUDE.md` still calling `--once` a stub. Both
-`tick.jsonl` examples were also two milestones out of date on their field names.
-
-The general lesson is M0's fourth defect one more layer out: **a doc defect and a code defect
-have the same cause, and only the code one gets caught by a test.** The habit works. It just
-cannot fire until the command has something to say.
+The general lesson is M0's fourth defect one more layer out: **a doc defect and a code defect have the same cause,
+and only the code one gets caught by a test.** The habit works. It just cannot fire until the command has
+something to say.
 
 ### Two decisions worth not re-litigating
 
@@ -439,64 +339,24 @@ for 30 minutes and measures the real thing.
 
 ### The experiment disagreed with its own hypothesis, which is why it was worth running
 
-The one thing to prove rather than port: run a sub-agent with no brief, capture it flailing, pass
-the brief, capture it working. `docs/no-brief-transcript.md` and `docs/with-brief-transcript.md` are
-that pair - same model, same evidence packet byte for byte, one variable, whether
-`COMPLIANCE_MANDATE` was in the brief.
+The one thing to prove rather than port: run a sub-agent with no brief, capture it flailing, pass the brief,
+capture it working. `docs/transcripts/no-brief-transcript.md` and `docs/transcripts/with-brief-transcript.md`
+are that pair, one variable.
 
-**It did not flail.** The unbriefed answer echoed severity correctly, named its sensor, quoted only
-numbers that were on the page, cited three real rule ids, escalated for a real reason, and **passed
-every rail with zero violations.** It would have shipped.
-
-What it did instead was invisible to code. One action instead of five, and that action was filing a
-note. The two stock tanks it correctly identified as somebody else's got "belong to a separate water
-work order" with no name attached. The gauge it could not believe went into `unknowns`, which is
-where facts go to be nobody's problem, rather than to the agent that repairs instruments. Its
-headline promised a GM escalation its actions list never contained.
-
-So the finding is sharper than the one the experiment was set up to catch, and it is now the honest
-limit of the whole rail suite: **every rail asks whether an answer is defensible about its own
-incident, and scope is not answerable from inside one work order.** A slice whose brief silently
-regresses to nothing keeps a green suite. Both answers are pinned in `test_agent.py` and the tests
-over them assert the *sameness* of the verdict rather than a quality gap. Nothing here became a
-blocking rail: a rail that counts actions is a rail that gets satisfied by padding.
-
-**Worth its own sentence.** The whole of `compliance.md` was on the page in both runs, including the
-two rules that name the owner of a bad instrument and of a stock tank in as many words. The SOP did
-not rescue it. Standing orders describe the domain; the brief says which part of it is yours.
+**It did not flail.** The unbriefed answer **passed every rail with zero violations** and would have shipped.
+What it did instead was invisible to code: one action instead of five, the neighbours' tanks handed to nobody by
+name, the suspect gauge buried in `unknowns`, a headline promising an escalation its actions never contained.
+The finding is the honest limit of the rail suite: **every rail asks whether an answer is defensible about its own
+incident, and scope is not answerable from inside one work order.** Both answers are pinned in `test_agent.py`
+and nothing became a blocking rail. The SOP did not rescue it either: standing orders describe the domain, the
+brief says which part is yours. Cookbook #22.
 
 ### Four defects M3 caught in itself
 
-**1. `SHIFT_REPORT_MAX_TOKENS = 1_024`, reasoned about instead of measured.** 15 work orders across
-three worlds is a 32.5k-char page, and the first live tick spent the whole budget on the situation
-paragraph and the first few priorities before `max_tokens` cut the tool call mid-object. This is the
-M2 lesson word for word: **print the page before sizing the budget.** Now 3,072, sized off a
-measured 1,646-token complete answer, with the schema's own caps reasoned about in the comment so
-the next person does not size it a third time.
-
-**2. The truncation mislabelled itself, and the label was the worst one available.** A tool call cut
-off at `max_tokens` still arrives carrying a partially filled `input` dict. `synthesize` checked
-`payload is None`, which was False, so the half-answer went through the rails, where empty
-priorities read as an all-clear. The log said the supervisor wrote an all-clear about a ranch with
-ten criticals on it. `ModelResponse.ok` already knew better; two call sites were not asking. Both
-`synthesize` and `to_work_order` now treat truncated as no answer, and both have a rail. The general
-version, in `docs/cookbook.md`: **a fallback that fires correctly while attributing the failure to
-the wrong component is worse than a crash, because it is quiet and it accuses.**
-
-**3. The grounding grader was asymmetric.** M2 fixed it in one direction (substring containment:
-`"40"` graded as grounded against `13:40:00`) by stripping timestamps from the page. `compliance` is
-briefed to write for an auditor eight months out, so it quotes the date it was handed, and
-`2026-09-10T20:08:41Z` in an assessment then graded as five invented numbers. Times and dates now
-come off **both** sides. The accepted cost is written down rather than discovered later: a fabricated
-timestamp goes ungraded, and nothing in the prose is anchored to a time anyway. **A normalization
-applied to one side of a comparison is a bug waiting for the other side to start using the thing you
-normalized away.**
-
-**4. `AGENT_CONCURRENCY = 4` would have meant sixteen.** Caught in design rather than in production.
-The constant had one meaning when there was one agent; four agents each calling `gather_bounded` at
-four is a ceiling of sixteen that appears nowhere in the code. `fan_out` builds **one** semaphore and
-hands the same object down, and the rail measures peak in-flight calls across a 16-packet fan-out
-rather than asserting the constant equals 4, which would have passed on the broken version.
+1. **`SHIFT_REPORT_MAX_TOKENS = 1_024`, reasoned about instead of measured**, cut the first live fused report mid-object. Now 3,072, sized off a measured 1,646. Cookbook #13, second time.
+2. **The truncation mislabelled itself as an all-clear.** A tool call cut at `max_tokens` still carries a partial `input`, so `payload is None` let it through to the rails. Both `synthesize` and `to_work_order` treat truncated as no answer. Cookbook #23.
+3. **The grounding grader was asymmetric.** Timestamps were stripped from the page and not the prose; `compliance` quotes the date it was handed. Both sides now. Cookbook #11, reopened.
+4. **`AGENT_CONCURRENCY = 4` would have meant sixteen** with four agents each bounding themselves. One semaphore, shared, and a rail that measures peak in-flight rather than asserting the constant. Cookbook #24.
 
 ### Divergence from the plan
 
@@ -634,64 +494,19 @@ in and the feed goes quiet.
 
 ### Five defects this phase caught in itself
 
-**1. The `PATCH` was pointed at the wrong service, and every rail passed anyway.**
-`/animals` is on the **Farm API**; the observation is on the **Care API**. Both calls were
-written against `CARE_API`. `src/tools/CLAUDE.md` has warned about exactly this base-URL
-trap since M2 and it was walked into regardless. What makes it worth an entry is why it was
-invisible: **a `respx` mock answers whatever host it is pointed at**, so a suite that mocks
-one base URL cannot tell a wrong base URL from a right one. The fix is not just the split
-across two clients, it is that the rail now mounts `PATCH` on one host and `POST` on
-another, so collapsing them back fails loudly. Caught by a live probe, not by the suite.
-
-**2. The observation body was wrong in three ways at once.** It carried
-`{type, notes, observedBy}`. The real shape is `{type, severity, note, observedAt}`, all
-four required: `notes` is a 422, `observedBy` is accepted and silently dropped, and both
-`severity` and `observedAt` were simply missing. `restore`'s default status was `healthy`,
-which is not in the status enum at all (it is `active`). So the reset path, the one meant to
-clean up after a demo, could not have worked. All three enums are now validated in
-`parse_catalog` at load, so a typo is a load-time `ChaosCatalogError` rather than a 422
-nobody is watching for mid-demo.
-
-**3. A rail that asserted nothing.** The first store test contained
-`live = await active_overlay(...) if False else events`, which is a test that compares a
-value to itself. It passed, it was counted in the total, and it proved nothing. Replaced
-with a real read back through `ChaosEvent.from_row`.
-
-**4. Three rails failing for a reason that was the rail's fault, not the code's.** The
-`sentinel`, `gate_open`, and `drift` cases passed a custom `sensor_id` to the reading helper
-while leaving the event's `target_id` at its default, so the overlay correctly declined to
-match and the assertion correctly failed. Worth a line because the first instinct was to
-suspect the matching logic, and the matching logic was right.
-
-**5. A documented `jq` query that was wrong in three ways, caught by step 2 running it.**
-`docs/logging.md` gained a chaos section, and its example query named a file that does not
-exist (`logs/app.jsonl`; there are three JSONL streams and chaos is on none of them), keyed
-off `event` when a processor renames that field to `msg` before any renderer sees it, and
-assumed the stream was pure JSON when a CLI prints human summaries and tracebacks to the
-same place. It failed on all three counts on the first run. The same family as M2's `jq`
-defect and M0's documented-command defect: **a doc defect and a code defect have the same
-cause, and only the code one gets caught by a test.** Step 2 keeps earning its place.
+1. **The `PATCH` was pointed at the wrong service, and every rail passed anyway.** `/animals` is on the Farm API; a `respx` mock answers whatever host it is pointed at. Two clients now, and the rail mounts each on its own host. Caught by a live probe, not by the suite. Cookbook #16.
+2. **The observation body was wrong in three ways at once** (`notes` for `note`, `observedBy` invented, `severity` and `observedAt` missing), and `restore`'s default status was not in the enum. All three enums are validated at load. Cookbook #17.
+3. **A rail that asserted nothing.** `... if False else events` compared a value to itself. Replaced with a real read back.
+4. **Three rails failing for the rail's own fault**, a custom `sensor_id` against a default `target_id`. The matching logic was right.
+5. **A documented `jq` query wrong in three ways**, caught by step 2 running it: a file that does not exist, `event` where the field is `msg`, and a stream that is not pure JSON. Cookbook #21.
 
 ### An unauthorized write that cannot be undone
 
-The animal contract was learned by **sending deliberately invalid bodies to a nonexistent
-animal id and reading the 422s**. That technique names the enum, mutates nothing real, and
-does not require reading the frozen upstream's source, which is why it is now in
-`docs/cookbook.md` and `src/tools/CLAUDE.md`.
-
-The fifth probe body was valid. It returned **201** and created observation
-`0328d7e2-d271-4410-907c-a84020c2c8c7` against the ghost id `zz-does-not-exist-0000`. The
-ghost id is why nothing real was touched, but it was still a write to a live deployed
-service that had not been authorized, and it was disclosed before it was asked about.
-
-**It cannot be cleaned up from this side.** Observations are append-only upstream: only
-`GET /animals/:id/observations` and `POST /animals/:id/observations` exist.
-`DELETE /observations/{id}`, `DELETE /animals/{id}/observations/{id}`, `GET` on either
-single-observation path, and `OPTIONS` on both all return 404. The row is reachable only by
-listing observations for an animal id that does not exist, so it is invisible to every real
-animal and to every query the agents make. Removing it would be a scoped change in the
-frozen upstream repo, which is a conversation and not a drive-by. **It stays, and it is
-written down here so it is a known artifact rather than a mystery row.**
+The animal contract was learned by sending deliberately invalid bodies to a nonexistent animal id and reading
+the 422s (cookbook #17). The fifth probe body was valid, returned **201**, and created observation
+`0328d7e2-d271-4410-907c-a84020c2c8c7` against the ghost id `zz-does-not-exist-0000`. Nothing real was touched,
+and it was still an unauthorized write to a deployed service, disclosed before it was asked about. Observations
+are append-only upstream and the repo is frozen, so it stays: `docs/open-issues.md` #9.
 
 ### Two verifications are deferred to the M3 boundary, unrun and unweakened
 
@@ -723,15 +538,9 @@ obviously the right trade for one afternoon.
 
 ### The boundary found one more thing, and it is a parallel-session hazard
 
-Between the CLI verification and the cleanup step, `sw_ops_test` lost `chaos_events` and its
-stamp fell from `0002` back to `0001`. Nothing in this worktree did it. **The two sessions
-share one local Postgres and one `sw_ops_test` schema, and `conftest.py` drops that schema
-`CASCADE` and re-migrates from its own worktree's `alembic/` directory.** The other
-session's `pytest` run therefore rebuilt the schema without migration `0002` in it, pulling
-the table out from under this one. Each suite repairs the schema for itself on the next run,
-so neither is broken, but a `pytest` in one worktree **during** a `pytest` in the other is a
-cross-session flake with no local cause. It cost twenty minutes of looking for a bug that
-was not there. Now in `docs/cookbook.md`.
+Between the CLI verification and the cleanup step, `sw_ops_test` lost `chaos_events` and its alembic stamp
+fell from `0002` to `0001`. The other session's `pytest` had dropped and re-migrated the shared schema from its
+own worktree, which had no `0002`. Twenty minutes looking for a bug that was not there. Cookbook #18.
 
 ### A doc defect found by step 2 and deliberately not fixed
 
@@ -946,28 +755,11 @@ design allows. Full numbers and the steady-state finding: `docs/model-routing.md
 
 ### Five defects M4 caught in itself
 
-**1. A dead Sensor API was a green tick.** `read_sensor` turns every transport failure into a
-per-sensor error, correctly, so 160 of them produced a sweep with zero readings and no exception.
-Backoff never fires on a stage that did not fail. Found by predicting what the live kill would
-show before running it, and the prediction was "nothing." `run_tick` now raises when the sweep
-has errors and no readings. `docs/cookbook.md` #25.
-
-**2. The test suite was reading Supabase.** `.env` on this machine has `CHAOS_ENABLED=1`, and
-`sweep()` reads the overlay through `resolve_store()`, whose default is prod. Every tick test had
-been reading `sw_ops.chaos_events` on the hosted database, and from M4 the tick would have
-injected into `sw_ops_test` on every test. An autouse `chaos_off` fixture disarms both call
-sites. `docs/cookbook.md` #26. `docs/STATE.md` said the flag "belongs at 0"; it was at 1.
-
-**3. The brief's premise about `cost_usd`** (above).
-
-**4. Loop-level lines said `tick=0`.** `bind_tick` runs inside the tick, the tick runs as its
-own task, and a task copies its context, so the loop's `upstream_backoff` line about tick 11
-carried `tick: 0`. Seen on the first live run. The loop binds the tick before creating the task.
-
-**5. Two fixtures in the loop rails lied about the loop.** The fake sleep did not advance the fake
-clock, so start-to-start cadence read as drift; and a fake skipped tick did not report its skip,
-so `observe` read it as a recovery. Both were the fixture, not the loop, and both are exactly the
-two facts the real tick reports and the rail exists to check.
+1. **A dead Sensor API was a green tick.** 160 per-sensor errors and zero readings raised nothing, so backoff never fired. `run_tick` raises when the sweep has errors and no readings. Found by predicting what the live kill would show, and the prediction was "nothing." Cookbook #25.
+2. **The test suite was reading Supabase.** `.env` had `CHAOS_ENABLED=1` and `resolve_store()` defaults to prod. An autouse `chaos_off` fixture disarms both call sites. Cookbook #26.
+3. **The brief's premise about `cost_usd`** (above).
+4. **Loop-level lines said `tick=0`.** A task copies its context, so the loop binds the tick before creating the task.
+5. **Two fixtures in the loop rails lied about the loop**: a fake sleep that did not advance the clock, a fake skipped tick that did not report its skip. Both were the fixture.
 
 ### Work not asked for, and why each one is here
 
@@ -1232,7 +1024,7 @@ about 60s of local calls plus up to 60s of escalations, inside 300s.
 **Three measured ticks, test ledger, cascade and comparison on.** 12 opened, 12/12 shipped, 0
 rejected, 0 all-clears, 0 invented rules. 6 critical went straight to Opus. Of 6 Tier-1 candidates,
 5 escalated on `insufficient_information` and 1 stayed local. Side by side on the six pairs
-(`docs/m7-compare-transcript.md`): the local model named the flagged neighbour 1 of 3 (Opus 3 of 3),
+(`docs/transcripts/m7-compare-transcript.md`): the local model named the flagged neighbour 1 of 3 (Opus 3 of 3),
 the head count 1 of 4 (Opus 4 of 4), padded actions with echoes of its brief on 3 of 6, and proposed
 writes outside its slice on 4 of 6 (all stripped or escalated before the gate). $0.74 for the run
 at the real rate, shadows excluded.

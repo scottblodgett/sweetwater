@@ -150,7 +150,7 @@ number in the prose is anchored to a time anyway.
 
 ## The two things a rail cannot see
 
-`docs/no-brief-transcript.md` and `docs/with-brief-transcript.md` are one live pair: the same
+`docs/transcripts/no-brief-transcript.md` and `docs/transcripts/with-brief-transcript.md` are one live pair: the same
 model, the same evidence packet byte for byte, one variable, which is whether
 `COMPLIANCE_MANDATE` was in the brief. **Both answers pass every rail with zero violations.**
 The unbriefed one writes one action instead of five, hands nothing to a named neighbour, buries

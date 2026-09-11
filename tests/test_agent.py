@@ -1781,7 +1781,7 @@ def test_the_shift_report_schema_makes_the_fusion_claim_checkable() -> None:
 
 
 # --- the no-brief experiment ------------------------------------------------ #
-# The pair in `docs/no-brief-transcript.md` and `docs/with-brief-transcript.md`, pinned. Both
+# The pair in `docs/transcripts/no-brief-transcript.md` and `docs/transcripts/with-brief-transcript.md`, pinned. Both
 # answers are recorded verbatim from the live run on 2026-09-10, and the point of the block is
 # what it CANNOT assert: the rails do not separate them.
 
@@ -1893,7 +1893,7 @@ def test_the_rails_cannot_tell_the_unbriefed_answer_from_the_briefed_one() -> No
     no_brief, with_brief = _compliance_order(NO_BRIEF_ANSWER), _compliance_order(WITH_BRIEF_ANSWER)
 
     for order in (no_brief, with_brief):
-        assert order.violations == (), "both answers are clean; see docs/no-brief-transcript.md"
+        assert order.violations == (), "both answers are clean; see docs/transcripts/no-brief-transcript.md"
         assert order.status == "ok" and order.shippable
         assert ungrounded_numbers(order, RANGE_PACKET) == set(), "and both quote only the page"
         assert RANGE_INCIDENT.subject_id in order.assessment and "4.2" in order.assessment
@@ -2694,7 +2694,7 @@ async def test_the_same_write_for_the_same_incident_is_asked_once(gate_target: S
 
 async def test_reject_then_approve_land_their_decided_lines_and_a_second_answer_is_refused(gate_target: StoreTarget) -> None:
     """The verification the plan names, minus the process kill (that is the live check): reject
-    one, approve the other, prove both decided lines land with the fields `docs/logging.md`
+    one, approve the other, prove both decided lines land with the fields `docs/Plan.md`
     promises, and prove the rail is empty once nothing is pending."""
     performed: list[tuple[str, dict[str, object], Approval]] = []
 
@@ -3162,7 +3162,7 @@ async def test_compare_mode_does_not_shadow_an_escalation_because_the_rewrite_is
 
 @respx.mock
 async def test_the_tick_line_carries_tier_escalations_and_reasons_and_bills_each_order_at_its_own_model(first_sight: Settings, monkeypatch: pytest.MonkeyPatch, catalog: RanchMap, target: StoreTarget) -> None:
-    """`docs/logging.md`'s M7 fields. One local order and one escalated critical on the same tick:
+    """`docs/Plan.md`'s M7 fields. One local order and one escalated critical on the same tick:
     `tier` is the highest tier used, `escalation_reasons` is one code per escalated order, and
     `cost_usd` is the Tier-2 half only, since the Tier-1 tokens were free and are still counted."""
     serve(respx.mock, LOW | {"east-allotment-fence": 0.5})  # two incidents: the tank and a dead fence

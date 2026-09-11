@@ -3,7 +3,8 @@
 The patterns, ordered by **the pain that produced them** rather than by when each landed. Reordered at
 the M9 boundary, the close of the M phases; until then entries sat in the order they were paid for.
 **The numbers are stable**: `#33` means the same entry it meant in every `JOURNEY.md` and `open-issues.md`
-reference, so the index below is how to find one by number.
+reference, so the index below is how to find one by number. Three entries that were one lesson twice were merged
+in the post-M9 review (#23 into #13, #41 into #18, #44 into #32); their numbers stay in the index and say where.
 
 Each entry answers three questions: what went wrong, what it looked like while it was going wrong, and
 what the fix actually was.
@@ -32,7 +33,7 @@ what the fix actually was.
 - **#20** `random.choices` is not a contract, `randrange` is - _The platform is Windows and the framework has opinions_
 - **#21** A console stream is not a log file, and `jq` says so badly - _A line that lied, or said nothing_
 - **#22** Every rail was local, so the one thing they could not see was scope - _A test that proved nothing_
-- **#23** A budget bug that arrives wearing the model's clothes - _The model and its page_
+- **#23** A budget bug that arrives wearing the model's clothes - merged into **#13**
 - **#24** A concurrency ceiling that got multiplied by the number of workers - _Concurrency, event loops, and process-global state_
 - **#25** A hundred and sixty item failures added up to a green tick - _A line that lied, or said nothing_
 - **#26** An armed feature flag plus a prod default put the test suite on Supabase - _The test database, the demo ledger, and two sessions_
@@ -50,10 +51,10 @@ what the fix actually was.
 - **#38** The rate was one constant, and it was wrong by 3x; the tokens beside it were fine - _Money_
 - **#39** A filter that validates its input is not a filter that works; test it against a real non-default value - _A frozen upstream you learn on the wire_
 - **#40** Measure the upstream's concurrency ceiling before the first fan-out at yours - _A frozen upstream you learn on the wire_
-- **#41** The test suite drops the demo ledger - _The test database, the demo ledger, and two sessions_
+- **#41** The test suite drops the demo ledger - merged into **#18**
 - **#42** A rule the model is told not to break will not be broken for the demo - _The model and its page_
 - **#43** A dependency with process-global state bound to an event loop is a flake waiting for a second loop - _Concurrency, event loops, and process-global state_
-- **#44** A console line that carries the receipt's field names is counted as a receipt - _Logs, receipts, and where they land_
+- **#44** A console line that carries the receipt's field names is counted as a receipt - merged into **#32**
 - **#45** Starlette answers a 500 from above your middleware - _The platform is Windows and the framework has opinions_
 - **#46** Do not write source through a shell heredoc - _Docs, diagrams, and the shell_
 - **#47** A demo approve is a real write; plant a tool the ranch does not have - _The test database, the demo ledger, and two sessions_
@@ -179,7 +180,7 @@ be re-run when the decision changes. Same family as #10.
 
 **What went wrong.** The window's gate rail read `writes_pending` off the latest tick line and said "no
 writes waiting" while two pauses sat in the gate panel beside it. `writes_pending` is null on a tick that
-proposed nothing and did not open the gate (`docs/logging.md`), and a pause planted by another process
+proposed nothing and did not open the gate (`docs/Plan.md`), and a pause planted by another process
 between ticks is not this tick's business at all. The line was honest; the rail read it as an answer to
 a question it never asked.
 
@@ -330,6 +331,12 @@ session.
 
 **Found:** M5's phase close, while trying to tidy up leftover rows.
 
+**The same drop, one session, M7A (was #41, merged here).** The M7A run was on `sw_ops_test`. A full `pytest`
+mid-run wiped the pending rows and the active chaos events; a `-k` selection that happened to pick up one
+store-backed test did it again an hour later. Each time the debounce started over and the permanently bad sensors
+were paid for again. The fixture is right to drop the schema; the person is what has to know. **No pytest of any
+kind between the first tick of a demo on the test ledger and its last.** Written in `tests/CLAUDE.md`. Found twice.
+
 ---
 
 ### 26. An armed feature flag plus a prod default put the test suite on Supabase
@@ -356,21 +363,6 @@ Check the machine.
 **Found:** M4, while wiring chaos into the tick and asking where the tests would inject.
 
 ---
-
-### 41. The test suite drops the demo ledger
-
-**Pain.** `conftest.migrated_store` drops `sw_ops_test` `CASCADE` and re-migrates it. The M7A run was
-on `sw_ops_test`. A full `pytest` mid-run wiped the pending rows and the active chaos events; a `-k`
-selection that happened to pick up one store-backed test did it again an hour later. Each time the
-debounce started over and the permanently bad sensors were paid for again.
-
-**Fix.** No pytest of any kind between the first tick of a demo on the test ledger and its last. Written
-in `tests/CLAUDE.md`.
-
-**Lesson.** #18 said two sessions cannot run pytest at once. The same drop bites one session running a
-demo and a test. The fixture is right to drop the schema; the person is what has to know.
-
-**Found:** M7A, twice.
 
 ### 19. An idempotent insert makes a demo replay a no-op
 
@@ -572,7 +564,7 @@ belongs to and check for the class. Sentinels travel in families.
 
 ### 10. A field whose vocabulary is per provider, and a query that hardcoded one word
 
-**Pain.** `src/models/CLAUDE.md`, `README.md`, and `docs/logging.md` all shipped
+**Pain.** `src/models/CLAUDE.md`, `README.md`, and `docs/Plan.md` all shipped
 `jq -r 'select(.finish_reason!="stop")' logs/agent.jsonl` with the comment "should be empty.
 Anything in it is a config bug." Run against M2's first real `agent.jsonl`, it returned
 **every single line**, all 19 of them, all healthy.
@@ -587,7 +579,7 @@ about everything gets ignored, and then it is not there when one line really is 
 `select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)`. Both
 vocabularies pass, and both truncation spellings still fail. `ModelResponse.ok` and
 `.truncated` hold the same sets in code, and they are the definition. Fixed in all four files
-that carried it: `src/models/CLAUDE.md`, `README.md`, `docs/logging.md`, `docs/Plan.md`.
+that carried it: `src/models/CLAUDE.md`, `README.md`, `docs/Plan.md`, `docs/Plan.md`.
 
 **The first attempt at that fix was also broken, and running it is the only reason we know.**
 It was written `select(["stop",…]|index(.finish_reason)|not)`, which is wrong in a way that
@@ -679,26 +671,14 @@ stream it is checking. Otherwise the more you log for humans, the more the rail 
 
 **Found:** M6, first run of the rail against real lines.
 
+**Second half, M8 (was #44, merged here).** The rail said one `audit_id` appeared **three** times after a
+deliberate third insert was refused by the primary key. The table had two rows and the file two lines. The
+refusal was logged as `audit_receipt_failed` with `audit_id=` and `phase=`, and the rail counts any line with
+both. The fix is `receipt_phase` on the console line. The M6 rule said a console line must never grow an
+`audit_id` and get counted; the field **names** on a line about a receipt are part of the contract too. When a
+rail is a grep over field names, every new log line near the thing it greps for is a candidate false positive.
+
 ---
-
-### 44. A console line that carries the receipt's field names is counted as a receipt
-
-**Pain.** The receipt rail (`unpaired_audit_ids`) said one `audit_id` appeared **three** times after a
-deliberate third insert was refused by the primary key. The table had exactly two rows. The file had
-exactly two lines.
-
-**Why.** The refusal was logged as `audit_receipt_failed` with `audit_id=` and `phase=`, and the rail
-counts any line with an `audit_id` and a `phase` in `("proposed", "decided")`. The console line looked
-exactly like a receipt to the thing whose job is to count receipts.
-
-**Fix.** `receipt_phase` on the console line. The M6 rule already said a console line must never grow an
-`audit_id` and get counted; this is the second half of it, which is that the field **names** on a line
-about a receipt are part of the contract too.
-
-**Lesson.** When a rail is a grep over field names, every new log line near the thing it greps for is a
-candidate false positive. Name the fields on commentary lines differently from the fields on the record.
-
-**Found:** M8, by the rail written for the constraint.
 
 ## The model and its page
 
@@ -784,39 +764,19 @@ before choosing any number that bounds it.
 
 **Found:** M2, on the first live call.
 
----
+**Second time, M3 (was #23, merged here).** `SHIFT_REPORT_MAX_TOKENS` was 1,024 and the fused report needed
+1,646, so the tool call was cut off inside the priorities list. Worse, the truncation *mislabelled itself*: a
+tool call truncated at `max_tokens` still arrives carrying a partially filled `input` dict, `synthesize` checked
+`payload is None`, which was False, and the half-answer went through the rails, where empty priorities read as
+an all-clear. The log said the supervisor wrote an all-clear about a ranch with ten criticals on it. Both
+`synthesize` and `to_work_order` now check `payload is None or response.truncated`, which is what
+`ModelResponse.ok` already said. Budget raised to 3,072, sized off the measurement.
 
-### 23. A budget bug that arrives wearing the model's clothes
-
-**Pain.** The first live M3 tick logged `shift_report_violations=['all_clear']`. Read literally:
-the supervisor looked at a ranch with ten critical incidents on it and reported that everything
-was fine. That is the single worst output this system can produce and the rail it has the loudest
-opinion about.
-
-**It had not done that.** `SHIFT_REPORT_MAX_TOKENS` was 1,024 and the answer needed 1,646, so the
-tool call was cut off inside the priorities list.
-
-**Why the label was wrong.** A tool call truncated at `max_tokens` still arrives with an `input`
-dict on it, **partially filled**. `synthesize` checked `payload is None`, which was False, so a
-half-written answer went through the rails, where empty priorities read as an all-clear. Both
-things then happened at once: the correct fallback fired and the page shipped, and the log blamed
-the model for a number in a config file.
-
-**Fix.** `if response.payload is None or response.truncated`, in both `synthesize` and
-`to_work_order`, which is what `ModelResponse.ok` already said and neither caller was asking.
-Budget raised to 3,072, sized off the 1,646 measurement with the schema's own caps reasoned about
-in the comment, rather than picked again.
-
-**Lesson.** Two of them, and the second is the general one. First: #13 all over again, so the
-version of that lesson that actually sticks is **print the page, then size the budget, then check
-that a budget failure still says budget.** Second, and bigger: this repo is careful to make every
-failure produce output - a `no_answer` work order, a code-assembled shift report, a tick line even
-when the tick dies. A fallback that fires correctly while **attributing the failure to the wrong
-component** is worse than a crash, because it is quiet and it accuses. When you write a fallback,
-test what it says the cause was, not only that it ran.
-
-**Found:** M3, on the first live `--once` after the stage was wired, by reading the log line
-instead of trusting the exit code.
+The general lesson from the second time is bigger than the first: this repo makes every failure produce output,
+a `no_answer` order, a code-assembled report, a tick line even when the tick dies. **A fallback that fires
+correctly while attributing the failure to the wrong component is worse than a crash, because it is quiet and it
+accuses.** When you write a fallback, test what it says the cause was, not only that it ran. So the version of
+this lesson that sticks: print the page, then size the budget, then check that a budget failure still says budget.
 
 ---
 

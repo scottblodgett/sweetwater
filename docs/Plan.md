@@ -96,22 +96,21 @@ sweetwater/                                lands at
 ├── tests/
 │   ├── CLAUDE.md                   M0    never Supabase; sw_ops_test schema; what each rail proves
 │   ├── conftest.py                 M1    the sw_ops_test fixtures, and the skip when no local Postgres answers
-│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), the no-brief pair (M3, and it did not flail: see docs/no-brief-transcript.md), gate resume (M6), the cascade and the planted local all-clear that must escalate (M7)
+│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), the no-brief pair (M3, and it did not flail: see docs/transcripts/no-brief-transcript.md), gate resume (M6), the cascade and the planted local all-clear that must escalate (M7)
 │   ├── test_tools.py               M1    triage truth table, sweep concurrency; chaos determinism (M5)
 │   └── test_api.py                (M8)   envelope shape, gate endpoints
 ├── data/
 │   ├── examples.json              (M5)   chaos scenario catalog + golden fixtures
 │   └── knowledge_base/            (M2)   the SOPs, plus herd.md at M7A. Six files, not four: infrastructure splits into plant / wellhead / sensors, because a packet is billed for every rule in the file it carries (see SOP_FOR_CATEGORY)
 ├── docs/
-│   ├── Plan.md                     M1    this file. Tracked in git at the M1 boundary; the tree above is the authority
+│   ├── Plan.md                     M1    this file: what it is and why. The tree above is the authority; the architecture and the log schemas live here since the post-M9 review
 │   ├── STATE.md                    M0    the session-start briefing, refreshed at every boundary
 │   ├── sweetwater-ranch.md         M0    the scenario canon, copied from MCP-Farm
-│   ├── architecture.md             M0    the diagram, the free/expensive split, the tiers
 │   ├── model-routing.md            M0    the tier table + the measurement log (what moved down, when, proof)
-│   ├── logging.md                  M0    the schema for the three log streams
 │   ├── cookbook.md                 M0    the lessons, as prose, ordered by the pain
 │   ├── JOURNEY.md                  M0    what actually happened, and where it diverged
-│   └── decisions/                  M0    numbered ADRs, short
+│   ├── open-issues.md              M9+   everything still open, in plain language, and what each would take
+│   └── transcripts/                M3+   the pinned fixtures: the no-brief pair (M3) and the M7 side-by-side
 ├── logs/
 │   ├── .gitkeep                    M0    *.jsonl gitignored
 │   ├── tick.jsonl                  M0    one line per tick        (the heartbeat)
@@ -147,7 +146,7 @@ The root file in MCP-Farm grew to 644 lines before it got broken up, and the fix
 
 | File                   | Carries                                                                                                                                                                        |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `CLAUDE.md` (root)     | What this is, the one rule (**report back after 5 minutes or when you find work I did not ask for**), the commands, and a signpost to each nested file. Target under 80 lines. |
+| `CLAUDE.md` (root)     | What this is, the one rule (**report back after 5 minutes or when you find work I did not ask for**), the ritual, the commands, and a signpost to each nested file. Target under 80 lines of prose; the Commands block and the signpost table sit on top of that and are re-run and re-read at every close. |
 | `src/agent/CLAUDE.md`  | The graph shape, `RanchState` fields, the tick contract (what a tick must always do even when it fails), the escalation predicate.                                             |
 | `src/tools/CLAUDE.md`  | **The upstream is frozen.** Allowlists are code not prompt. Severity belongs to `triage.py`. Chaos's two injection paths and their guards.                                     |
 | `src/models/CLAUDE.md` | The Ollama gotchas, `reasoning_effort` as an explicit per-call argument, and the one rule about when thinking may be off.                                                      |
@@ -161,6 +160,21 @@ The root file in MCP-Farm grew to 644 lines before it got broken up, and the fix
 
 ## Architecture
 
+### What this repo is, and what it is not
+
+**Is:** one orchestrator running continuously, driving five sub-agents against a live
+ranch.
+
+**Is not:** the ranch. The four REST APIs and the MCP server are already deployed on
+Lambda, live in `scott-jasper/mcp-farm`, and are **frozen and read-only** from here. 19
+flat-named tools plus the `ranch://sensors/map` resource are the entire surface. This
+repo adds nothing to them.
+
+That boundary is the most important fact in the design. The ranch is an independent
+external product; this is a client of it that happens to be smart.
+
+### The shape
+
 ```
                     main.py
                        │
@@ -169,54 +183,125 @@ The root file in MCP-Farm grew to 644 lines before it got broken up, and the fix
         │                                                         │
         │  every tick:   chaos maybe-fires ──┐                     │
         │                sweep ~160 sensors  │  free, 0 tokens     │
+        │                herd: 1,195 head    │  free, 0 tokens     │  M7A: the Farm list in waves, the care record for the changed set
         │                triage (code)       │  free, 0 tokens     │
         │                reconcile sw_ops    │  free, 0 tokens     │
         │                route NEW incidents │  free, 0 tokens     │
-        │                fan out ────────────┼──┐   ← only spend   │
+        │                fan out ────────────┼──┐   <- only spend  │
         │                synthesize          │  │                  │
         │                gate on writes      │  │                  │
         └────────────────────────────────────┼──┼──────────────────┘
-                                             │  │ asyncio.gather
+                                             │  │ asyncio.gather (bounded)
    ┌──────────┬───────────┬──────────────┬───┘  │
  chaos     water_feed  herd_health  infrastructure  compliance
    │          └───────────┴──────────────┴───────────┘
    │                          │ MCP Streamable HTTP
-   │              ┌───────────▼────────────┐
-   │              │  DEPLOYED MCP SERVER   │  Lambda Function URL
+   │              ┌───────────▼─────────────┐
+   │              │  DEPLOYED MCP SERVER    │  Lambda Function URL
    │              │  19 tools + ranch://map │  (frozen, unchanged)
-   │              └───────────┬────────────┘
+   │              └───────────┬─────────────┘
    │                 Farm / Feed / Sensor / Care APIs
    │                          ▲
    └──────────────────────────┘  chaos writes real animal events here;
                                  sensor faults go to the sw_ops overlay
 ```
 
-### Steps that cost nothing, and the one that does
+### Six of eleven stages cost nothing
 
-160 sensors are far too many to hand a model every tick. The free pass narrows the ranch to what is actually wrong; only newly-opened incidents reach an LLM.
+160 sensors and 1,195 head are far too many to hand a model every tick, and a model asked to *find* the
+problem burns its budget navigating instead. From M7A the free pass has two sweeps: the sensors, and
+the herd off the Farm and Care APIs (`src/tools/herd.py`), which is the only discovery path
+`herd_health` has and the reason it is no longer idle by design. So the free pass narrows the ranch to what
+is actually wrong, and **only newly-opened incidents ever reach an LLM.**
 
-- **`GET /sensors?limit=500` once** for the catalog (id, type, location, coordinates, status). That endpoint's query schema is pagination only, no `type` filter, so filtering happens in Python. The map-not-paging pattern arrives by necessity here rather than by choice.
-- **Live reads are one GET per sensor** (`GET /sensors/:id` synthesizes fresh each call). ~160 requests per tick, bounded by an `asyncio.Semaphore(20)`. Unbounded fan-out at 160 invites a wall of Lambda cold starts and reads as a load test.
-- **`triage.py` owns severity.** Per-type thresholds in code, a warning tier between nominal and critical for every critical-capable type, and a `warn_once` guard on any unrecognized sensor type so a new type can never silently fall through a default branch.
-- **`memory.py` reconciles into `sw_ops`**, keyed on sensor plus category, so a persisting fault is `ongoing` and never re-alarmed.
+- **`GET /sensors?limit=500` once** for the catalog, or better, the `ranch://sensors/map`
+  resource. That endpoint's query schema is pagination only (no `type` filter), so
+  filtering happens in Python. The map-not-paging pattern arrives here by necessity, and
+  is the right shape anyway: an agent paging a collection cannot distinguish an empty page
+  from the end of the list.
+- **Live reads are one GET per sensor**, because `GET /sensors/:id` synthesizes a fresh
+  value on every call. ~160 requests per tick, bounded by `SWEEP_CONCURRENCY`. Unbounded
+  at 160 is a wall of Lambda cold starts and reads to the other side as a load test.
+- **`triage.py` owns severity**, in code, from per-type thresholds, with a warning tier
+  between nominal and critical and a `warn_once` on any unrecognized type.
+- **`memory.py` reconciles into `sw_ops`**, keyed on sensor plus category, so a persisting
+  fault is `ongoing` and never re-alarmed.
 
 ### The five agents and their tool slices
 
-The deployed server exposes 19 flat tool names (no namespaces), so each allowlist is an explicit name set. `create_react_agent` receives a **filtered** list; a test counts each set rather than asserting it.
+Flat tool names mean each allowlist is an explicit literal set, enforced in code and
+counted by a test. `create_react_agent` receives a **filtered** list.
 
-| Agent            | Tools                                                                                                                    | Owns                                                      |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `water_feed`     | `list_sensors` `read_sensor` `get_sensor_readings` `list_feed_products` `list_inventory` `consume_feed`_ `restock_feed`_ | nobody dies of thirst or hunger; reserves before a storm  |
-| `herd_health`    | `list_animals` `get_animal` `list_observations` `create_observation`_ `list_care_tasks` `update_care_task`_              | sick, down, dead, or missing animals; the care write path |
-| `infrastructure` | `list_sensors` `read_sensor` `get_sensor_readings` `list_pastures` `list_shelters`                                       | containment, power, fuel, no spill no fine                |
-| `compliance`     | `list_sensors` `read_sensor` `get_sensor_readings` `list_pastures` `list_animals`                                        | AUM stocking, habitat, keep the payments                  |
-| `chaos`          | none of the above. Its own hands in `tools/chaos.py`                                                                     | breaks the ranch on purpose                               |
+| Agent | Tools | Owns |
+| --- | --- | --- |
+| `water_feed` | `list_sensors` `read_sensor` `get_sensor_readings` `list_feed_products` `list_inventory` `consume_feed`* `restock_feed`* | nobody dies of thirst or hunger; reserves before a storm |
+| `herd_health` | `list_animals` `get_animal` `list_observations` `create_observation`* `list_care_tasks` `update_care_task`* | sick, down, dead, or missing animals; the care write path |
+| `infrastructure` | `list_sensors` `read_sensor` `get_sensor_readings` `list_pastures` `list_shelters` | containment, power, fuel, no spill no fine |
+| `compliance` | `list_sensors` `read_sensor` `get_sensor_readings` `list_pastures` `list_animals` | AUM stocking, habitat, keep the payments |
+| `chaos` | **none**, by construction. Its hands are `tools/chaos.py`, direct over REST | breaks the ranch on purpose |
 
-`*` = write, gated. All four responders read `ranch://sensors/map` once instead of paging.
+`*` = write. Never called by a model. From M6 a responder may **propose** one in its work order
+(`proposed_write`), the proposal pauses in the gate, and a human performs it or refuses it.
 
-**The line worth defending: `herd_health` cannot read a sensor, and nothing but `water_feed` can touch feed.** That is what makes the supervisor real instead of decorative. Water-feed reports the Alkali Flat tank dry. Herd-health reports three cows in that pasture with no observation in eight days. Neither can see the other's evidence, and the supervisor is the only thing that can fuse them into one work order. That is "the world is too wide for one prompt" earning rent instead of being asserted in a doc.
+**There are eight write tools on the deployed surface, not four.** The four marked above are the
+ones inside a responder's slice. The other four - `assign_to_pasture`, `remove_from_pasture`,
+`assign_to_shelter`, `remove_from_shelter` - move animals and sit in `UNASSIGNED_TOOLS`. They
+are in `WRITE_TOOLS` from M3 regardless, so `assert_callable` already refuses them.
 
-Three agents legitimately share the sensor read tools, and being honest about that: the isolation that matters is the brief, the SOP set, and which sensor types each agent is pointed at, not tool-name exclusivity. Carving that up would mean editing a frozen server.
+**Chaos claims none of them, and should not.** Chaos writes animal events
+**direct over REST** (`PATCH /animals/:animalId` on the Farm API, `POST /animals/:animalId/observations`
+on the Care API), because it is a test harness rather than a responder: it needs no judgment,
+no tool loop, and no model. Its slice is asserted at **zero tools** by M3's own count rail.
+Routing it through the MCP write tools would put it behind the M6 gate for no benefit and would
+make the one component whose job is to break things the hardest one to run. `CHAOS_ALLOW_WRITES`
+is its gate, and `CHAOS_ANIMAL_COHORT` is its blast radius.
+
+**How the gate works (M6).** A model still drives no tool loop; it judges one assembled packet
+in one call. What M6 added is one optional field on the work order, `proposed_write`, naming a
+write tool from the agent's slice with its arguments, and three code checks on it (shape, tool,
+grounding of every id and quantity against the page). A proposal that survives pauses in a
+LangGraph `interrupt()` checkpointed in `sw_ops`, one tiny graph per proposal, so the pause
+outlives the process and the tick does not wait for it. A human resumes it from
+`python -m src.agent.gate` with approve or reject, the write is performed through
+`mcp_client.call_tool` carrying an `Approval`, and both halves leave an `audit.jsonl` line
+correlated by `audit_id`. Three boundaries remain, and they are not redundant:
+
+- `tools_for(agent)` is the **declaration**, writes included, and it is what the count tests
+  assert against.
+- `bound_tools_for(agent)` / `proposable_tools_for(agent)` are what a model may be handed and may
+  propose: empty of writes while `GATE_LANDED` is False.
+- `assert_callable(tool, approval=...)` is the belt behind both, raising `WriteGateError` from
+  inside `mcp_client.call_tool` for any write without a human's `Approval`. The filtered lists only
+  protect the paths that remember to use them; a helper written in a hurry is a path that might not.
+
+**`GATE_LANDED` is True since M6 (2026-09-11).** It made writes proposable, not callable. Detail: `src/agent/CLAUDE.md` (the gate) and `src/tools/CLAUDE.md` (the allowlists).
+
+**The line worth defending: `herd_health` cannot read a sensor, and nothing but
+`water_feed` can touch feed.** That is what makes the supervisor real rather than
+decorative. Water-feed reports the Alkali Flat tank dry. Herd-health reports three cows in
+that pasture with no observation in eight days. Neither can see the other's evidence, and
+the supervisor is the only thing that can fuse them into one work order.
+
+Being honest about the seam: three agents legitimately share the sensor read tools. The
+isolation that matters is the **brief**, the **SOP set**, and **which sensor types each
+agent is pointed at**, not tool-name exclusivity. Carving that further would mean editing
+a frozen server.
+
+### Where state lives
+
+| Store | Holds | Owned by |
+| --- | --- | --- |
+| `sw_ops` schema (Supabase) | incidents, chaos events, shift reports, the LangGraph checkpointer | this repo |
+| `farm` / `feed` / `animal_care` schemas | the ranch | the other repo. **Never touched from here.** |
+| Sensor readings | nowhere. Synthesized per call. | nobody |
+
+The only path to ranch data is HTTP through the deployed APIs. Cross-service IDs are
+plain strings, never foreign keys, and orphans are allowed on purpose.
+
+Two readers sit on `sw_ops` and neither can reach the ranch: the read API (`--api`, M8) reads the
+ledger and serves it in the ranch's envelope, and the window (`web/`, M9) reads the API through its
+own server-side proxy, so a browser holds no token and cannot spend one. The orchestrator is the
+only process that talks upstream.
 
 ---
 
@@ -252,146 +337,373 @@ The correlated scenarios are the interesting ones. Independent random faults tes
 - **Every event has a TTL.** Expiry restores the sensor, which is what produces `resolved` incidents and exercises the reconcile logic. Without healing, everything is broken an hour in and the feed goes quiet.
 - **The model is not in the load-bearing path.** The seeded PRNG picks _what breaks_; an optional LLM pass authors the observation prose a human reads. Code owns anything a machine consumes, the model owns what a human judges. Same ownership rule that settled the severity question.
 
-> **Design call flagged for override:** you asked for chaos as the fifth agent, so it is a peer node in the graph and appears as one. But its decision core is deterministic code, not a model, for the reproducibility reason above. If you want chaos genuinely model-driven (it invents scenarios you did not write down), say so and I will make the PRNG the fallback instead of the driver.
+Decided at M5: chaos is a peer node in the graph and its decision core is deterministic code, not a model.
+
+---
 
 ---
 
 ## Model routing: local by default, Opus where it earns it
 
-You asked for my thoughts, so here they are rather than a shrug.
-
-### The rule you already own
-
-II.6b settled this and the sentence is worth quoting exactly: **turning thinking off is free exactly when the model is not the one CLASSIFYING.** `demo-site` could run gemma4:e4b with reasoning off because `triage.mjs` had already decided severity in code and the model only wrote prose a human reads. II.6 handed the model the verdict, and thinking off took it from **94/97 correct to 2/100**, fabricating justifications for labels it had already picked.
-
-The good news is structural: **`triage.py` owns severity in this design already.** So no sub-agent is classifying severity, and the expensive-model requirement mostly evaporates. What is left is one job that genuinely needs a strong actor, and it is not the one you would guess.
-
-### The job that actually breaks local models is tool-driving, not writing
-
-II.11's numbers are the ones to design around. At full context budget, qwen3.5:9b on the wander path made **16 `list_sensors` calls, zero `read_sensor` calls, and never answered**. On the map path it read 8 of 28 water sensors and returned a **confident false all-clear** where Opus found 4 tanks below the floor. Meanwhile gemma4:e4b, handed an assembled set of incidents and asked to write advisories, went 5 sweeps / 160 sensors / 72 incidents / **0 templates, 0 retries, 0 check failures**, free, ~11s a call.
-
-So: **local models write well and navigate badly.** A false all-clear is the single worst output a ranch monitor can produce, and open-ended tool loops are how you get one.
-
-### Which means the cheap path should be a cheaper ARCHITECTURE, not just a cheaper model
-
-The free pass already knows exactly which sensor is bad and has the ranch map in hand. So instead of telling a sub-agent "go find out what's wrong," `tools/evidence.py` assembles the packet in code: the incident, that sensor's recent history, its sibling sensors at the same location, the animals in that pasture, and the relevant SOP. The model gets one call and no tool loop. It is not navigating, it is judging a page.
-
-That is cheaper, faster, more reliable, _and_ it is the version a local model is demonstrably good at. Three wins from one decision, which is usually a sign the decision is right.
-
-### Two tiers, and an escalation predicate
-
-| Tier              | Model                           | Jobs                                                                                                                                         | Why                                                                                                     |
-| ----------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| **1, default**    | local (`gemma4:e4b` via Ollama) | judge an assembled evidence packet; write the work order; chaos observation prose; shift-report assembly                                     | Nothing here classifies. Code already ranked severity. A human reads and judges the output. Free.       |
-| **2, escalation** | Opus                            | real tool-driving investigation; cross-domain fusion when 2+ sensing worlds are hit in one tick; anything proposing a write through the gate | These decide what is _true_, or mutate a real ranch. Both are classification in the sense that matters. |
-
-Escalation fires when **any** of these holds, and the reason gets logged:
-
-- the Tier-1 judge returns `insufficient_information` (the II.10 escalation pattern, reused)
-- `triage.py` marked the incident **critical**
-- two or more sensing worlds opened incidents in the same tick (the storm-front case, which is the whole reason the supervisor exists)
-- a `Finding` proposes a write
-
-**Cost shape that falls out:** a calm ranch costs approximately nothing, and a storm costs real money. That is Phase III's "cost scales with change, not wall-clock" arriving three phases early as a side effect of the architecture rather than as a tuning exercise.
-
-### The rail that makes this safe
-
-A Tier-1 local model may **never** produce an all-clear. `triage.py` already flagged the incident in code, so "nothing is wrong here" from the cheap judge is a contradiction, not a finding. `validate.py` rejects it and escalates to Tier 2 rather than trusting it. That is the II.11 false-all-clear failure mode turned into a check instead of a footnote.
-
-### Build order: Opus first, then move jobs down one at a time
-
-Do **not** build the cascade at M2. Build Tier 2 only, log `model`, `tokens`, `latency_ms`, and `finish_reason` on every call, and then move one job at a time to local with a rail that catches the regression. Measure before you fix is the spine of the whole Phase II arc and it applies to its own cost lever. `docs/model-routing.md` keeps the ledger: what moved down, when, and what proved it was safe.
-
-### Ollama specifics that will bite otherwise
-
-- **Use `ChatOllama` from `langchain-ollama`, not `ChatOpenAI` pointed at the shim.** `ChatOllama` talks the native `/api/chat` endpoint where **`num_ctx` is actually honored**. On the OpenAI-compatible shim it is silently ignored, which is what produced the whole 4,096-token investigation: thinking models spent the entire output budget reasoning and returned an `AIMessage` with no tool call and no content, and it looked exactly like "small models are too weak." Python gets to skip that trap by picking the right client.
-- **Set `num_ctx` explicitly to 16384** and never rely on a default.
-- **`reasoning_effort` is an explicit per-call argument in `llm_client.py`, never an ambient env var.** A knob that silently changes verdicts belongs where the actor is built. That exact mistake meant a landed fix never reached the rung it was written for, because a second actor construction had quietly stopped receiving it.
-- **`finish_reason` gets logged on every call.** It is the difference between "the model is too weak" and "the model never got to answer," and a log holding only the final text cannot tell them apart.
+`docs/model-routing.md` is both the design and the ledger, and it is the authority: the rule about when
+thinking may be off, the two tiers, the escalation predicate, the all-clear rail, the build order (Opus
+first, then move one job down at a time with a row that proves it), and the Ollama traps. What the build
+found: there are exactly two model jobs (the per-incident work order and the fused shift report), the
+cascade was built at M7, measured, and ships **off**, and the one change that would earn the next attempt is
+`docs/open-issues.md` #12. Code-level rules for the model layer: `src/models/CLAUDE.md`.
 
 ---
 
 ## Logging: three streams, JSON Lines, and one field that matters most
 
-`utils/logger.py` uses **structlog** over the stdlib `logging` module. structlog because the files need to be machine-readable (the window and the eval rails both read them) while the console needs to be human-readable during a 30-minute watch, and structlog gives both from one call. Over the stdlib rather than beside it, so `httpx` and `langchain` chatter lands in the same stream instead of a second one.
+Implementation: `src/utils/logger.py`. Wired at **M0**, before anything it measures existed, because an
+instrument added after the fact only measures what you already suspected. This section is the schema
+for the three files and the tables the loop writes beside them; `docs/JOURNEY.md` has how each field arrived.
 
-**Format:** JSON Lines, one object per line, UTC ISO 8601 timestamps (`2026-09-10T14:30:00.000Z`), and `run_id` plus `tick` on **every** line in all three files so the three streams join on a grep. Console in dev gets `ConsoleRenderer`; files always get JSON regardless of environment.
+### Why structlog, and why over the stdlib
+
+The files must be machine readable (the read API and the test rails both parse them)
+while the console must be human readable during a thirty-minute watch. structlog gives
+both from one call. Configured **over** the stdlib rather than beside it, so `httpx` and
+`langchain` chatter lands in the same stream instead of a second, differently-formatted
+one that has to be correlated by eye.
+
+### Format
+
+JSON Lines, one object per line. UTC ISO 8601 with **milliseconds**
+(`2026-09-10T14:30:00.000Z`), matching the four upstream services exactly, because
+lexicographic ordering is relied upon and sorting mixed precision misorders silently.
+
+**`run_id` and `tick` appear on every line in all three files.** That is the whole
+correlation story: three streams join on a grep, with no log aggregator required.
+
+Console gets `ConsoleRenderer` when `LOG_CONSOLE_PRETTY=1`, JSON otherwise (for a
+container). Files are **always** JSON regardless of environment.
 
 ### `logs/tick.jsonl` - the heartbeat, one line per tick
 
 ```jsonc
-{
-  "ts": "…",
-  "run_id": "…",
-  "tick": 42,
-  "duration_ms": 8140,
-  "sensors_read": 160,
-  "sensors_failed": 0,
-  "findings": 7,
-  "opened": 2,
-  "ongoing": 5,
-  "resolved": 1,
-  "agents_routed": ["water_feed", "infrastructure"],
-  "work_orders": 2,
-  "work_orders_shipped": 2,
-  "work_orders_rejected": 0,
-  "escalated": 1,
-  "input_tokens": 3120,
-  "output_tokens": 812,
-  "cost_usd": 0.0184,
-  "chaos_fired": "storm_front",
-}
+{ "ts":"2026-09-10T14:30:00.000Z","run_id":"9a10c5f00357","tick":42,"duration_ms":8140,
+  "store":"prod","catalog_source":"mcp_resource",
+  "sensors_read":160,"sensors_failed":0,
+  "herd_animals":6,"herd_errors":0,"herd_error":null,
+  "findings":21,"critical":6,"opened":2,"ongoing":8,"resolved":4,"pending":7,"dismissed":9,"held_unread":0,
+  "agents_routed":["water_feed","infrastructure"],
+  "work_orders":9,"work_orders_shipped":9,"work_orders_rejected":0,"escalated":1,
+  "tier":2,"tier1_orders":1,"escalations":8,"escalation_reasons":["critical","critical","insufficient_information","insufficient_information","critical","critical","insufficient_information","insufficient_information"],
+  "input_tokens":78773,"output_tokens":11186,"cost_usd":0.523485,
+  "worlds":["infrastructure","water_feed"],"shift_report":"model","shift_report_violations":[],
+  "ledger":{"opened":9,"ongoing":8,"resolved":4},
+  "held":0,"skipped_upstreams":[],
+  "writes_proposed":1,"writes_duplicate":0,"writes_failed":0,"writes_pending":1,
+  "chaos_fired":0,"chaos_healed":0,"chaos_missed":[] }
 ```
 
-Field names are `input_tokens` / `output_tokens`, matching `agent.jsonl` and the model APIs. This
-block said `tokens_in` / `tokens_out` until the M2 boundary, which is a `jq` that returns `null`
-and reads as a calm ranch. `cost_usd` arrives at M7 with the pricing table, `chaos_fired` at M5.
+The M7 shape (the M7 fields and the token and cost values are from tick A of the M7 measurement,
+2026-09-11). A field is added to this line when the stage that produces it exists, not
+before, so a `null` here always means the stage ran and had nothing to say.
 
-This is the II.0 gauge promoted from a teaching instrument to a permanent one. One line per tick means the cost curve is a single `jq` away, which is the only way you will notice it stop being flat. **Written at tick end, always, including when the tick failed** (with `error` and `failed_stage`) - a tick that produces no line is indistinguishable from a dead loop.
+**The cascade's four fields, M7.** `tier` is the highest tier that wrote anything this tick (a fused
+shift report counts as Tier 2), or `null` when no model was called, so a calm tick reads as no tier
+rather than as the cheap one. `tier1_orders` is how many stored work orders the local model wrote.
+`escalations` is how many stored orders were written by Tier 2 for a reason, and `escalation_reasons`
+is one code per such order, in order: `critical`, `rejected`, `insufficient_information`,
+`proposed_write`, `no_answer` (`routing.ESCALATION_REASONS`). `escalated`, older, is the model's own
+`escalate` flag on the order and means "a human above the crew should know"; it is a different fact.
+`input_tokens` and `output_tokens` include the Tier-1 attempt behind an escalation; `cost_usd` bills
+only the Tier-2 half, per order at that order's model.
+
+**The gate's four fields, M6.** `writes_proposed` is how many proposals paused for a human this
+tick; `writes_duplicate` is how many were suppressed because the same write for the same incident
+was already waiting; `writes_failed` is how many the gate could not persist (their incidents are
+held with reason `gate_unavailable`); `writes_pending` is everything waiting across the ledger after
+this tick, **or `null` when the tick had nothing to propose and never opened the gate**, because a
+count nobody measured must not read as zero.
+
+**`cost_usd` arrived at M4, not M7 as planned**, because the loop's spend ceiling is
+denominated in dollars and a ceiling in tokens is a multiplication somebody does wrong at 2am.
+From M7 it is summed per order at that order's model from `routing.PRICE_TABLE`, Tier 1 at $0.00;
+before M7 it was one assumed rate, which turned out to be 3x the Opus 5 list price. Exactly
+`0.0` on a tick that billed nothing. The loop sums it per run and halts at `SPEND_CEILING_USD`.
+
+**`pending` and `dismissed` are the debounce** (migration 0003). `pending` was flagged this sweep
+and not yet seen on `INCIDENT_CONFIRM_SWEEPS` consecutive sweeps; `dismissed` was pending and read
+clean. Neither is routed or billed. A high `dismissed` beside a low `opened` is the simulator's
+dice being filtered out, and it is the number that used to be the bill.
+
+**The loop's five fields.** `held` is incidents carried unanswered into the next tick because
+their agent raised, the model died in transport, or the spend stages were in backoff; they are
+re-routed next tick, and a rail rejection is never among them. `skipped_upstreams` names who was
+inside a backoff window; a line with `["sensor"]`, `error: null`, and `sensors_read: 0` is a
+heartbeat during an outage, not a calm ranch. `chaos_fired` and `chaos_healed` are what the tick
+armed and expired when chaos is on. **`chaos_missed` is the one to grep for**: an event this run
+injected that healed without its sensor ever being read. Non-empty means a fault was born and
+died between two sweeps and the ranch read calm the whole time.
+
+**A tick in free-pass backoff writes a short line**, `skipped_upstreams`, `held`, `cost_usd`,
+`error`, `failed_stage`, and nothing about sensors or the ledger, because nothing was attempted.
+A tick that writes no line is indistinguishable from a dead loop, and that rule holds hardest
+exactly when an upstream is down.
+
+**`worlds` and `shift_report` are read as a pair, and that is the only reason both are here.**
+`worlds` is the storm-front count, `shift_report` is `"model"` or `"code"`, and together they
+say whether the supervisor paid to fuse the tick or assembled it for free. One world is always
+`"code"` by construction (`FUSION_THRESHOLD`), so a two-world tick reading `"code"` is either a
+free pass or a rail that fired, which is what `shift_report_violations` disambiguates. **A
+non-empty violations list beside `"code"` is the fallback having shipped**, and it is how a
+truncated supervisor was found at the M3 boundary.
+
+**`input_tokens` and `output_tokens` include the supervisor's call from M3 onward**, not just
+the responders'. The M2 flat-cost query below still reads correctly - the supervisor bills only
+on a tick that already fanned out - but a per-work-order average taken off this line is now
+slightly high, and `logs/agent.jsonl` is where to go for the split.
+
+**`chaos_fired` was planned for M5 and landed at M4**, with the loop, because wiring an injector
+into a tick is cadence work. `run_tick` heals, injects, and fires animal events right after the
+catalog (the plan needs the topology), and its own failure never fails the tick: a
+`chaos_step_failed` warning and honest readings. `SweepResult.overlay_observed` is the other
+half, the event ids whose sensor the sweep actually read, and it is what `chaos_missed` is
+computed against.
+
+**Written at tick end, always, including when the tick failed** (with `error` and
+`failed_stage`). A tick that produces no line is indistinguishable from a dead loop, and
+that distinction is the entire product at 2am.
+
+`failed_stage` is set **before** each stage is attempted. A line reading
+`failed_stage: null` beside an error says a tick died without saying where, which is the
+one question the field exists to answer. Caught during M0 exactly this way.
+
+One line per tick means the cost curve is one `jq` away, which is the only way anyone
+notices it stop being flat.
 
 ### `logs/agent.jsonl` - the instrument, one line per model call
 
 ```jsonc
-{
-  "ts": "…",
-  "run_id": "…",
-  "tick": 42,
-  "agent": "infrastructure",
-  "tier": 1,
-  "provider": "ollama",
-  "model": "gemma4:e4b",
-  "reasoning_effort": "none",
-  "num_ctx": 16384,
-  "tool_calls": 0,
-  "input_tokens": 1698,
-  "output_tokens": 214,
-  "finish_reason": "stop",
-  "latency_ms": 11200,
-  "escalated_from": null,
-  "validation": { "shape": "pass", "key": "pass", "grounding": "pass" },
-}
+{ "ts":"…","run_id":"…","tick":3,"agent":"water_feed","tier":2,
+  "provider":"bedrock","model":"us.anthropic.claude-opus-5","reasoning_effort":"none",
+  "max_tokens":2048,"tool_calls":1,"input_tokens":4816,"output_tokens":1102,
+  "finish_reason":"tool_use","latency_ms":14095,
+  "content_types":["tool_use"],"incident_key":"feed-bin-03:feed_low" }
 ```
 
-**`finish_reason` is the single most valuable field in this whole scheme** and it is not negotiable. `"length"` means the model never got to answer, `"stop"` means it answered badly. One is a config bug and one is a model-selection decision, they present identically in the output text, and telling them apart once cost a real investigation. **Written immediately on return, before validation runs**, so a response that fails a check still leaves a receipt of what was actually returned.
+That is a real M2 line. A real Tier-1 line, M7:
+
+```jsonc
+{ "ts":"…","run_id":"…","tick":1,"agent":"infrastructure","tier":1,
+  "provider":"ollama","model":"gemma4:e4b","reasoning_effort":"none",
+  "max_tokens":2048,"num_ctx":16384,"tool_calls":1,"input_tokens":3651,"output_tokens":443,
+  "finish_reason":"stop","latency_ms":5982,
+  "content_types":["json"],"incident_key":"coyote-draw-gate:sensor_offline" }
+```
+
+Tier 1 adds `num_ctx` and Tier 2 does not have one; `content_types` is `["json"]` when the
+schema-constrained answer parsed and `["text"]` when it did not; `tool_calls` is 1 for a parsed
+answer on either tier. The required fields are the ones in `log_agent_call`'s signature and
+everything else is per-call context. An escalation is two lines with the same `incident_key`, one
+per tier, and the console stream has `tier1_escalated` between them naming the reason. `content_types` is the block types the response actually contained, which is how
+"answered with no tool call" reads differently from "never answered."
+
+**`finish_reason` is the most valuable field in this whole scheme and it is required.**
+Truncation means the model never got to answer; completion means it answered and answered
+badly. One is a config bug, one is a model-selection decision, and **in the response
+text they look identical**. Telling them apart cost a real investigation once.
+
+**The vocabulary is per provider.** Anthropic returns `tool_use`, `end_turn`,
+`stop_sequence`, `max_tokens`; Ollama and the OpenAI-shaped APIs return `stop`, `length`,
+`tool_calls`. Any query over this field has to name the healthy **set**, not one healthy
+value, or it flags an entire provider as broken. See below, and `src/models/CLAUDE.md`.
+
+**Written immediately on return, before validation runs**, so a response that fails a
+check still leaves a receipt of what was actually returned rather than vanishing into a
+retry.
+
+### `logs/compare.jsonl` - the measurement, M7, only when `TIER_COMPARE=1`
+
+One line per packet judged by both tiers on the identical page: `incident_key`, `agent`,
+`severity`, `escalation` (`""` when the local order stood and Opus was a shadow, else the reason),
+`page` (what code put on the page and a grader checks against: `sensor_id`, `last_value`,
+`siblings`, `siblings_flagged` per triage, `head_count`, `citable_rules`, `sop`), and `tier1` /
+`tier2` (headline, assessment, actions, rules, unknowns, `insufficient_information`,
+`proposed_write`, status, violations, receipt). **It carries model prose on purpose**: two work
+orders per line, already stored in `sw_ops`, because grading them is the whole point of the file. It
+is not one of the three operational streams, it is empty unless the knob is on, and the knob SPENDS.
+The M7 grading of six pairs is pinned as `docs/transcripts/m7-compare-transcript.md`.
 
 ### `logs/audit.jsonl` - the receipt, one line per side effect
 
 ```jsonc
-{ "ts":"…","run_id":"…","tick":42,"audit_id":"…","phase":"proposed",
-  "tool":"create_observation","args":{"animalId":"cow-0777","…":"…"},
-  "proposed_by":"herd_health","incident_key":"cow-0777:down" }
-{ "ts":"…","run_id":"…","tick":42,"audit_id":"…","phase":"decided",
-  "decision":"approve","decided_by":"scott","result":"201","latency_to_decision_ms":94000 }
+{ "ts":"…","run_id":"…","tick":42,"audit_id":"2f7c…","phase":"proposed",
+  "tool":"restock_feed","args":{"sku":"alkali-flat-water-2","quantity":16.7},
+  "proposed_by":"water_feed","incident_key":"alkali-flat-water:water_low" }
+{ "ts":"…","run_id":"…","tick":0,"audit_id":"2f7c…","phase":"decided",
+  "decision":"approve","decided_by":"scooter","result":"written","latency_to_decision_ms":73991,
+  "tool":"restock_feed","incident_key":"alkali-flat-water:water_low","reason":"","upstream":"{…first 200 chars of the upstream body…}" }
 ```
 
-**Two lines per side effect, correlated by `audit_id`:** one at propose time, one at decision time. That is deliberate, because a propose with no matching decide is a pause nobody answered, and it should be visible as a dangling record rather than an absence. Append-only, rotated daily by date and **never** truncated by size. This is the file that makes "we watch your ranch" a defensible claim instead of a pitch.
+**Confirmed against real lines on 2026-09-11**, M6, with two corrections to what this file used
+to promise. The `decided` line repeats `tool` and `incident_key`, because it is written by a
+different process (the CLI) hours later and a reader grepping one id should not have to join two
+lines to know what was decided; and it carries `reason` (required on a reject, empty on an
+approve) and `upstream` (the first 200 characters of what the ranch answered, or the exception).
+Its `tick` is the deciding process's tick, which for the CLI is `0`; the proposing tick is on the
+`proposed` line. `result` is a short code, not a status number: `written`,
+`upstream_error_<category>`, `transport_<ExceptionName>`, `not_executed` on a reject, and
+`checkpointer_unavailable` on a `dropped`.
 
-### Rules
+`decision` takes five values across two writers. From the gate: `approve` and `reject` (a human,
+`decided_by` is their name), and `dropped` (`decided_by:"gate"`, the pause could not be persisted
+after the `proposed` line was written; the incident is held and the write is proposed again).
+From chaos, below: `blocked` and `auto_allowed`.
 
-- **Never logged:** `ANTHROPIC_API_KEY`, `DATABASE_URL`, or any full prompt or response body. Prompts are the token bill and they are enormous.
-- **Full transcripts behind a flag.** `LOG_TRANSCRIPTS=1` writes `logs/transcripts/{run_id}/{tick}-{agent}.json`. Off by default, invaluable when a finding reads wrong.
-- **Rotation:** `RotatingFileHandler` for tick and agent (10 MB, 5 back); `TimedRotatingFileHandler` daily for audit, no size cap.
-- **`logs/*.jsonl` is gitignored**, `logs/.gitkeep` is not. Captured runs worth keeping go in `docs/` next to the finding they support, the way `*.run.txt` did.
+**Two lines per side effect, correlated by `audit_id`.** Deliberately two rather than
+one: a `proposed` with no matching `decided` is a pause nobody ever answered, and that
+should read as a dangling record you can grep for, not as an absence you have to already
+suspect. From M6 that dangling record is the **normal** shape of an open pause: the gate writes
+`proposed` when the work order proposes and `decided` only when a person answers, and
+`python -m src.agent.gate list` is how a person finds the ones still waiting. A duplicate
+proposal (same incident, same tool, already waiting) writes no line at all, because it is not a
+new side effect.
+
+This is the file that makes "we watch your ranch" a defensible claim rather than a
+pitch.
+
+**A blocked side effect writes both lines too.** When `CHAOS_ALLOW_WRITES=0` stops an animal
+mutation, chaos still emits `proposed` and then `decided` with `decision:"blocked"`,
+`decided_by:"chaos_guard"`, `result:"writes_disabled"`. The receipt that nothing was mutated
+is worth exactly as much as the receipt that something was, and it keeps the
+`uniq -c | awk '$1!=2'` query below meaningful: a guard that logged only the refusal would
+show up in that query as a dangling proposal.
+
+**`tool` is the MCP tool name when one was used, and the HTTP route when one was not.**
+Chaos writes go direct over REST rather than through MCP, so its lines read
+`"tool":"PATCH /animals/:animalId"`. Naming a tool it never called would be a tidier field
+and a false receipt.
+
+### From M8, two of the three streams and the receipt are also rows
+
+`python main.py --api` is its own process, on its own box if need be, and it reads `sw_ops` and
+nothing else: never a log file, because a file is what a second process cannot see. So the loop
+writes three things to the ledger **beside** the log line, and the API is a projection of the ledger.
+
+| Table | Written by | Holds | Read by |
+| --- | --- | --- | --- |
+| `sw_ops.ticks` | `executor._record_tick`, after `log_tick`, on every tick including a failed one and the loop's own line for a tick that raised outside its guard | `run_id`, `tick`, `at`, `store`, `duration_ms`, `cost_usd`, `error`, `failed_stage` as columns, and the **whole tick line as `fields` jsonb**. Unique on `(run_id, tick)`. `id` is the SSE cursor | `GET /ops/stream` |
+| `sw_ops.shift_reports` | the same call, when the tick produced a report (a `--no-spend` tick does, assembled in code) | the `ShiftReport` fields plus `incident_keys`, the keys the page was handed, so `linked` stays checkable | `GET /ops/report` |
+| `sw_ops.audit_receipts` | `gate.propose` (the `proposed` row, then the file line) and `gate._execute` (the `decided` row, then the line), through the checkpointer's own connection | the two halves of a receipt, primary key `(audit_id, phase)` | nothing yet; the constraint is the point |
+
+Two rules about the order. **The tick line is written first and the row second**, because the line is
+the heartbeat and must not depend on the ledger being up: a row that fails is `tick_row_failed` on the
+console (a warning naming the API as the thing missing the tick) and never a failed tick. **The receipt
+row is written first and the file line second**, because the table is the record and the file is the
+projection: `docs/open-issues.md` #10 closed here. A `proposed` row that cannot be written takes the same
+`dropped` path as a checkpointer failure; a `decided` row that cannot be written is `audit_receipt_failed`
+(with `receipt_phase`, not `phase`, so the audit rail does not count the console line as a receipt), and
+the decision still finishes and still reaches the file, because by then the write on the ranch may
+already have happened. The primary key makes "every `audit_id` appears exactly twice" a constraint the
+database enforces, and a rail inserts a third to prove it is refused.
+
+**What stays file-only.** The chaos guard's `blocked` / `auto_allowed` pairs below have no row
+(`docs/open-issues.md` #20); the tick's `fields` jsonb is the line as written, so a field added to the line
+appears in the row with no migration.
+
+### `chaos_*` on the console stream - the overlay says so out loud
+
+**There are three JSONL files and there is no fourth.** `chaos_*` lines go to the console
+stream, like every other application event, and only the animal write path reaches
+`audit.jsonl`. An overlay is a development and demo instrument rather than a side effect on
+the ranch, and a fourth rotating file for it would be a stream nobody greps.
+
+The events, and what each one is for:
+
+| Event | Says |
+| --- | --- |
+| `chaos_injected` | one event armed, with `scenario`, `mode`, `target_id`, `group_id`, `expires_at` |
+| `chaos_expired` | a TTL ran out and a sensor is honest again. This is what produces `resolved` incidents |
+| `chaos_overlay_applied` | **carries `honest_value` beside `faked_value`.** The single most useful line in the stream |
+| `chaos_overlay_unavailable` | the store could not be read, so the sweep stayed truthful. A degraded overlay must never be a failed tick |
+| `chaos_at_ceiling` | `CHAOS_MAX_ACTIVE` reached, nothing new armed |
+| `chaos_group_deferred` | a correlated group would have crossed the ceiling, so **none** of it fired. Half a storm front is a worse fixture than no storm front |
+| `chaos_insert_deduplicated` | `offered` vs `inserted`. A replayed seed or an already-active fault on the same target, both skips rather than errors. See `docs/cookbook.md` #19 |
+| `chaos_write_blocked` | a guard refused an animal mutation, with the reason |
+| `chaos_write_partial` | the `PATCH` landed and the observation did not. **Not retried**, because the status is already changed and a retry would double-write the observation |
+| `chaos_animal_written` | a real mutation went through, which only happens with `CHAOS_ALLOW_WRITES=1` |
+| `chaos_unknown_fault_mode`, `chaos_fault_unusable`, `chaos_no_target_for_type`, `chaos_no_cohort_target` | four `warn_once` lines for a catalog that asks for something the ranch cannot supply. A scenario that silently does nothing is the failure mode here, same disease as an unrecognized sensor type reading as nominal |
+| `chaos_cli_catalog` | the CLI resolved the live topology, with `source` and `sensors` |
+
+`chaos_overlay_applied` is the line that makes a faulted demo legible instead of
+mysterious. Without `honest_value` beside `faked_value`, a reader of the log cannot tell a
+ranch that is being lied to from a ranch that is actually broken, which is the same
+indistinguishability triage is **supposed** to have and the operator is not.
+
+Because the stream is the console, a query means redirecting a run rather than reading a
+file, and three things about that are easy to get wrong. **`LOG_CONSOLE_PRETTY=0` is
+required**, or the renderer emits aligned text and `jq` gets nothing it can parse. **The
+event name is `msg`, not `event`**, in every mode: a processor renames structlog's
+positional field once, before any renderer, so there is exactly one spelling. And **the
+stream is not pure JSON** - a CLI prints its own human-readable summary to the same place,
+and a traceback is not JSON either, so a `jq` filter over it has to tolerate lines that do
+not parse:
+
+```bash
+LOG_CONSOLE_PRETTY=0 SW_OPS_TARGET=test CHAOS_ENABLED=1 python -m src.tools.chaos inject --tick 2 2>&1 | jq -Rrc 'fromjson? | select((.msg//"")|startswith("chaos_")) | [.msg,.scenario//"-",.target_id//"-"]|@tsv'
+```
+
+`-R` with `fromjson?` is what makes that tolerance work: without it, the first non-JSON line
+kills the query with a parse error and the exit code blames the data. This exact command was
+documented in its naive form first, and it failed on all three counts at once.
+
+### Rotation differs by stream, and the difference is the point
+
+| Stream | Rotation | Why |
+| --- | --- | --- |
+| `tick.jsonl` | 10 MB, 5 back | a diagnostic; oldest is discardable |
+| `agent.jsonl` | 10 MB, 5 back | same |
+| `audit.jsonl` | daily, **no size cap** | a receipt. A size cap on an audit trail means the trail ends exactly when the ranch got busiest. From M8 a projection of `sw_ops.audit_receipts`, so a rotation colliding with a decision from another process (`docs/open-issues.md` #10) loses at worst a projected line. |
+
+### Never logged
+
+`ANTHROPIC_API_KEY`, `DATABASE_URL`, `OPS_API_TOKEN`, an `Authorization` header, or any full prompt or response body. Secrets are
+replaced with `[redacted]`; bulk bodies with `[omitted: set LOG_TRANSCRIPTS=1]` rather
+than deleted, so a reader can tell "there was a prompt we chose not to store" from
+"there was no prompt."
+
+`LOG_TRANSCRIPTS=1` writes full bodies to `logs/transcripts/{run_id}/{tick}-{agent}-{incident_key}.json`,
+one per stored work order (the page and the order), plus `{tick}-supervisor-tick-{n}.json` for a fused
+shift report (the page and the report, so `linked` is readable after the tick). **Dead until M7A**: the
+function existed from M0 and nothing called it, found the first time a herd order's prose was needed.
+Off by default because prompts dwarf everything else on disk. Invaluable for exactly one
+job: a finding that reads wrong and a log that cannot say why.
+
+### Reading the logs is the real test of whether the instrument works
+
+```bash
+jq -r '[.tick,(.input_tokens//0),(.output_tokens//0),(.work_orders_shipped//0),(.escalated//0)]|@tsv' logs/tick.jsonl
+jq -r '[.tick,(.tier//"-"),(.tier1_orders//0),(.escalations//0),((.escalation_reasons//[])|join(",")),(.cost_usd//0)]|@tsv' logs/tick.jsonl   # M7: who wrote the tick and why Opus was paid
+jq -r 'select(.finish_reason | IN("stop","end_turn","tool_use","stop_sequence") | not)' logs/agent.jsonl
+jq -r '.audit_id' logs/audit.jsonl | sort | uniq -c | awk '$1!=2'   # every id here must be in `python -m src.agent.gate list`
+```
+
+Cost flat on calm ticks, spiking only where an escalation is logged beside it. Anything
+in the second query is a config bug, not a weak model. Anything in the third is a pause
+nobody answered: from M6 that is a legitimate open pause **only if** the same id is in the gate
+CLI's `list`, and anything else in that query is a decision path that skipped its log line
+(`gate.unpaired_audit_ids` is the same check in code, and the rail in `tests/`).
+
+
+The loop's own lines, in the main stream rather than `tick.jsonl`: `loop_start`, `loop_stopped`
+(clean drain, exit 0), `loop_halted` (`reason=spend_ceiling`, exit 4), `loop_unrecoverable`
+(exit 1), `loop_draining` on the first interrupt, `stop_requested` with the signal name,
+`upstream_backoff` / `upstream_recovered` per upstream, `tick_overran`, `incidents_held`,
+`held_rerouted`, and `chaos_event_missed`. M6 adds `held_restored` / `held_restore_failed` at loop
+start and `held_not_persisted` when the column could not be written; and the gate's own:
+`write_paused` (the one to watch for, with the audit id and the CLI hint), `write_decided`,
+`write_proposal_duplicate`, `write_proposal_dropped`, `write_key_unknown`, `write_proposal_shape` /
+`write_proposal_ungrounded` when a check fired, and `gate_unavailable` when the checkpointer could
+not be opened at all.
+
+
+`logs/*.jsonl` is gitignored; `logs/.gitkeep` is not. A captured run worth keeping goes
+into `docs/` next to the finding it supports.
 
 ---
 
@@ -407,7 +719,7 @@ Each ends runnable and verifiable. **M0 through M9 need no containers and no new
 
 **M2 One agent, Opus only.** `tools/evidence.py` assembles the packet in code, then a single agent reads its SOP file and returns a Pydantic `Finding` (severity echoed not authored, work order, citations), invoked only on newly-opened incidents. Deliberately before any fan-out, and deliberately **Tier 2 only** so there is a known-good baseline to measure local models against later. _Verify:_ token cost flat across three sweeps while incident count grows; every work order names a real sensor and quotes its real reading; `agent.jsonl` carries `finish_reason` on every call; one narrow pytest grades the **reason text** for grounding facts, not just the severity label.
 
-**M3 The four responders.** Supervisor, allowlists, explicit briefs, bounded fan-out, `WorkOrder` as the handoff contract, cross-domain synthesis into one shift report. **The one thing worth proving rather than porting:** run a sub-agent once with no brief, capture it flailing, then pass the brief and capture it working, committed side by side. Sub-agents inherit nothing, and that fact is what this whole architecture rests on. _Verify:_ a test asserts each agent's exact tool count and that no agent can name a tool outside its set. _What actually happened:_ it did not flail. Both answers pass every rail with zero violations, and the unbriefed one writes one action instead of five and hands nothing to a named neighbour. The pair is in `docs/no-brief-transcript.md` and `docs/with-brief-transcript.md`; the finding is that the rails cannot detect a missing brief. `Finding` above was wrong: it is triage's type, and what a sub-agent hands up is a `WorkOrder`.
+**M3 The four responders.** Supervisor, allowlists, explicit briefs, bounded fan-out, `WorkOrder` as the handoff contract, cross-domain synthesis into one shift report. **The one thing worth proving rather than porting:** run a sub-agent once with no brief, capture it flailing, then pass the brief and capture it working, committed side by side. Sub-agents inherit nothing, and that fact is what this whole architecture rests on. _Verify:_ a test asserts each agent's exact tool count and that no agent can name a tool outside its set. _What actually happened:_ it did not flail. Both answers pass every rail with zero violations, and the unbriefed one writes one action instead of five and hands nothing to a named neighbour. The pair is in `docs/transcripts/no-brief-transcript.md` and `docs/transcripts/with-brief-transcript.md`; the finding is that the rails cannot detect a missing brief. `Finding` above was wrong: it is triage's type, and what a sub-agent hands up is a `WorkOrder`.
 
 **M4 The continuous loop.** `executor.py`: tick cadence from config, graceful shutdown, per-tick structured log line, exponential backoff on upstream failure, and a tick that survives one sub-agent raising. _Verify:_ run for 30 minutes unattended; every tick logged; kill an upstream by pointing it at a bad URL mid-run and watch it back off and recover rather than die.
 
@@ -450,6 +762,8 @@ Named so nothing gets quietly resurrected:
 7. Load the Vercel URL and watch three ticks land without a refresh.
 
 ## Open items
+
+Tracked in `docs/open-issues.md` (#5 and "Multi-tenancy"). The two the plan named:
 
 - **Where this runs in production.** ECS is off the table. You build and run it in a venv, decide the host, and dockerize (FUTURE-1) only if the host wants a container. Lambda container image on a short EventBridge schedule is the cheap answer for a tick loop; a small always-on box is the honest answer for "constantly running." Worth deciding once M4 exists and you can see how long a tick actually takes.
 - **Multi-tenancy.** "Stand up the next ranch in a morning" implies per-client isolation of `sw_ops`. Not in V1.

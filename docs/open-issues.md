@@ -380,30 +380,31 @@ deleted without its content landing somewhere; git history holds every original.
 
 | File | Before | Where the content went | After |
 | --- | --- | --- | --- |
-| `README.md` | 126 | kept: how to run it. Docs table repointed | ~120 |
-| `CLAUDE.md` (root) | 215 | kept: what this is, the one rule, the ritual, the commands, the signposts. The seven explanatory paragraphs moved to the nested files and `STATE.md` where they already lived (#25) | ~90 |
-| `src/agent/CLAUDE.md` | 305 | kept, minus a stale paragraph that said escalation was not built | ~290 |
+| `README.md` | 126 | kept: how to run it. Docs table rewritten for the new set | 127 |
+| `CLAUDE.md` (root) | 215 | kept: what this is, the one rule, the ritual, the commands, the signposts. The seven explanatory paragraphs moved to the nested files and `STATE.md` where they already lived (#25) | 104 |
+| `src/agent/CLAUDE.md` | 305 | kept, minus a stale paragraph that said escalation was not built and two history asides | 297 |
 | `src/tools/CLAUDE.md` | 209 | kept | 209 |
 | `src/models/CLAUDE.md` | 129 | kept | 129 |
 | `src/api/CLAUDE.md` | 69 | kept | 69 |
 | `tests/CLAUDE.md` | 172 | kept, transcript paths updated | 172 |
 | `web/README.md` | 100 | kept | 100 |
-| `docs/STATE.md` | 544 | kept: where the build stands, the module table, the 37 decisions, the environment, the live ranch facts, the demo recipe, and one list of traps. The seven "what Mn actually produces" histories moved to `JOURNEY.md` (most were already there) | ~260 |
-| `docs/Plan.md` | 455 | kept, and absorbed `architecture.md` and `logging.md` in place of its own older copies of the diagram, the tool table, and the log schemas. Its pre-M7 model-routing essay became a pointer to the ledger | ~640 |
+| `docs/STATE.md` | 544 | kept: where the build stands, the module table, the 37 decisions, the environment, the live ranch facts, the demo recipe, and one list of traps. The seven "what Mn actually produces" histories went; what was durable in them became a knobs table, a cost paragraph, and one list of fourteen traps | 241 |
+| `docs/Plan.md` | 455 | kept, and absorbed `architecture.md` and `logging.md` in place of its own older copies of the diagram, the tool table, and the log schemas. Its pre-M7 model-routing essay became a pointer to the ledger | 769 |
 | `docs/architecture.md` | 154 | into `Plan.md`. Deleted | 0 |
 | `docs/logging.md` | 362 | into `Plan.md`. Deleted | 0 |
-| `docs/JOURNEY.md` | 1,671 | kept, trimmed where a defect was retold in full and the cookbook already holds it. Each such defect is now one line and a cookbook number | ~1,350 |
-| `docs/cookbook.md` | 1,199 | kept. Three pairs that were the same lesson twice merged: #23 into #13, #44 into #32, #41 into #18. The numbers stay in the index and point at the merged entry | ~1,100 |
+| `docs/JOURNEY.md` | 1,671 | kept, trimmed where a defect was retold in full and the cookbook already holds it. Each such defect is now one line and a cookbook number (M0 to M5); M6 to M9 already were | 1,464 |
+| `docs/cookbook.md` | 1,199 | kept. Three pairs that were the same lesson twice merged: #23 into #13, #44 into #32, #41 into #18. The numbers stay in the index and point at the merged entry. 45 entries, 48 numbers | 1,159 |
 | `docs/model-routing.md` | 305 | kept as is, the ledger | 305 |
 | `docs/issues.md` | 368 | this file. Deleted | 0 |
-| `docs/open-issues.md` | 0 | new | ~330 |
+| `docs/open-issues.md` | 0 | new | 492 |
 | `docs/sweetwater-ranch.md` | 115 | kept, the canon | 115 |
-| `docs/no-brief-transcript.md`, `docs/with-brief-transcript.md`, `docs/m7-compare-transcript.md` | 348 | moved to `docs/transcripts/`, unchanged | 348 |
+| `docs/transcripts/no-brief-transcript.md`, `docs/transcripts/with-brief-transcript.md`, `docs/transcripts/m7-compare-transcript.md` | 348 | moved to `docs/transcripts/`, unchanged | 348 |
 | `docs/decisions/` | 0 | removed. The decisions are the numbered list in `STATE.md` | |
-| **Total** | **6,946** | | **~5,600** |
+| **Total** | **6,946** | | **6,200** |
 
-The "after" column is filled with the real counts when the merge commit lands; until then it is the
-estimate.
+The "after" column is the real count at the merge commit. The total fell by about 750 lines rather than the
+1,350 estimated, because `Plan.md` grew by 314 absorbing two files that only overlapped it in part. The cost that
+mattered fell by more: the file every session reads in full went from 544 lines to 241.
 
 **Who decided.** Scott, in this review.
 
@@ -426,7 +427,8 @@ Root `CLAUDE.md`, 215 lines:
 
 The Commands block and the signpost table stay by instruction. Applying the sort: pile A stays, pile B
 becomes one line each, pile C leaves except the two that stay. Result: about 90 lines. Ten over the
-target, and the Commands block alone is 26 of them.
+target as estimated. Actual after the edit: **104 lines**, of which the Commands block is 26 and the signpost table
+17, so the prose a session reads is 61 lines. The two blocks Scott kept are what puts it over 80.
 
 `src/agent/CLAUDE.md`, 305 lines: 270 are rules a session needs before touching the loop, the rails, or
 the gate. 20 are history (the M4 loop measurements, the "not built, deliberately so" escalation paragraph

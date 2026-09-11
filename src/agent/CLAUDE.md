@@ -75,8 +75,7 @@ before it opens; until then the row is `pending`: live in the ledger, covered by
 index and the unread guard, but never routed, paged, or billed. A pending row that reads clean is
 `dismissed`, never `resolved`, because nothing was alarmed. Unread is not read-clean, for pending
 exactly as for opened. The seven permanently-bad sensors and every chaos scenario (minimum TTL
-two ticks) still open on their second sweep. Migration `0003`. M4 measured the reason: 10 to 24
-opened per tick, almost all of them dice.
+two ticks) still open on their second sweep. Migration `0003`, `docs/STATE.md` decision 6.
 
 **Every read failing is the Sensor API being down, and it fails the sweep.** One dark sensor is
 a per-sensor `SweepError` and the sweep carries on; all of them dark is an outage, and without
@@ -136,20 +135,13 @@ SIGBREAK go through `signal.signal` and set the stop event, which also wakes the
 **A chaos fault that heals unseen is reported, never silent.** `SweepResult.overlay_observed`
 is the event ids whose sensor the sweep read; at heal time an event this run injected that was
 never in that set logs `chaos_event_missed` and lands in `chaos_missed` on the line. Animal
-events are excluded because nothing observes them yet: no stage reads the Care API, which is
-the owed `herd_health` verification and its own scoped item, **M7A**, which adds the herd sweep and puts animal events into the observed set.
+events are in the observed set from M7A, through the herd sweep.
 
 ## Escalation (see also `src/models/CLAUDE.md`)
 
-**Not built, and deliberately so. Through M6 every job is Tier 2.** There is no cascade,
-no local fallback, and no retry that hides a bad response, because M7 moves jobs down one
-at a time with a rail and a ledger row in `docs/model-routing.md`. Anything earlier is a
-cost optimization nobody measured. What exists now is `escalate` / `escalate_reason` on the
-`WorkOrder`: the model may say a human is needed, which is a different question from which
-tier answered.
-
-Built at M7 as `routing.tier_for` (before the call) and `routing.escalation_reason` (after it),
-inside `workers.judge_packet`. Per incident, escalate to Tier 2 when **any** holds, and the reason
+Two different questions share a word here. `escalate` / `escalate_reason` on the `WorkOrder` is the
+**model** saying a human above the crew should know. Escalation between **tiers** is `routing.tier_for`
+(before the call) and `routing.escalation_reason` (after it), inside `workers.judge_packet`, built at M7. Per incident, escalate to Tier 2 when **any** holds, and the reason
 lands on the order as `escalation` and on the tick line in `escalation_reasons`:
 
 - `triage.py` marked the incident **critical** (the one pre-call condition; Tier 1 is never asked)
@@ -231,8 +223,8 @@ contract between a sub-agent and the supervisor:** a sub-agent inherits nothing 
 inherits nothing back, so anything the supervisor needs must be written in the order rather than
 assumed to be in shared context. `render_shift_page` is the whole of what it gets.
 
-That claim is not asserted, it is measured. `docs/no-brief-transcript.md` and
-`docs/with-brief-transcript.md` are the same model on the same packet with one brief removed, and
+That claim is not asserted, it is measured. `docs/transcripts/no-brief-transcript.md` and
+`docs/transcripts/with-brief-transcript.md` are the same model on the same packet with one brief removed, and
 the unbriefed answer passes every rail while naming no neighbour at all.
 
 `WorkOrder` is split down the middle on purpose: everything above `status` is the model's

@@ -97,21 +97,22 @@ because the two providers disagree: Anthropic says `tool_use` and `end_turn`, Ol
 healthy Opus call as a config bug.
 
 Three streams: `tick.jsonl` (the heartbeat), `agent.jsonl` (the instrument),
-`audit.jsonl` (the receipt). Schemas in [docs/logging.md](docs/logging.md).
+`audit.jsonl` (the receipt). Schemas in [docs/Plan.md](docs/Plan.md), under Logging.
 
 ## Docs
 
+Nine files, each answering one question a reader actually has.
+
 | | |
 | --- | --- |
-| [docs/architecture.md](docs/architecture.md) | the shape, the free/expensive split, the tool slices |
-| [docs/sweetwater-ranch.md](docs/sweetwater-ranch.md) | the scenario canon |
-| [docs/model-routing.md](docs/model-routing.md) | local by default, Opus where it earns it (a ledger) |
-| [docs/logging.md](docs/logging.md) | the three log streams |
+| [docs/STATE.md](docs/STATE.md) | where the build stands right now: the module map, the decisions made, the verified environment, the live ranch facts, the demo recipe. The session-start briefing |
+| [docs/Plan.md](docs/Plan.md) | what it is and why: the tree, the architecture, the tool slices, the chaos agent, the three log streams and the tables beside them, the milestones |
+| [docs/sweetwater-ranch.md](docs/sweetwater-ranch.md) | the scenario canon, the one source the SOPs derive from |
+| [docs/model-routing.md](docs/model-routing.md) | local by default, Opus where it earns it: the design and the ledger of what moved tiers, with proof |
 | [docs/JOURNEY.md](docs/JOURNEY.md) | what actually happened, and where it diverged, written at every boundary |
-| [docs/cookbook.md](docs/cookbook.md) | 48 lessons, ordered by the pain that produced each one; numbers are stable |
-| [docs/open-issues.md](docs/open-issues.md) | what is still open across phases, and what each would take |
-| [docs/STATE.md](docs/STATE.md) | the session-start briefing: where the build stands, decisions made, the verified environment |
-| [docs/Plan.md](docs/Plan.md) | the plan and the tree, which is the authority the layout matches |
+| [docs/cookbook.md](docs/cookbook.md) | the lessons, ordered by the pain that produced each one; 48 stable numbers, 45 entries after three merges |
+| [docs/open-issues.md](docs/open-issues.md) | everything still open, in plain language: what is wrong, why it matters, what it would take, who decides |
+| [docs/transcripts/](docs/transcripts/) | the pinned fixtures: the no-brief pair (M3) and the M7 local-versus-Opus pairs |
 | [web/README.md](web/README.md) | the window: the proxy, the panels, the three-command gate |
 | [CLAUDE.md](CLAUDE.md) | orientation for AI assistants; nested files per package |
 
