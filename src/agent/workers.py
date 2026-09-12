@@ -67,16 +67,17 @@ import re
 from typing import Any
 
 from src.agent.agent import WATER_FEED
+from src.agent.investigator import Investigation, investigate
 from src.agent.state import Incident, Severity, WorkOrder
 from src.models.llm_client import ModelResponse, call_tier1, call_tier2
-from src.models.routing import ESCALATE_CRITICAL, TIER1, TIER2, escalation_reason, tier_for
+from src.models.routing import ESCALATE_INSUFFICIENT, TIER1, TIER2, escalation_reason, pre_call_reason, tier_for
 from src.prompts.system_prompts import WORK_ORDER_SCHEMA, WORK_ORDER_TOOL, WORK_ORDER_TOOL_DESCRIPTION, system_prompt
 from src.tools.allowlists import WRITE_TOOL_ARGS, proposable_tools_for
 from src.tools.evidence import EvidencePacket
 from src.tools.sensors import SensorReading
 from src.tools.triage import triage_reading
 from src.utils.config import get_settings
-from src.utils.helpers import as_strings, gather_bounded, has_no_real_instruction
+from src.utils.helpers import as_strings, gather_bounded, has_no_real_instruction, number_tokens
 from src.utils.logger import current_tick, get_logger, log_compare, write_transcript
 
 log = get_logger(__name__)
@@ -131,7 +132,6 @@ WRITE_VIOLATIONS = frozenset({"write_shape_invalid", "write_tool_not_allowed", "
 #: ledger row can count it.
 _RULE_ID_PREFIX = re.compile(r"^\s*([A-Z][A-Z-]*-\d+)(?![A-Z0-9-])")
 
-_NUMBER_TOKEN = re.compile(r"-?\d+(?:\.\d+)?")
 _ISO_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$")
 
 
@@ -156,8 +156,8 @@ def normalize_citations(cited: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
 
 
 def page_numbers(page: str) -> frozenset[float]:
-    """Every number token on the page, as floats, so `12` grounds `12.0` and not `120`."""
-    return frozenset(float(tok) for tok in _NUMBER_TOKEN.findall(page))
+    """Every number token on the page, as floats, so `12` grounds `12.0` and not `120`. `helpers.number_tokens`, shared with the shift report's rail from M10."""
+    return number_tokens(page)
 
 
 def check_write_proposal(raw: object, *, agent: str, page: str) -> tuple[list[str], dict[str, Any] | None]:
@@ -392,21 +392,43 @@ async def judge_packet(packet: EvidencePacket, *, agent: str = WATER_FEED, reaso
     the same string is what both tiers see, which is what makes an escalation a fair rewrite and
     a `TIER_COMPARE` pair a fair comparison.
 
-    The cascade, M7. `routing.tier_for` asks Tier 1 unless the incident is critical or the
-    cascade is off. `routing.escalation_reason` reads the Tier-1 order after the rails and says
-    whether Opus rewrites it; the reason lands on the stored order as `escalation` and the
-    Tier-1 attempt lands on it as the `tier1_*` receipt. A Tier-2 order is final either way.
+    The cascade, M7, inverted at M10. `routing.tier_for` asks Tier 1 for every incident whose page
+    fits the local context window, whatever its severity; the cascade being off is Tier 2 for
+    everything. `routing.escalation_reason` reads the Tier-1 order after the rails and says whether
+    Opus rewrites it; the reason lands on the stored order as `escalation` and the Tier-1 attempt
+    lands on it as the `tier1_*` receipt. A Tier-2 order is final either way.
     """
     system, page = system_prompt(agent), packet.render()
-    first = tier_for(packet.incident)
+    first = tier_for(f"{system}\n\n{page}", max_tokens=MAX_OUTPUT_TOKENS)
     if first == TIER2:
         order = await _judge_at(TIER2, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
-        # Critical is the one pre-call reason. With the cascade off there is no reason at all,
-        # and the field says so: a Tier-2 order with `escalation=""` was never a Tier-1 candidate.
-        return _transcribed(order.model_copy(update={"escalation": ESCALATE_CRITICAL}) if packet.incident.severity == "critical" and get_settings().tier1_enabled else order, page=page)
+        # `page_too_long` is the one pre-call reason, and it is code's. With the cascade off there is
+        # no reason at all, and the field says so: a Tier-2 order with `escalation=""` was never a
+        # Tier-1 candidate.
+        reason = pre_call_reason(f"{system}\n\n{page}", max_tokens=MAX_OUTPUT_TOKENS)
+        if reason:
+            log.warning("tier1_skipped", incident=packet.incident.key, agent=agent, reason=reason, page_chars=len(system) + len(page), hint="the page plus the answer budget does not fit OLLAMA_NUM_CTX; Opus reads it whole")
+        return _transcribed(order.model_copy(update={"escalation": reason}) if reason else order, page=page)
 
     local = await _judge_at(TIER1, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
     reason = escalation_reason(local)
+
+    # M10. The investigator, the third model job: fires only when the Tier-1 judge said on purpose
+    # that the page was too thin, runs a bounded tool loop for what it listed, and the enriched page
+    # is judged once more at Tier 1. A loop that did not finish on its own leaves nothing on the page
+    # (`investigator.py`), so the re-judge happens only when there are facts to judge. Opus's rewrite
+    # and the `TIER_COMPARE` shadow below both read the same page the stored order read, enriched or
+    # not, so the pair stays fair.
+    investigation: Investigation | None = None
+    if reason == ESCALATE_INSUFFICIENT and get_settings().investigator_enabled:
+        investigation = await investigate(packet, agent=agent, unknowns=local.unknowns, page=page)
+        if investigation.facts:
+            page = f"{page}\n\n{investigation.facts}"
+            local = await _judge_at(TIER1, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
+            reason = escalation_reason(local)
+            log.info("tier1_rejudged", incident=packet.incident.key, agent=agent, steps=investigation.steps, tools=list(investigation.tools_called), status=local.status, insufficient_information=local.insufficient_information, escalation=reason or None)
+    receipt = investigation.receipt if investigation is not None else {}
+
     shadow: WorkOrder | None = None
     if get_settings().tier_compare and not reason:
         # The measurement: the same page to Opus, its answer written beside the local one and
@@ -415,14 +437,14 @@ async def judge_packet(packet: EvidencePacket, *, agent: str = WATER_FEED, reaso
 
     if not reason:
         if shadow is not None:
-            log_compare(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, escalation="", page=_page_facts(packet), tier1=_compare_fields(local), tier2=_compare_fields(shadow))
-        return _transcribed(local, page=page)
+            log_compare(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, escalation="", page=_page_facts(packet), tier1=_compare_fields(local), tier2=_compare_fields(shadow), investigation=receipt or None)
+        return _transcribed(local.model_copy(update=receipt) if receipt else local, page=page)
 
-    log.warning("tier1_escalated", incident=packet.incident.key, agent=agent, reason=reason, tier1_status=local.status, tier1_violations=list(local.violations), tier1_finish_reason=local.finish_reason)
+    log.warning("tier1_escalated", incident=packet.incident.key, agent=agent, reason=reason, tier1_status=local.status, tier1_violations=list(local.violations), tier1_finish_reason=local.finish_reason, investigated=bool(receipt), investigation_outcome=receipt.get("investigation_outcome"))
     rewritten = await _judge_at(TIER2, packet, agent=agent, system=system, page=page, reasoning_effort=reasoning_effort)
-    stored = rewritten.model_copy(update={"escalation": reason, **_tier1_receipt(local)})
+    stored = rewritten.model_copy(update={"escalation": reason, **_tier1_receipt(local), **receipt})
     if get_settings().tier_compare:
-        log_compare(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, escalation=reason, page=_page_facts(packet), tier1=_compare_fields(local), tier2=_compare_fields(rewritten))
+        log_compare(incident_key=packet.incident.key, agent=agent, severity=packet.incident.severity, escalation=reason, page=_page_facts(packet), tier1=_compare_fields(local), tier2=_compare_fields(rewritten), investigation=receipt or None)
     return _transcribed(stored, page=page)
 
 

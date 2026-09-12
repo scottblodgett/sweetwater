@@ -70,7 +70,7 @@ from src.agent.memory import (
 from src.agent.state import RanchState, WorkOrder
 from src.agent.workers import fan_out
 from src.models.llm_client import cost_usd
-from src.models.routing import TIER1, TIER2
+from src.models.routing import TIER1
 from src.tools import chaos
 from src.tools.evidence import EvidencePacket, assemble
 from src.tools.herd import HerdSweepResult, sweep_herd
@@ -552,16 +552,19 @@ async def run_tick(
     # so a tick of local orders is exactly $0.00 and an escalated order bills only its Tier-2 half.
     input_tokens = sum(o.input_tokens + o.tier1_input_tokens for o in state.work_orders) + (state.shift_report.input_tokens if state.shift_report else 0)
     output_tokens = sum(o.output_tokens + o.tier1_output_tokens for o in state.work_orders) + (state.shift_report.output_tokens if state.shift_report else 0)
+    # M10: the fused report is billed at the tier that wrote it (`ShiftReport.tier`), not at Opus by
+    # assumption. A Tier-1 report is free; a Tier-1 attempt that Opus rewrote still costs Opus's call.
+    report = state.shift_report
     state.cost_usd = round(
         sum(cost_usd(o.input_tokens, o.output_tokens, model=o.model, tier=o.tier) for o in state.work_orders)
-        + (cost_usd(state.shift_report.input_tokens, state.shift_report.output_tokens, model=state.shift_report.model, tier=TIER2) if state.shift_report else 0.0),
+        + (cost_usd(report.input_tokens, report.output_tokens, model=report.model, tier=report.tier) if report and report.model else 0.0),
         6,
     )
-    # M7. `tier` is the highest tier that wrote anything this tick (the fused report counts as
-    # Tier 2), or null when no model was called, so a calm tick reads as no tier rather than as
-    # the cheap one. `escalation_reasons` is one code per escalated order, in order.
-    tiers_used = {o.tier for o in state.work_orders} | ({TIER2} if state.shift_report and state.shift_report.source == "model" else set())
-    escalation_reasons = [o.escalation for o in state.work_orders if o.escalation]
+    # M7. `tier` is the highest tier that wrote anything this tick, or null when no model was called,
+    # so a calm tick reads as no tier rather than as the cheap one. `escalation_reasons` is one code
+    # per escalated order, in order, plus the report's own reason when Opus rewrote it (M10).
+    tiers_used = {o.tier for o in state.work_orders} | ({report.tier} if report and report.model else set())
+    escalation_reasons = [o.escalation for o in state.work_orders if o.escalation] + ([f"report:{report.escalation}"] if report and report.escalation else [])
 
     fields: dict[str, Any] = dict(
         duration_ms=watch.ms,
@@ -594,6 +597,13 @@ async def run_tick(
         tier1_orders=sum(1 for o in state.work_orders if o.tier == TIER1),
         escalations=len(escalation_reasons),
         escalation_reasons=escalation_reasons,
+        # M10. The investigator, off the orders: how many loops ran, how many tool calls they made in
+        # total, and how each ended (`answered` / `step_ceiling` / `deadline` / `no_tool_calls` /
+        # `error`). A high `step_ceiling` beside a low `answered` is the local model thrashing, which
+        # is the row `docs/model-routing.md` wants to be able to write from one line.
+        investigations=sum(1 for o in state.work_orders if o.investigated),
+        investigation_steps=sum(o.investigation_steps for o in state.work_orders if o.investigated),
+        investigation_outcomes={outcome: sum(1 for o in state.work_orders if o.investigated and o.investigation_outcome == outcome) for outcome in sorted({o.investigation_outcome for o in state.work_orders if o.investigated})},
         # The M2 verification lives on this pair: token cost stays flat across sweeps while
         # incident count moves, because only newly-opened incidents reach a model.
         input_tokens=input_tokens,
@@ -607,6 +617,10 @@ async def run_tick(
         worlds=list(state.worlds),
         shift_report=state.shift_report.source if state.shift_report else None,
         shift_report_violations=list(state.shift_report.violations) if state.shift_report else [],
+        # M10. Which tier wrote the report a model wrote (null when code assembled it without a call),
+        # and why Opus was paid for it when it was.
+        report_tier=report.tier if report and report.model else None,
+        report_escalation=(report.escalation or None) if report else None,
         ledger=ledger,
         # The loop's fields. `held` is incidents carried to the next tick unanswered;
         # `skipped_upstreams` is who was in backoff; the chaos trio is what was armed, healed,

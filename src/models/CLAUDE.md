@@ -58,18 +58,36 @@ each is deliberate:
 - **`keep_alive` is `30m`.** Ollama's default is five minutes, which is exactly the tick cadence,
   so the weights would unload and reload on every tick (22s cold against 4s warm).
 
-**Which tier a job gets is `routing.py`'s, never this module's.** `workers.judge_packet` asks
-`tier_for`, calls one tier, runs the rails, asks `escalation_reason`, and rewrites at Tier 2 when
-told. The two tiers see the identical `packet.render()` string, which is what makes an escalation a
-fair rewrite and a `TIER_COMPARE` pair a fair comparison.
+**Which tier a job gets is `routing.py`'s, never this module's.** `workers.judge_packet` and
+`agent.synthesize` ask `tier_for(text, max_tokens=)`, call one tier, run the rails, ask
+`escalation_reason` (or the report's equivalent), and rewrite at Tier 2 when told. The two tiers see
+the identical string, which is what makes an escalation a fair rewrite and a `TIER_COMPARE` pair a
+fair comparison.
+
+**From M10 `call_tier1` has three jobs, and it is asked first for two of them at every severity.**
+The per-incident work order and the fused shift report go to Tier 1 whenever the cascade is on and
+the prompt fits `num_ctx` (`routing.fits_tier1`, the one pre-call reason, `page_too_long`); the
+third job is the investigator's loop in `src/agent/investigator.py`, which builds its actor through
+`build_tier1_client(reasoning=False)` with **no `format=`**, because a grammar-constrained model
+cannot emit a tool call: the loop navigates, the judge judges. Critical is not a pre-call reason any
+more; `ESCALATE_CRITICAL` left the vocabulary. The predicate is `docs/model-routing.md`'s and
+`docs/state.md` decision 29.
 
 **Measured at M7, `gemma4:e4b` on this box**: 3,000 to 4,200 tokens in per packet against
 `num_ctx` 16,384, so the SOP is never truncated and `tier1_context_full` never fired; 4 to 13s a
 call warm. The model copied whole SOP headings into `rules_cited` on four of five answers
 (`"FEED-02 - A bin at the warning line…"`), id right every time, so `workers.check` trims a citation
-to the id at its front and records `rule_citation_trimmed` before `invented_rule` runs. It set
-`insufficient_information` on 5 of 6 candidates, honestly, where the SOP asks for a fact the page
-lacks. **The cascade ships off** (`TIER1_ENABLED=0`); the row in `docs/model-routing.md` says why.
+to the id at its front and records `rule_citation_trimmed` before `invented_rule` runs.
+
+**Measured at M10, same model**: the 18-order fused page is 10,630 tokens with the mandate (Opus
+counts the same text at 15,131), so it fits with about 3,700 to spare after a 2,048-token answer and
+`fits_tier1` at 3.0 chars per token is the guard for the day it does not. In a tool loop the model
+emitted its tool calls **as text** on 9 of 15 loops (`get_animal{animalId:<|"|>cow-0777<|"|>}`), which
+Ollama did not parse into `tool_calls`, so the loop ended with `no_tool_calls`; and where it did call
+tools it reached for `list_sensors` whole (36k chars, truncated by the interceptor) before its own
+sensor. As the supervisor it put sentences into `linked` on 4 of 4 reports, which `invented_incident`
+caught every time and the keyed schema (`shift_report_schema_for`) now forbids by grammar. The rows in
+`docs/model-routing.md` carry the numbers and the verdict.
 
 ## Two credentials, one call path
 

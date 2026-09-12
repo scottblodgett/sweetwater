@@ -59,6 +59,10 @@ what the fix actually was.
 - **#46** Do not write source through a shell heredoc - _Docs, diagrams, and the shell_
 - **#47** A demo approve is a real write; plant a tool the ranch does not have - _The test database, the demo ledger, and two sessions_
 - **#48** The heartbeat's nullable field is not the ledger's answer - _A line that lied, or said nothing_
+- **#49** A kill that reports success killed nothing, and a venv loop is two processes - _Docs, diagrams, and the shell_
+- **#50** A description is a request; an enum is a grammar - _Docs, diagrams, and the shell_
+- **#51** A tool loop cannot fetch what nobody records - _Docs, diagrams, and the shell_
+- **#52** A tick line's `cost_usd` bills stored orders, and a shadow is not one - _Docs, diagrams, and the shell_
 
 ---
 
@@ -1153,6 +1157,85 @@ so the wire format is not a literal one escape away from a newline.
 **Lesson.** A patch that reports success without a diff is a patch you have not verified. Read the file.
 
 **Found:** M8, repeatedly.
+
+---
+
+### 49. A kill that reports success killed nothing, and a venv loop is two processes
+
+**Pain.** A live loop meant to stop after five ticks ran nine, spent about a dollar more of Opus, and then
+shared the test ledger with the next run, whose first tick opened twelve incidents on a ledger that had just
+been emptied. The kill command had printed "killed".
+
+**Why.** Two things. Git Bash rewrites `/PID` into a path (`C:/Program Files/Git/PID`) before `taskkill`
+sees it, and the `while read` around it swallowed the error and printed its own success line. And the venv's
+`python.exe` is a launcher over `C:\Python311\python.exe`, so one loop is two processes and a kill that gets
+one leaves the other.
+
+**Fix.** `MSYS_NO_PATHCONV=1 taskkill /F /T /PID <pid>`, every PID that `wmic process where
+"name='python.exe'" get processid,commandline` lists for `main.py`, and then run the `wmic` again and read
+zero. A kill is proven by the absence afterwards, never by the command's exit.
+
+**Lesson.** Before a ledger reset, before `pytest`, before a second run: look for the process, do not
+remember having killed it.
+
+**Found:** M10.
+
+---
+
+### 50. A description is a request; an enum is a grammar
+
+**Pain.** Four of four local shift reports put sentences into `linked`, the field whose description says
+"incident keys, spelled exactly as printed on the page." The `invented_incident` rail caught every one and
+Opus rewrote every one, so the local supervisor stood 0 for 4 and the cascade saved nothing on the report.
+
+**Why.** A field description is prose the model reads and may ignore. Grammar-constrained decoding
+(`format=` on Ollama, a tool schema on Anthropic) is enforced by the server, and the keys were known before
+the call.
+
+**Fix.** `shift_report_schema_for(keys)`: `linked` becomes `{"type": "string", "enum": [...keys]}` per
+call, at both tiers. Two of two local reports were rail-clean on the next run. The rail stays as the belt.
+
+**Lesson.** When code knows the set of legal values before the call, put them in the schema, not in the
+description. Decision 31 (trim a citation to its id) was the same move one step later; this is the move
+before the call.
+
+**Found:** M10.
+
+---
+
+### 51. A tool loop cannot fetch what nobody records
+
+**Pain.** The investigator ran 28 times on pages the local judge had called too thin, and cured none. Where
+it fetched at all, it fetched the whole sensor catalogue, then the incident's own sensor.
+
+**Why.** Read the unknowns it was sent to answer: how long a sensor has been dark (the readings endpoint
+returns an empty series for an offline sensor), what powers a fence, how many head stand at a feed room
+(a site, not a pasture). None of those is on any endpoint the ranch exposes. The model was told to fetch
+facts that do not exist as data, and did the only thing it could, which was browse.
+
+**Fix.** None in the loop. The fix for the one fact that was fetchable and missing (the weather on the
+feed page) was to put it on the page in code (#12), which is where a fact the SOP always asks for belongs.
+
+**Lesson.** Before building a loop to fetch a missing fact, list the facts and find each one on the wire.
+A loop is for facts that exist and vary per incident; a fact every page needs goes on the page.
+
+**Found:** M10.
+
+---
+
+### 52. A tick line's `cost_usd` bills stored orders, and a shadow is not one
+
+**Pain.** Run A's tick lines summed to $1.11. `agent.jsonl` summed to $2.12.
+
+**Why.** `TIER_COMPARE` shadows Opus on every standing local order and report and does not store the
+result, and the line bills what was stored. Both are right; reading one as the bill is wrong.
+
+**Fix.** `logs/m10_measure.py shares` reads `agent.jsonl` by tier and job. For a compare run, the bill is
+the line plus `compare.jsonl`'s `escalation=""` rows at Opus's rate.
+
+**Lesson.** Know which stream is the bill before quoting a number from it.
+
+**Found:** M10.
 
 ---
 

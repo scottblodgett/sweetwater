@@ -1,43 +1,55 @@
-"""Job to tier to model, the price table, and the escalation predicate. Lands at M7.
+"""Job to tier to model, the price table, and the escalation predicate. Lands at M7, inverted at M10.
 
 Not to be confused with the routing table in `src/agent/agent.py`, which answers a
 different question: that one decides which of five agents owns an incident, this one
 decides which model runs a job and what it cost.
 
-## Two model jobs, two tiers
+## Three model jobs, two tiers
 
-There are exactly two places in this repo where a model is called: the per-incident work
-order (`workers.judge_packet`, one call per newly-opened incident, the bill) and the fused
-shift report (`agent.synthesize`, one call per tick when two or more worlds opened
-incidents). The plan listed four Tier-1 jobs; two of them never existed (chaos is pure code,
-shift-report *assembly* is the free code path) and the other two were one call. The ledger
-in `docs/model-routing.md` was corrected before anything moved.
+There are exactly three places in this repo where a model is called: the per-incident work
+order (`workers.judge_packet`, one call per newly-opened incident, the bill), the fused shift
+report (`agent.synthesize`, one call per tick when two or more worlds opened incidents), and
+from M10 the investigator (`investigator.investigate`, a bounded tool loop that fires only when
+the Tier-1 judge said `insufficient_information`, local only, never billed). The plan listed four
+Tier-1 jobs; two of them never existed (chaos is pure code, shift-report *assembly* is the free
+code path) and the M7 ledger was corrected before anything moved.
 
-Tier 1 is local (`TIER1_MODEL` on Ollama, default `gemma4:e4b`) and writes the work order
-for every incident the predicate does not claim. Tier 2 is Opus and owns the shift report,
-the critical incidents, and every rewrite.
+Tier 1 is local (`TIER1_MODEL` on Ollama, default `gemma4:e4b`). **From M10 it is asked first
+for every job**, the work order and the shift report alike, whatever the severity. Tier 2 is Opus
+and is reached one way only: by a reason read off the Tier-1 answer after the call, plus the one
+pre-call reason code can know, that the page does not fit the local context window.
 
-## The predicate is per incident, and three of its four conditions fire after the call
+## The predicate is per call, and every condition but one fires after the call
 
-  * **critical**                  known before the call. Tier 1 is never asked.
-  * **rejected**                  the Tier-1 answer failed a blocking rail (`all_clear` is the
-                                  one this whole design exists for: code flagged the incident,
-                                  so "nothing to do" from the cheap judge is a contradiction)
-  * **insufficient_information**  the Tier-1 judge said so on purpose. A model allowed to say
-                                  "I do not know" says it instead of inventing
-  * **proposed_write**            only a Tier-2 proposal may reach the gate
-  * **no_answer**                 Tier 1 never answered (transport, truncation). The packet is
-                                  unjudged and Opus is standing right there
+  * **page_too_long**            known before the call, and code's. `fits_tier1` estimates the
+                                 prompt against `num_ctx` less the answer budget; a page that
+                                 does not fit goes to Opus rather than to a model that would
+                                 read it with its front cut off (`tier1_context_full`)
+  * **rejected**                 the Tier-1 answer failed a blocking rail (`all_clear` is the
+                                 one this whole design exists for: code flagged the incident,
+                                 so "nothing to do" from the cheap judge is a contradiction)
+  * **insufficient_information** the Tier-1 judge said so on purpose. A model allowed to say
+                                 "I do not know" says it instead of inventing. From M10 this
+                                 reason runs the investigator first, and only a page still thin
+                                 after the loop (or a loop that did not finish) reaches Opus
+  * **proposed_write**           only a Tier-2 proposal may reach the gate
+  * **no_answer**                Tier 1 never answered (transport, truncation). The packet is
+                                 unjudged and Opus is standing right there
 
 Escalation is a **rewrite**, not a review: Opus gets the identical page and writes its own
 order. The Tier-1 answer stays in `agent.jsonl` as the receipt; the Tier-2 order is stored.
 Nothing is retried at the same tier: a Tier-2 rejection is stored as rejected.
 
+**Critical is not a pre-call reason from M10.** M7 sent every critical incident to Opus before
+asking, on the argument that the worst incident deserved the best writer. Scott's call at the
+M10 check-in: severity is code's and the rails hold at every severity, so the cheap judge is
+asked first for the dead cow too, and its note proposal still escalates on `proposed_write`.
+
 **The world count is not a per-incident trigger.** "Two or more sensing worlds opened
 incidents" says nothing about what one packet contains; applying it per incident would send
-every work order on every storm tick to Opus, which is the bill M7 exists to cut. What it
-decides is whether the tick needs someone reading across the ranch, and that is
-`FUSION_THRESHOLD` on the shift report, already Tier 2.
+every work order on every storm tick to Opus. What it decides is whether the tick needs
+someone reading across the ranch, and that is `FUSION_THRESHOLD` on the shift report, which
+from M10 is a Tier-1 call first like everything else.
 
 ## The price table replaces a constant, not a field
 
@@ -49,7 +61,7 @@ place. Tier 1 is $0.00 by tier, not by model name, so a renamed local model cann
 
 from __future__ import annotations
 
-from src.agent.state import Incident, WorkOrder
+from src.agent.state import WorkOrder
 from src.utils.config import get_settings
 from src.utils.logger import get_logger
 
@@ -99,14 +111,24 @@ def cost_usd(input_tokens: int, output_tokens: int, *, model: str = "", tier: in
 # --------------------------------------------------------------------------- #
 # the predicate
 # --------------------------------------------------------------------------- #
-#: The reason codes, as they appear in `WorkOrder.escalation` and summed on the tick line as
-#: `escalation_reasons`. A closed vocabulary so a `jq` over the log can count them.
-ESCALATE_CRITICAL = "critical"
+#: The reason codes, as they appear in `WorkOrder.escalation` and `ShiftReport.escalation` and
+#: summed on the tick line as `escalation_reasons`. A closed vocabulary so a `jq` over the log
+#: can count them. `critical` left the vocabulary at M10.
+ESCALATE_PAGE_TOO_LONG = "page_too_long"
 ESCALATE_REJECTED = "rejected"
 ESCALATE_INSUFFICIENT = "insufficient_information"
 ESCALATE_PROPOSED_WRITE = "proposed_write"
 ESCALATE_NO_ANSWER = "no_answer"
-ESCALATION_REASONS = frozenset({ESCALATE_CRITICAL, ESCALATE_REJECTED, ESCALATE_INSUFFICIENT, ESCALATE_PROPOSED_WRITE, ESCALATE_NO_ANSWER})
+ESCALATION_REASONS = frozenset({ESCALATE_PAGE_TOO_LONG, ESCALATE_REJECTED, ESCALATE_INSUFFICIENT, ESCALATE_PROPOSED_WRITE, ESCALATE_NO_ANSWER})
+
+#: Characters per gemma token, conservative. Measured 3.4 on the real 18-order fused page
+#: (35,848 chars, 10,630 tokens with the mandate, via `/api/generate` `prompt_eval_count` on
+#: 2026-09-12) and 3.6 on a feed packet; 3.0 over-counts on purpose, because the failure this
+#: guards is Ollama silently truncating the front of the prompt, and the cost of over-counting is
+#: one Opus call.
+CHARS_PER_TOKEN = 3.0
+#: Room left for the chat template and the schema grammar, which are neither the prompt nor the answer.
+CONTEXT_MARGIN_TOKENS = 512
 
 
 def tier1_enabled() -> bool:
@@ -114,11 +136,41 @@ def tier1_enabled() -> bool:
     return bool(get_settings().tier1_enabled)
 
 
-def tier_for(incident: Incident) -> int:
-    """The tier that is asked first. The only pre-call condition is severity."""
+def estimate_tokens(text: str) -> int:
+    """A ceiling estimate of the local model's token count for `text`, at `CHARS_PER_TOKEN`."""
+    return int(len(text) / CHARS_PER_TOKEN) + 1
+
+
+def fits_tier1(text: str, *, max_tokens: int, num_ctx: int | None = None) -> bool:
+    """Whether the prompt, the answer budget, and the margin fit inside `num_ctx`.
+
+    M10, the one pre-call reason left. Ollama does not fail a prompt longer than `num_ctx`; it
+    truncates from the front and answers about the rest, which for this repo's pages means the
+    SOP or the first work orders are gone and the model cites what it never read. `call_tier1`
+    catches that after the fact as `tier1_context_full`; this catches it before the call and sends
+    the page to the tier that can read it whole.
+    """
+    ceiling = int(num_ctx or get_settings().ollama_num_ctx)
+    return estimate_tokens(text) + int(max_tokens) + CONTEXT_MARGIN_TOKENS <= ceiling
+
+
+def tier_for(text: str, *, max_tokens: int) -> int:
+    """The tier that is asked first, for any job, given the prompt it will be asked with.
+
+    Tier 1 for everything when the cascade is on and the page fits; Tier 2 otherwise. From M10
+    the incident's severity is not an input: the rails hold at every severity and a human still
+    answers every write, so there is nothing a critical incident needs from Opus before the cheap
+    judge has been asked (`docs/state.md`, the M10 decisions).
+    """
     if not tier1_enabled():
         return TIER2
-    return TIER2 if incident.severity == "critical" else TIER1
+    return TIER1 if fits_tier1(text, max_tokens=max_tokens) else TIER2
+
+
+def pre_call_reason(text: str, *, max_tokens: int) -> str:
+    """`page_too_long` when `tier_for` chose Tier 2 with the cascade on, or `""`. The code the
+    stored order or report carries so the tick line can count why Opus was paid before any call."""
+    return ESCALATE_PAGE_TOO_LONG if tier1_enabled() and not fits_tier1(text, max_tokens=max_tokens) else ""
 
 
 def escalation_reason(order: WorkOrder) -> str:
@@ -141,9 +193,11 @@ def escalation_reason(order: WorkOrder) -> str:
 
 
 __all__ = [
-    "ESCALATE_CRITICAL",
+    "CHARS_PER_TOKEN",
+    "CONTEXT_MARGIN_TOKENS",
     "ESCALATE_INSUFFICIENT",
     "ESCALATE_NO_ANSWER",
+    "ESCALATE_PAGE_TOO_LONG",
     "ESCALATE_PROPOSED_WRITE",
     "ESCALATE_REJECTED",
     "ESCALATION_REASONS",
@@ -153,6 +207,9 @@ __all__ = [
     "TIER2",
     "cost_usd",
     "escalation_reason",
+    "estimate_tokens",
+    "fits_tier1",
+    "pre_call_reason",
     "rate_for",
     "tier1_enabled",
     "tier_for",

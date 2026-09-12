@@ -19,9 +19,11 @@ answers to three different questions, and M6 is what made the third one real:
     the tests assert have to be the real counts. A slice that quietly omits its write tools
     is a slice whose test proves nothing about the shape that eventually ships.
   * `bound_tools_for(agent)` and `proposable_tools_for(agent)` are **what a model may be
-    handed, and what it may propose**. Both are empty of writes while `GATE_LANDED` is False.
-    From M6 a model never calls a write; it may *propose* one in its work order
-    (`WorkOrder.proposed_write`), and the proposal pauses in `src/agent/gate.py` for a human.
+    handed, and what it may propose**. The bound list is never a write, before or after the flip,
+    because a bound tool is one the model can call (M10's investigator loop is the caller). The
+    proposable list is empty while `GATE_LANDED` is False and the slice's writes after it. From M6 a
+    model never calls a write; it may *propose* one in its work order (`WorkOrder.proposed_write`),
+    and the proposal pauses in `src/agent/gate.py` for a human.
   * `assert_callable(tool, approval=...)` is **who may perform**. A write needs an `Approval`,
     minted only by the gate after a human resumed the pause with `approve`.
 
@@ -113,8 +115,9 @@ WRITE_TOOLS: frozenset[str] = frozenset(
 #: `src/agent/CLAUDE.md`. A boolean rather than a config value on purpose - an env var is a
 #: thing somebody can set on a laptop at 11pm to make a demo work.
 #:
-#: Flipping it does NOT make a write callable. It makes a write **proposable**: the tool
-#: appears in `bound_tools_for`, a work order may carry a `proposed_write`, and the proposal
+#: Flipping it does NOT make a write callable, and it does not put a write in `bound_tools_for`
+#: either (M10). It makes a write **proposable**: the tool appears in `proposable_tools_for`,
+#: the brief renders it, a work order may carry a `proposed_write`, and the proposal
 #: pauses in `src/agent/gate.py` until a human answers. `assert_callable` still refuses a write
 #: that arrives without an `Approval`, so the runtime belt covers us after the flip exactly as
 #: it did before it.
@@ -248,20 +251,22 @@ def tools_for(agent: str) -> frozenset[str]:
 
 
 def bound_tools_for(agent: str) -> frozenset[str]:
-    """What a model may actually be handed right now: the slice, minus the ungated writes.
+    """What a model may actually be handed: the slice, minus every write, whatever `GATE_LANDED` says.
 
-    The only function that should ever build a tool list for `create_react_agent`. Nothing
-    at M3 binds tools at all - the workers judge an assembled packet in one call and have
-    nothing to navigate (`src/agent/workers.py`) - so today this is the seam rather than a
-    live filter. It exists now so that M4 or M6 wiring a tool loop has one obvious place to
-    get its list from, instead of reaching for `tools_for` because it was shorter.
+    The only function that builds a tool list for `create_react_agent`, and from M10 it has a real
+    caller: `src/agent/investigator.py` hands this list to the local model's tool loop through
+    `langchain-mcp-adapters`. A tool in a bound list is a tool the model can **call**, and from M6 a
+    model never calls a write, it **proposes** one in its work order (`proposable_tools_for`) and a
+    human answers at the gate. So the flip changed what may be proposed and never what may be
+    bound; between M6 and M10 this function returned the writes after the flip, which nothing
+    noticed because nothing bound a tool, and the investigator's own rail caught it on the first
+    fake session that listed the whole surface. `assert_callable` in the interceptor is the belt
+    behind this filter, as everywhere.
     """
     declared = tools_for(agent)
-    if GATE_LANDED:
-        return declared
     withheld = declared & WRITE_TOOLS
     if withheld:
-        log.info("write_tools_withheld", agent=agent, withheld=sorted(withheld), reason="GATE_LANDED is False: no interrupt() gate to pause a proposal in")
+        log.info("write_tools_withheld", agent=agent, withheld=sorted(withheld), reason="a bound tool is callable, and a model never calls a write; it may propose one (proposable_tools_for) and a human answers at the gate" if GATE_LANDED else "GATE_LANDED is False: no interrupt() gate to pause a proposal in")
     return declared - WRITE_TOOLS
 
 

@@ -56,6 +56,22 @@ def as_strings(raw: object) -> tuple[str, ...]:
 NO_OP_INSTRUCTION = re.compile(r"^\W*(no action|none|nothing|no further|monitor|continue to monitor|keep monitoring|observe|await|wait and see|take no)\b", re.IGNORECASE)
 
 
+#: A number as a model writes one: an optional sign, digits, an optional decimal part. Shared by the
+#: work-order grounding check (`workers.page_numbers`) and the shift report's `unverified_number`
+#: rail (M10), so the two read numbers the same way.
+NUMBER_TOKEN = re.compile(r"-?\d+(?:\.\d+)?")
+#: Clock times and ISO timestamps are stripped before numbers are compared, on both sides. `13:40`
+#: grounding an invented `40` was the first grader's bug (`tests/CLAUDE.md`, "Graded, not asserted").
+_TIME_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?|\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b|\b\d{1,2}\s*(?:am|pm)\b", re.IGNORECASE)
+
+
+def number_tokens(text: str, *, strip_times: bool = False) -> frozenset[float]:
+    """Every number token in `text` as a float, so `12` matches `12.0` and not `120`. With
+    `strip_times` the clock times and timestamps come out first."""
+    cleaned = _TIME_LIKE.sub(" ", text) if strip_times else text
+    return frozenset(float(tok) for tok in NUMBER_TOKEN.findall(cleaned))
+
+
 def has_no_real_instruction(items: Sequence[str]) -> bool:
     """True when a list of instructions tells nobody to do anything. The all-clear rail's core."""
     return not items or all(NO_OP_INSTRUCTION.match(item) for item in items)

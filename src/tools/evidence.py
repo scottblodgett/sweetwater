@@ -135,6 +135,18 @@ SOP_FOR_CATEGORY: dict[str, str] = {
     "care_overdue": "herd.md",
 }
 
+#: M10, `docs/open-issues.md` #12. The SOP files whose rules ask about facts that live on other
+#: sensors, and which sensor types answer them. `feed.md` says weather is what turns a low bin from
+#: routine into urgent (FEED-02) and asks for the bulk fuel behind the fill (FEED-01). Neither was
+#: on the feed page, so the local judge honestly said `insufficient_information` and Opus wrote
+#: around the gap, and the cheap path paid twice. The sweep already read every one of these
+#: sensors this tick, so the page carries the nearest of each at **zero HTTP**. Keyed by SOP file
+#: rather than by category because the rules that ask are in the file, and a category that joins
+#: the file inherits the ask.
+CONDITIONS_FOR_SOP: dict[str, tuple[str, ...]] = {
+    "feed.md": ("wind-speed", "temperature", "snow-depth", "fuel-level"),
+}
+
 
 # --------------------------------------------------------------------------- #
 # the pieces
@@ -161,6 +173,33 @@ class SiblingReading:
         shown = format_value(self.value, unit, boolean=bool(rule and rule.boolean))
         suffix = "" if self.status.lower() in {"online", "ok", "active", ""} else f", status {self.status}"
         return f"  - {noun} ({self.sensor_id}): {shown}{suffix}"
+
+
+@dataclass(frozen=True)
+class ConditionReading:
+    """M10. One reading from elsewhere on the ranch that a standing order asks about: the nearest
+    wind, temperature, snow, or yard fuel sensor to the incident, from this tick's sweep. Never
+    re-read, for the same reason a sibling is not: a second draw would disagree with the first.
+
+    `same_location` says whether it shares the incident's location; a map distance in grid units
+    means nothing to a foreman, so the page says "here" or names the place and leaves it there.
+    """
+
+    sensor_type: str
+    sensor_id: str
+    location: str
+    status: str
+    value: float | bool | None
+    same_location: bool = False
+
+    def render(self) -> str:
+        rule = RULES.get(self.sensor_type)
+        unit = rule.unit if rule else ""
+        noun = rule.noun if rule else self.sensor_type
+        shown = format_value(self.value, unit, boolean=bool(rule and rule.boolean))
+        where = "here" if self.same_location else f"at {self.location}"
+        suffix = "" if self.status.lower() in {"online", "ok", "active", ""} else f", status {self.status}"
+        return f"  - {noun} ({self.sensor_id}, {where}): {shown}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -238,6 +277,11 @@ class EvidencePacket:
     sop_text: str = ""
     coordinates: dict[str, float] | None = None
     animal: AnimalContext | None = None
+    #: M10 (#12). The nearest reading of each type the SOP asks about, and the types nobody
+    #: answered for. Populated only for the SOP files in `CONDITIONS_FOR_SOP`; a water page never
+    #: carries the block, and a test says so.
+    conditions: tuple[ConditionReading, ...] = ()
+    conditions_missing: tuple[str, ...] = ()
 
     def render(self) -> str:
         """The page, as the model receives it. Also what a human reads to check the model.
@@ -291,6 +335,16 @@ class EvidencePacket:
         else:
             lines.append("  (none: this sensor is the only one at this location)")
         lines.append("")
+
+        if self.conditions or self.conditions_missing:
+            lines.append("## Conditions now, read in this same sweep")
+            lines.append("")
+            lines.append("  (The standing orders below ask about the weather and the yard fuel. These are the nearest such sensors to this one on the ranch map, read in the same sweep as the incident. None of them is a forecast: each is one current reading, so say what it shows now and treat what is coming as unknown.)")
+            lines.extend(c.render() for c in self.conditions)
+            for sensor_type in self.conditions_missing:
+                rule = RULES.get(sensor_type)
+                lines.append(f"  - {rule.noun if rule else sensor_type}: no {sensor_type} sensor answered this sweep")
+            lines.append("")
 
         lines.append("## What is standing behind it")
         lines.append("")
@@ -416,6 +470,46 @@ def siblings_for(location: str, sensor_id: str, readings: tuple[SensorReading, .
     )
 
 
+def _map_distance(a: dict[str, float] | None, b: dict[str, float] | None) -> float | None:
+    """Straight-line distance on the ranch's stylized 0 to 100 grid, or `None` when either point is unmapped."""
+    if not a or not b:
+        return None
+    try:
+        return float(((float(a["x"]) - float(b["x"])) ** 2 + (float(a["y"]) - float(b["y"])) ** 2) ** 0.5)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def conditions_for(incident: Incident, readings: tuple[SensorReading, ...] | list[SensorReading], ranch_map: RanchMap | None, *, sensor_types: tuple[str, ...]) -> tuple[tuple[ConditionReading, ...], tuple[str, ...]]:
+    """M10 (#12). `(nearest reading per type, types nobody answered for)`. Zero HTTP, on purpose.
+
+    A live value beats a dark sensor first, because a "no reading" here is not a fact the order can
+    use and a dark tank in the room is not more useful than a diesel gauge across the yard. Then a
+    sensor at the incident's own location wins, then the nearest by map coordinates when both ends
+    are mapped (the ranch has two wind sensors and one snow gauge, and "the" reading is the one
+    closest to this bin), then id, which makes the choice deterministic without a map. The page says
+    "here" or "at <location>", never a distance.
+    """
+    here = ranch_map.get(incident.subject_id) if ranch_map else None
+    origin = here.coordinates if here else None
+    found: list[ConditionReading] = []
+    missing: list[str] = []
+    for sensor_type in sensor_types:
+        candidates = [r for r in readings if r.sensor_type == sensor_type and r.sensor_id != incident.subject_id]
+        if not candidates:
+            missing.append(sensor_type)
+            continue
+
+        def rank(r: SensorReading) -> tuple[int, int, float, str]:
+            ref = ranch_map.get(r.sensor_id) if ranch_map else None
+            distance = _map_distance(origin, ref.coordinates if ref else None)
+            return (0 if r.value is not None else 1, 0 if r.location == incident.location else 1, distance if distance is not None else float("inf"), r.sensor_id)
+
+        best = min(candidates, key=rank)
+        found.append(ConditionReading(sensor_type=sensor_type, sensor_id=best.sensor_id, location=best.location, status=best.status, value=best.value, same_location=best.location == incident.location))
+    return tuple(found), tuple(missing)
+
+
 def animal_context(incident: Incident, herd: HerdSweepResult | None) -> AnimalContext:
     """The cow's page from what the sweep already read. No HTTP here, and none allowed."""
     if herd is None:
@@ -485,6 +579,9 @@ async def assemble(
             continue
         history, note = history_by_key[incident.key]
         ref = ranch_map.get(incident.subject_id) if ranch_map else None
+        # M10 (#12): the facts the SOP asks about that live on other sensors, from this sweep. Only
+        # the SOP files that ask get the block; `conditions_for` returns two empty tuples otherwise.
+        conditions, conditions_missing = conditions_for(incident, readings, ranch_map, sensor_types=CONDITIONS_FOR_SOP.get(sop_name, ()))
         packets.append(
             EvidencePacket(
                 incident=incident,
@@ -496,6 +593,8 @@ async def assemble(
                 sop_name=sop_name,
                 sop_text=sop_text,
                 coordinates=ref.coordinates if ref else None,
+                conditions=conditions,
+                conditions_missing=conditions_missing,
             )
         )
 

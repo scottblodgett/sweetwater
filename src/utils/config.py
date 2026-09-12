@@ -50,6 +50,18 @@ class Settings(BaseSettings):
     # stored work order is still the one the cascade would have shipped; the shadow is a
     # receipt for grading. It SPENDS, at Tier-2 prices, on every Tier-1 packet. Off by default.
     tier_compare: bool = False
+    # M10. The investigator: a bounded LangGraph tool loop on the Tier-1 model that fires when the
+    # Tier-1 judge said `insufficient_information`, fetches what the page lacked through the MCP
+    # tools in the agent's slice, and hands the enriched page back for one re-judge. Unreachable
+    # unless `TIER1_ENABLED`, because only a Tier-1 order can say `insufficient_information`. Ships
+    # OFF: measured at M10 on 15 live loops and it cured none of them (`docs/model-routing.md`, the
+    # M10 row), so on it costs 10 to 40 seconds of local time per thin page and changes nothing. The
+    # three numbers are the rails a thrashing loop hits: tool calls, then wall clock. At either limit
+    # what was fetched is DISCARDED and the order escalates on the original page, Scott's call at the
+    # M10 check-in (docs/state.md, decision 40).
+    investigator_enabled: bool = False
+    investigator_max_steps: int = 6
+    investigator_deadline_s: float = 90.0
 
     # --- The ledger -------------------------------------------------------------
     # How many consecutive sweeps have to flag a sensor before it is an incident. The

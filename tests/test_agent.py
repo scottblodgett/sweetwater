@@ -117,7 +117,7 @@ from src.prompts.system_prompts import SHIFT_REPORT_SCHEMA, WORK_ORDER_SCHEMA, s
 from src.tools.allowlists import DEPLOYED_TOOLS, GATE_LANDED, WRITE_TOOL_ARGS, WRITE_TOOLS, Approval
 from src.tools.chaos import KIND_ANIMAL, KIND_SENSOR, ChaosEvent
 from src.tools.evidence import EvidencePacket, HistoryPoint, PastureContext, SiblingReading
-from src.tools.mcp_client import RanchMap, SensorRef, flatten_exception, parse_ranch_map
+from src.tools.mcp_client import McpUnavailableError, RanchMap, SensorRef, flatten_exception, parse_ranch_map
 from src.tools.triage import ALL_CATEGORIES, ANIMAL_CATEGORIES
 from src.utils.config import Settings, get_settings
 from src.utils.helpers import backoff_delay, utc_now_iso
@@ -1401,8 +1401,10 @@ def test_no_brief_ranks_severity_or_promises_a_tool(agent: str) -> None:
 
 
 def test_nothing_a_model_reads_carries_an_em_dash() -> None:
+    from src.prompts.agent_prompts import investigator_brief as _brief  # M10: the third model job reads this
+
     readable = [system_prompt(agent) for agent in RESPONDERS]
-    readable += [WATER_SOP, FEED_SOP, TANK_PACKET.render()]
+    readable += [WATER_SOP, FEED_SOP, TANK_PACKET.render(), _brief("water_feed", ("a fact",), ("read_sensor",))]
     for page in readable:
         assert "\u2014" not in page
 
@@ -1778,6 +1780,21 @@ def test_the_shift_report_schema_makes_the_fusion_claim_checkable() -> None:
     assert SHIFT_REPORT_SCHEMA["properties"]["linked"]["items"] == {"type": "string"}
     assert SHIFT_REPORT_SCHEMA["properties"]["priorities"]["minItems"] == 1, "a report with no priorities is an all-clear in a different shape"
     assert SHIFT_REPORT_SCHEMA["additionalProperties"] is False
+
+
+def test_the_keyed_schema_makes_linked_an_enum_of_the_page_s_keys_and_leaves_the_base_schema_alone() -> None:
+    """M10. The first two local shift reports put sentences in `linked`, which the description forbade
+    and the `invented_incident` rail caught both times. A description is a request and an enum is a
+    grammar: with the page's keys as the enum, neither tier can emit prose there. The rail stays as
+    the belt, and the unkeyed schema is untouched for the empty page."""
+    from src.prompts.system_prompts import shift_report_schema_for
+
+    keys = frozenset(o.incident_key for o in STORM)
+    keyed = shift_report_schema_for(keys)
+    assert keyed["properties"]["linked"]["items"] == {"type": "string", "enum": sorted(keys)}
+    assert {k: v for k, v in keyed["properties"].items() if k != "linked"} == {k: v for k, v in SHIFT_REPORT_SCHEMA["properties"].items() if k != "linked"}
+    assert SHIFT_REPORT_SCHEMA["properties"]["linked"]["items"] == {"type": "string"}, "the base schema is not mutated"
+    assert shift_report_schema_for(frozenset()) is SHIFT_REPORT_SCHEMA
 
 
 # --- the no-brief experiment ------------------------------------------------ #
@@ -2962,21 +2979,27 @@ from dataclasses import replace as _dc_replace  # noqa: E402
 
 from src.agent.workers import judge_packet  # noqa: E402
 from src.models.routing import (  # noqa: E402
-    ESCALATE_CRITICAL,
+    CHARS_PER_TOKEN,
+    CONTEXT_MARGIN_TOKENS,
     ESCALATE_INSUFFICIENT,
     ESCALATE_NO_ANSWER,
+    ESCALATE_PAGE_TOO_LONG,
     ESCALATE_PROPOSED_WRITE,
     ESCALATE_REJECTED,
     FALLBACK_RATE,
     TIER1,
     TIER2,
     escalation_reason,
+    estimate_tokens,
+    fits_tier1,
+    pre_call_reason,
     rate_for,
     tier_for,
 )
 
-#: The tank at warning rather than critical, because critical never reaches Tier 1 by design and
-#: the cascade tests need a packet that does. Same page otherwise: the siblings, the 111 head, the SOP.
+#: The tank at warning. Written at M7, when critical never reached Tier 1 and the cascade tests needed a
+#: packet that did; from M10 every severity is a Tier-1 candidate and the warning page is kept because the
+#: recorded answers echo it. Same page otherwise: the siblings, the 111 head, the SOP.
 WARN_INCIDENT = TANK_INCIDENT.model_copy(update={"severity": "warning", "summary": "stock-tank level at Alkali Flat is 4.1 gal, below the warning line of 5 gal", "last_value": "4.1 gal", "threshold": 5.0})
 WARN_PACKET = _dc_replace(TANK_PACKET, incident=WARN_INCIDENT)
 
@@ -3024,12 +3047,21 @@ def test_an_unknown_paid_model_bills_at_the_fallback_and_warns_once() -> None:
     assert [e["model"] for e in logs if e["event"] == "price_unknown"] == ["claude-newer-9"]
 
 
-def test_tier_for_asks_tier_one_unless_critical_or_the_cascade_is_off(settings: Settings) -> None:
+def test_tier_for_asks_tier_one_for_everything_that_fits_and_severity_is_not_an_input(settings: Settings) -> None:
+    """M10, the inversion. M7 sent critical to Opus before asking; Scott's call at the M10 check-in
+    is that severity is code's and the rails hold at every severity, so the cheap judge is asked
+    first for the dead cow too. The one pre-call reason left is the page not fitting `num_ctx`."""
     settings.tier1_enabled = True
-    assert tier_for(WARN_INCIDENT) == TIER1
-    assert tier_for(TANK_INCIDENT) == TIER2, "critical is the one pre-call condition"
+    page = system_prompt("water_feed") + "\n\n" + TANK_PACKET.render()
+    assert tier_for(page, max_tokens=2_048) == TIER1, "a critical incident's page, Tier 1 first"
+    assert pre_call_reason(page, max_tokens=2_048) == ""
+    assert fits_tier1(page, max_tokens=2_048) and estimate_tokens(page) == int(len(page) / CHARS_PER_TOKEN) + 1
+    too_long = "x" * (16_384 * 3)
+    assert tier_for(too_long, max_tokens=2_048) == TIER2 and pre_call_reason(too_long, max_tokens=2_048) == ESCALATE_PAGE_TOO_LONG
+    boundary = "x" * int((16_384 - 2_048 - CONTEXT_MARGIN_TOKENS - 1) * CHARS_PER_TOKEN)
+    assert fits_tier1(boundary, max_tokens=2_048, num_ctx=16_384) and not fits_tier1(boundary + "x" * 6, max_tokens=2_048, num_ctx=16_384), "the estimate plus the answer plus the margin, against the ceiling, to the token"
     settings.tier1_enabled = False
-    assert tier_for(WARN_INCIDENT) == TIER2 and tier_for(TANK_INCIDENT) == TIER2, "off is the M2 to M6 shape: Opus for everything"
+    assert tier_for(page, max_tokens=2_048) == TIER2 and pre_call_reason(too_long, max_tokens=2_048) == "", "off is the M2 to M6 shape: Opus for everything, and no reason is recorded"
 
 
 def test_the_escalation_predicate_reads_the_order_not_the_prose() -> None:
@@ -3109,11 +3141,21 @@ async def test_a_local_write_proposal_escalates_and_only_the_opus_proposal_survi
     assert len(calls["tier2"]) == 1
 
 
-async def test_a_critical_incident_never_reaches_tier_one(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_critical_incident_is_judged_at_tier_one_first_and_a_page_too_long_goes_to_opus_with_its_reason(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """M10 replaces `test_a_critical_incident_never_reaches_tier_one`. The dead cow's page and the dry
+    tank's are Tier-1 calls first; the local order stands when the rails pass. A page the local
+    window cannot hold is the one pre-call escalation, and the stored order says so."""
     calls = _cascade(monkeypatch, settings, local=_local(_answer()), opus=_response(_answer()))
     order = await judge_packet(TANK_PACKET, agent="water_feed")
+    assert len(calls["tier1"]) == 1 and calls["tier2"] == [] and order.tier == TIER1 and order.escalation == "" and order.severity == "critical"
+
+    settings.ollama_num_ctx = 1_024
+    calls = _cascade(monkeypatch, settings, local=_local(_answer()), opus=_response(_answer()))
+    with capture_logs() as logs:
+        order = await judge_packet(TANK_PACKET, agent="water_feed")
     assert calls["tier1"] == [] and len(calls["tier2"]) == 1
-    assert order.tier == TIER2 and order.escalation == ESCALATE_CRITICAL, "logged as an escalation so the tick line can count why Opus was paid"
+    assert order.tier == TIER2 and order.escalation == ESCALATE_PAGE_TOO_LONG, "logged as an escalation so the tick line can count why Opus was paid"
+    assert next(e for e in logs if e["event"] == "tier1_skipped")["reason"] == ESCALATE_PAGE_TOO_LONG
 
 
 async def test_with_the_cascade_off_every_order_is_tier_two_with_no_escalation(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3167,17 +3209,18 @@ async def test_the_tick_line_carries_tier_escalations_and_reasons_and_bills_each
     `cost_usd` is the Tier-2 half only, since the Tier-1 tokens were free and are still counted."""
     serve(respx.mock, LOW | {"east-allotment-fence": 0.5})  # two incidents: the tank and a dead fence
     local = _order(_answer()).model_copy(update={"tier": TIER1, "model": "gemma4:e4b", "provider": "ollama", "input_tokens": 5_900, "output_tokens": 640})
-    escalated = _order(_answer()).model_copy(update={"escalation": ESCALATE_CRITICAL})
+    escalated = _order(_answer()).model_copy(update={"escalation": ESCALATE_PAGE_TOO_LONG})
     orders = iter([local, escalated])
     _stub_spend(monkeypatch, lambda key: next(orders).model_copy(update={"incident_key": key}))
     with capture_logs() as logs:
         state = await run_tick(tick=1, store=target, now=T0, spend=True)
 
     line = next(e for e in logs if e["event"] == "tick")
-    assert line["tier"] == TIER2 and line["tier1_orders"] == 1 and line["escalations"] == 1 and line["escalation_reasons"] == [ESCALATE_CRITICAL]
+    assert line["tier"] == TIER2 and line["tier1_orders"] == 1 and line["escalations"] == 1 and line["escalation_reasons"] == [ESCALATE_PAGE_TOO_LONG]
     assert line["input_tokens"] == 5_900 + 5555 and line["output_tokens"] == 640 + 1137, "both tiers' tokens are on the counters"
     assert line["cost_usd"] == state.cost_usd == cost_usd(5555, 1137, model="us.anthropic.claude-opus-5"), "and only the Opus half is billed"
     assert state.cost_usd == pytest.approx(0.0562, abs=0.0005), "about five cents, not sixteen: the 3x rate correction"
+    assert line["investigations"] == 0 and line["investigation_steps"] == 0 and line["investigation_outcomes"] == {}, "M10: the loop's counters are on the line even when it never ran"
 
 
 def test_a_citation_carrying_the_heading_title_is_trimmed_to_its_id_and_recorded_not_rejected() -> None:
@@ -3192,3 +3235,404 @@ def test_a_citation_carrying_the_heading_title_is_trimmed_to_its_id_and_recorded
     wrong = _order(_answer(rules_cited=["WATER-09 - a rule that does not exist"]))
     assert "invented_rule" in wrong.violations and wrong.status == "rejected", "the trim does not launder an invented id"
     assert _order(_answer()).violations == () or "rule_citation_trimmed" not in _order(_answer()).violations, "bare ids are not flagged"
+
+
+# --- M10: the investigator, a bounded tool loop through the adapter on the local model ------- #
+# What these protect: the loop is the one place a model drives tools again after M2 deleted the
+# tool loop, so every bound has to be a rail. The adapter runs for real here (`load_mcp_tools` and the
+# interceptor chain against a fake MCP session that lists the whole deployed surface), LangGraph runs
+# for real (`create_react_agent` on a scripted tool-calling model), and only the ranch and Ollama are
+# fakes. `conftest.settings` ships the investigator off; each test arms it.
+from typing import Any as _Any  # noqa: E402
+
+from langchain_core.language_models.chat_models import BaseChatModel  # noqa: E402
+from langchain_core.messages import AIMessage, BaseMessage  # noqa: E402
+from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool  # noqa: E402
+
+from src.agent import investigator as inv  # noqa: E402
+from src.agent.investigator import (  # noqa: E402
+    FACTS_CHARS,
+    OUTCOME_ANSWERED,
+    OUTCOME_DEADLINE,
+    OUTCOME_ERROR,
+    OUTCOME_NO_TOOL_CALLS,
+    OUTCOME_STEP_CEILING,
+    RESULT_CHARS,
+    ToolCallRecord,
+    investigate,
+    render_facts,
+)
+from src.prompts.agent_prompts import investigator_brief  # noqa: E402
+from src.tools.allowlists import bound_tools_for  # noqa: E402
+
+
+class ScriptedToolModel(BaseChatModel):
+    """A chat model that answers from a script of `AIMessage`s, one per turn, and binds tools by
+    saying yes. The last message repeats forever so a runaway loop is testable. Records every call."""
+
+    script: list[AIMessage]
+    calls: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-tool-model"
+
+    def bind_tools(self, tools: _Any, **kwargs: _Any) -> _Any:  # type: ignore[override]
+        return self
+
+    def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None, run_manager: _Any = None, **kwargs: _Any) -> ChatResult:
+        # A fresh id per turn, on the message and on every tool call. LangGraph's `add_messages`
+        # reducer merges a repeated id into the earlier message instead of appending, which ends a
+        # loop early and reads exactly like a model that stopped on its own.
+        scripted = self.script[min(self.calls, len(self.script) - 1)]
+        self.calls += 1
+        message = scripted.model_copy(update={"id": f"turn-{self.calls}", "tool_calls": [dict(tc, id=f"turn-{self.calls}-{i}") for i, tc in enumerate(scripted.tool_calls or [])]})
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _tool_call(name: str, args: dict[str, object], call_id: str = "c1") -> AIMessage:
+    return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}], response_metadata={"done_reason": "stop", "model": "gemma4:e4b"}, usage_metadata={"input_tokens": 3_100, "output_tokens": 40, "total_tokens": 3_140})
+
+
+def _receipt(text: str = "- the head count: found") -> AIMessage:
+    return AIMessage(content=text, response_metadata={"done_reason": "stop", "model": "gemma4:e4b"}, usage_metadata={"input_tokens": 3_400, "output_tokens": 20, "total_tokens": 3_420})
+
+
+class FakeRanchSession:
+    """The MCP surface the adapter talks to: `list_tools` returns every deployed tool by name, and
+    `call_tool` returns whatever the test planted, per tool, or a small honest payload."""
+
+    def __init__(self, replies: dict[str, object] | None = None, *, delay_s: float = 0.0) -> None:
+        self.replies = replies or {}
+        self.delay_s = delay_s
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def list_tools(self, cursor: str | None = None) -> ListToolsResult:  # the adapter pages with `cursor` and stops at a null `nextCursor`
+        return ListToolsResult(tools=[Tool(name=name, description=f"{name} on the ranch", inputSchema={"type": "object", "properties": {"id": {"type": "string"}, "limit": {"type": "integer"}}}) for name in sorted(DEPLOYED_TOOLS)])
+
+    async def call_tool(self, name: str, arguments: dict[str, object] | None = None, **_: object) -> CallToolResult:
+        self.calls.append((name, dict(arguments or {})))
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        reply = self.replies.get(name, {"data": {"tool": name, "args": arguments or {}}})
+        if isinstance(reply, Exception):
+            raise reply
+        return CallToolResult(content=[TextContent(type="text", text=reply if isinstance(reply, str) else json.dumps(reply))], isError=False)
+
+
+def _arm(monkeypatch: pytest.MonkeyPatch, settings: Settings, *, script: list[AIMessage], session: FakeRanchSession | None = None, max_steps: int = 6, deadline_s: float = 30.0) -> tuple[FakeRanchSession, ScriptedToolModel]:
+    settings.investigator_enabled, settings.investigator_max_steps, settings.investigator_deadline_s = True, max_steps, deadline_s
+    fake = session or FakeRanchSession()
+    model = ScriptedToolModel(script=script)
+
+    @asynccontextmanager
+    async def _session() -> AsyncIterator[FakeRanchSession]:
+        yield fake
+
+    monkeypatch.setattr("src.agent.investigator.get_settings", lambda: settings)
+    monkeypatch.setattr("src.agent.investigator.ranch_session", _session)
+    monkeypatch.setattr("src.agent.investigator.build_model", lambda: model)
+    return fake, model
+
+
+async def test_the_loop_is_handed_the_read_slice_only_even_when_the_server_lists_every_write(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`load_mcp_tools` returns all 19 and `bound_tools_for` keeps 5 for `water_feed`, none of them a
+    write. The rail from `src/tools/CLAUDE.md`, applied to the one path that hands tools to a model."""
+    fake, _ = _arm(monkeypatch, settings, script=[_tool_call("list_inventory", {"limit": 50}), _receipt()])
+    with capture_logs() as logs:
+        result = await investigate(WARN_PACKET, agent="water_feed", unknowns=("what feed is staged for Alkali Flat",), page=WARN_PACKET.render())
+    offered = next(e for e in logs if e["event"] == "investigator_tools")
+    assert set(offered["offered"]) == bound_tools_for("water_feed") and not set(offered["offered"]) & WRITE_TOOLS
+    assert offered["withheld"] == len(DEPLOYED_TOOLS) - len(bound_tools_for("water_feed"))
+    assert result.outcome == OUTCOME_ANSWERED and result.steps == 1 and result.tools_called == ("list_inventory",)
+    assert fake.calls == [("list_inventory", {"limit": 50})], "the adapter carried the call to the session with the model's arguments"
+    assert "## What the investigator fetched" in result.facts and '"limit": 50' in result.facts and "list_inventory" in result.facts
+    assert result.input_tokens == 3_100 + 3_400 and len(result.turns) == 2, "one receipt per model turn, tokens summed"
+    assert [e["event"] for e in logs if e["event"] == "agent_call"] == ["agent_call", "agent_call"] and all(e["job"] == "investigate" and e["tier"] == TIER1 for e in logs if e["event"] == "agent_call")
+
+
+async def test_a_write_by_name_is_refused_by_the_belt_and_the_loop_continues(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The model asks for `consume_feed`, which is in `water_feed`'s declared slice and therefore a
+    plausible thing for it to reach for. It is not in the bound list, so LangGraph reports an unknown
+    tool; and if it ever were, `assert_callable` in the interceptor refuses it before the wire. The
+    second belt is exercised directly here because the first one makes it unreachable through the graph."""
+    fake, _ = _arm(monkeypatch, settings, script=[_tool_call("consume_feed", {"id": "hay-01"}), _tool_call("list_inventory", {"limit": 10}, "c2"), _receipt()])
+    result = await investigate(WARN_PACKET, agent="water_feed", unknowns=("what feed is on hand",), page=WARN_PACKET.render())
+    assert result.outcome == OUTCOME_ANSWERED and result.tools_called == ("list_inventory",)
+    assert fake.calls == [("list_inventory", {"limit": 10})], "the write never reached the session"
+    assert "consume_feed" not in result.facts and "list_inventory" in result.facts
+
+    belt = inv.Belt(agent="water_feed", max_steps=6)
+    handler_calls: list[str] = []
+
+    async def _handler(request: _Any) -> CallToolResult:
+        handler_calls.append(request.name)
+        return CallToolResult(content=[TextContent(type="text", text="{}")], isError=False)
+
+    with pytest.raises(inv.ToolException, match="changes the ranch"), capture_logs() as logs:
+        await belt(SimpleNamespace(name="consume_feed", args={"id": "hay-01"}), _handler)
+    assert handler_calls == [] and belt.write_attempts == 1 and belt.steps == 0
+    assert any(e["event"] == "investigator_write_refused" for e in logs)
+    assert not render_facts(belt.records)[0], "a refused call contributes no fact"
+
+
+async def test_the_step_ceiling_ends_the_loop_and_discards_everything_it_fetched(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model that calls `list_sensors` forever, the M7 table's first row. The belt refuses the call
+    past the ceiling, the outcome is `step_ceiling`, and by Scott's decision at the M10 check-in the
+    facts block is empty: what was fetched is in the log and never on the page."""
+    fake, model = _arm(monkeypatch, settings, script=[_tool_call("list_sensors", {"limit": 500})], max_steps=3)
+    with capture_logs() as logs:
+        result = await investigate(WARN_PACKET, agent="water_feed", unknowns=("everything",), page=WARN_PACKET.render())
+    assert result.outcome == OUTCOME_STEP_CEILING
+    assert result.steps == 3 and len(fake.calls) == 3, "three calls went out and the fourth was refused before the wire"
+    assert result.facts == "" and result.tools_called == ("list_sensors",) * 3
+    assert len(result.calls) >= 4 and result.calls[3].refused, "the refusal is on the record"
+    assert any(e["event"] == "investigator_step_ceiling" for e in logs)
+    assert model.calls <= 2 * 3 + 3, "and LangGraph's recursion limit stayed the backstop, not the bound"
+
+
+async def test_the_deadline_ends_the_loop_and_discards_everything_it_fetched(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake, _ = _arm(monkeypatch, settings, script=[_tool_call("read_sensor", {"id": "alkali-flat-water-2"}), _tool_call("read_sensor", {"id": "alkali-flat-battery"}, "c2"), _receipt()], session=FakeRanchSession(delay_s=0.4), deadline_s=0.6)
+    result = await investigate(WARN_PACKET, agent="water_feed", unknowns=("the neighbour",), page=WARN_PACKET.render())
+    assert result.outcome == OUTCOME_DEADLINE and result.facts == ""
+    assert 1 <= len(fake.calls) <= 2 and result.latency_ms >= 550, "the clock, not the script, ended it"
+    assert result.steps == len([r for r in result.calls if not r.refused]) and result.calls, "what did come back is on the record for the log"
+
+
+async def test_a_loop_that_never_calls_a_tool_is_no_tool_calls_and_appends_nothing(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    _arm(monkeypatch, settings, script=[_receipt("I would need to look, but I will guess: about 100 head.")])
+    result = await investigate(WARN_PACKET, agent="water_feed", unknowns=("head count",), page=WARN_PACKET.render())
+    assert result.outcome == OUTCOME_NO_TOOL_CALLS and result.steps == 0 and result.facts == ""
+    assert "guess" in result.closing, "the closing text is kept for the log and never for the page"
+
+
+async def test_a_dead_ranch_session_is_an_error_outcome_not_an_exception(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    _arm(monkeypatch, settings, script=[_receipt()])
+
+    @asynccontextmanager
+    async def _down() -> AsyncIterator[FakeRanchSession]:
+        raise McpUnavailableError("MCP session against https://ranch.test failed: ConnectError")
+        yield FakeRanchSession()  # pragma: no cover
+
+    monkeypatch.setattr("src.agent.investigator.ranch_session", _down)
+    with capture_logs() as logs:
+        result = await investigate(WARN_PACKET, agent="water_feed", unknowns=("x",), page=WARN_PACKET.render())
+    assert result.outcome == OUTCOME_ERROR and "McpUnavailableError" in result.error and result.facts == ""
+    assert any(e["event"] == "investigator_failed" for e in logs) and any(e["event"] == "investigation" for e in logs), "the summary line is written whatever happened"
+
+
+def test_the_facts_block_is_code_rendered_from_tool_results_and_capped_twice() -> None:
+    """Per result at `RESULT_CHARS` (the interceptor's cut, so the model read the same text the page
+    carries) and the whole block at `FACTS_CHARS`, so the enriched page still fits `num_ctx`."""
+    big = "x" * (RESULT_CHARS + 500)
+    records = [ToolCallRecord(tool="list_sensors", args={"limit": 500}, latency_ms=900, chars=len(big), text=big[:RESULT_CHARS] + "\n... [truncated by the investigator]")]
+    text, truncated = render_facts(records)
+    assert not truncated and "[truncated by the investigator]" in text and len(text) < RESULT_CHARS + 600
+    many = [ToolCallRecord(tool="read_sensor", args={"id": f"s-{i}"}, latency_ms=100, chars=3_000, text="y" * 3_000) for i in range(6)]
+    text, truncated = render_facts(many)
+    assert truncated and len(text) <= FACTS_CHARS + 200 and "further results dropped" in text
+    assert text.count("### read_sensor") < 6, "later results were dropped, earlier ones kept in order"
+    errored = [ToolCallRecord(tool="read_sensor", args={"id": "nope"}, latency_ms=50, chars=80, text='{"error": {"category": "not_found"}}', error=True)]
+    assert render_facts(errored) == ("", False), "an upstream error is not a fact"
+
+
+async def test_judge_packet_rejudges_once_on_the_enriched_page_and_opus_is_never_called_when_it_stands(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole M10 path, on the cascade harness: Tier 1 says insufficient, the loop fetches, Tier 1
+    judges the page plus the facts, the order stands at Tier 1 with the investigation receipt on it,
+    and Opus was never asked. Two Tier-1 calls, the second on a longer page."""
+    fake, _ = _arm(monkeypatch, settings, script=[_tool_call("list_inventory", {"limit": 50}), _receipt()], session=FakeRanchSession({"list_inventory": {"data": [{"productId": "hay-01", "location": "Alkali Flat", "quantityLbs": 4200}]}}))
+    answers = iter([_local(_answer(severity_echo="warning", insufficient_information=True, unknowns=["what feed is staged for Alkali Flat"])), _local(_answer(severity_echo="warning"))])
+    calls = _cascade(monkeypatch, settings, local=_local(None))
+
+    async def _t1(**kw: object) -> ModelResponse:
+        calls["tier1"].append(kw)
+        return next(answers)
+
+    monkeypatch.setattr("src.agent.workers.call_tier1", _t1)
+    with capture_logs() as logs:
+        order = await judge_packet(WARN_PACKET, agent="water_feed")
+
+    assert order.tier == TIER1 and order.escalation == "" and order.shippable and calls["tier2"] == []
+    assert order.investigated and order.investigation_outcome == OUTCOME_ANSWERED and order.investigation_steps == 1 and order.investigation_tools == ("list_inventory",)
+    assert len(calls["tier1"]) == 2 and calls["tier1"][0]["user"] == WARN_PACKET.render()
+    assert str(calls["tier1"][1]["user"]).startswith(WARN_PACKET.render()) and "## What the investigator fetched" in str(calls["tier1"][1]["user"]) and "hay-01" in str(calls["tier1"][1]["user"])
+    assert fake.calls == [("list_inventory", {"limit": 50})]
+    assert next(e for e in logs if e["event"] == "tier1_rejudged")["escalation"] is None
+    assert order.severity == WARN_INCIDENT.severity == "warning", "triage's, on both judgments"
+
+
+async def test_when_the_enriched_page_is_still_thin_opus_rewrites_from_the_enriched_page(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    _arm(monkeypatch, settings, script=[_tool_call("read_sensor", {"id": "alkali-flat-water-2"}), _receipt()])
+    calls = _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning", insufficient_information=True, unknowns=["the well feeding this tank"])))
+    order = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert order.tier == TIER2 and order.escalation == ESCALATE_INSUFFICIENT and order.investigated and order.investigation_outcome == OUTCOME_ANSWERED
+    assert len(calls["tier1"]) == 2 and len(calls["tier2"]) == 1, "judge, re-judge, then the rewrite; never a second loop"
+    assert calls["tier2"][0]["user"] == calls["tier1"][1]["user"] and "## What the investigator fetched" in str(calls["tier2"][0]["user"]), "Opus reads the same enriched page the re-judge read, so the pair is fair"
+
+
+async def test_a_thrashed_loop_leaves_the_page_untouched_and_the_order_escalates_as_before_m10(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scott's decision 3: ceiling or deadline, nothing fetched reaches a judge. One Tier-1 call, one
+    Opus rewrite from the ORIGINAL page, and the receipt on the order says what the loop did."""
+    _arm(monkeypatch, settings, script=[_tool_call("list_sensors", {"limit": 500})], max_steps=2)
+    calls = _cascade(monkeypatch, settings, local=_local(_answer(severity_echo="warning", insufficient_information=True)))
+    order = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert order.tier == TIER2 and order.escalation == ESCALATE_INSUFFICIENT
+    assert order.investigated and order.investigation_outcome == OUTCOME_STEP_CEILING and order.investigation_steps == 2
+    assert len(calls["tier1"]) == 1 and len(calls["tier2"]) == 1 and calls["tier2"][0]["user"] == WARN_PACKET.render()
+
+
+async def test_a_wrong_echo_on_the_rejudge_is_still_triage_s_severity_and_still_a_rejection(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop may gather facts; it never re-grades, and neither may the model reading them. A
+    re-judge that comes back with `critical` on a warning incident hits `severity_mismatch` exactly as
+    a first judgment would, and the stored order carries triage's word."""
+    _arm(monkeypatch, settings, script=[_tool_call("list_inventory", {"limit": 50}), _receipt()])
+    answers = iter([_local(_answer(severity_echo="warning", insufficient_information=True)), _local(_answer(severity_echo="critical"))])
+    calls = _cascade(monkeypatch, settings, local=_local(None))
+
+    async def _t1(**kw: object) -> ModelResponse:
+        calls["tier1"].append(kw)
+        return next(answers)
+
+    monkeypatch.setattr("src.agent.workers.call_tier1", _t1)
+    order = await judge_packet(WARN_PACKET, agent="water_feed")
+    assert order.escalation == ESCALATE_REJECTED and "severity_mismatch" in order.tier1_violations and order.severity == "warning"
+    assert order.tier == TIER2 and order.investigated, "the rewrite carries the loop's receipt"
+
+
+# --- M10: the tiers inverted. The supervisor is a Tier-1 call first, Opus by escalation, the shadow, ------ #
+# --- and `unverified_number` recorded on the report ---------------------------------------------------------- #
+from src.agent.agent import REPORT_BLOCKING_VIOLATIONS  # noqa: E402
+
+
+def _local_report(payload: dict[str, object] | None, *, finish_reason: str = "stop", error: str = "") -> ModelResponse:
+    """What `call_tier1` returns for the supervisor: Ollama's vocabulary, tier 1, free, the measured 18-order page size."""
+    return ModelResponse(provider="ollama", model="gemma4:e4b", finish_reason=finish_reason, tier=TIER1, payload=payload, input_tokens=10_630, output_tokens=900, latency_ms=21_000, error=error)
+
+
+def _supervisor_tiers(monkeypatch: pytest.MonkeyPatch, settings: Settings, *, local: ModelResponse, opus: ModelResponse | None = None, enabled: bool = True) -> dict[str, list[dict[str, object]]]:
+    """Both tiers faked at the seam `synthesize` reaches them through (the inline import of `llm_client`)."""
+    settings.tier1_enabled = enabled
+    calls: dict[str, list[dict[str, object]]] = {"tier1": [], "tier2": []}
+
+    async def _t1(**kw: object) -> ModelResponse:
+        calls["tier1"].append(kw)
+        return local
+
+    async def _t2(**kw: object) -> ModelResponse:
+        calls["tier2"].append(kw)
+        return opus or _response(_report_payload())
+
+    monkeypatch.setattr("src.models.llm_client.call_tier1", _t1)
+    monkeypatch.setattr("src.models.llm_client.call_tier2", _t2)
+    return calls
+
+
+async def test_the_supervisor_is_a_tier_one_call_first_and_a_clean_local_report_ships_free(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The inversion's point. The aggregation job, hardcoded to Opus from M3 to M9, is the local
+    model's first; the rails run on its answer exactly as on Opus's; a clean page is stored at Tier 1
+    and Opus is never asked. The same `SUPERVISOR_MANDATE`, the same page, the same schema."""
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(_report_payload()))
+    report = await synthesize(_state(STORM))
+    assert report.source == "model" and report.tier == TIER1 and report.escalation == "" and report.violations == ()
+    assert len(calls["tier1"]) == 1 and calls["tier2"] == []
+    assert calls["tier1"][0]["system"] == SUPERVISOR_MANDATE and calls["tier1"][0]["max_tokens"] == SHIFT_REPORT_MAX_TOKENS and calls["tier1"][0]["reasoning_effort"] == "none"
+    assert calls["tier1"][0]["schema"]["properties"]["linked"]["items"]["enum"] == sorted(o.incident_key for o in STORM), "the keyed schema: `linked` cannot be prose at either tier"
+    assert report.linked == ("alkali-flat-water:water_low", "alkali-flat-battery:power_low") and report.input_tokens == 10_630
+    assert cost_usd(report.input_tokens, report.output_tokens, model=report.model, tier=report.tier) == 0.0, "and the fused report costs nothing"
+
+
+async def test_a_local_report_that_fails_a_blocking_rail_is_rewritten_by_opus_from_the_identical_page(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """THE rail again, one level up. The local supervisor writes a quiet page; code found every
+    incident on it before the call, so that is a contradiction, and Opus rewrites from the same
+    string. Both receipts on the stored report, one call each, never a retry at either tier."""
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(_report_payload(priorities=["Continue to monitor Alkali Flat", "No further action this shift"])))
+    with capture_logs() as logs:
+        report = await synthesize(_state(STORM))
+    assert report.source == "model" and report.tier == TIER2 and report.escalation == ESCALATE_REJECTED
+    assert "all_clear" in report.tier1_violations and report.tier1_finish_reason == "stop" and report.tier1_input_tokens == 10_630 and report.input_tokens == 5555
+    assert len(calls["tier1"]) == 1 and len(calls["tier2"]) == 1 and calls["tier1"][0]["user"] == calls["tier2"][0]["user"] == render_shift_page(STORM)
+    escalated = next(e for e in logs if e["event"] == "tier1_report_escalated")
+    assert escalated["reason"] == ESCALATE_REJECTED and "all_clear" in escalated["tier1_violations"]
+
+
+async def test_a_local_supervisor_that_never_answered_escalates_as_no_answer(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(None, finish_reason="length"))
+    report = await synthesize(_state(STORM))
+    assert report.tier == TIER2 and report.escalation == ESCALATE_NO_ANSWER and report.source == "model" and "no_payload" in report.tier1_violations and "length" in report.tier1_violations
+    assert len(calls["tier1"]) == 1 and len(calls["tier2"]) == 1
+
+
+async def test_an_opus_rejection_after_a_report_escalation_is_the_code_page_carrying_both_receipts(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cascade has one rung, for the report as for the order. Opus failing the same rail is the M3
+    rule unchanged: the code-assembled page ships, the violations on it, never a third call."""
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(None, finish_reason="transport_error", error="ConnectError"), opus=_response(_report_payload(linked=["alkali-flat-water:water_low", "windmill-pasture-fence:fence_down"])))
+    report = await synthesize(_state(STORM))
+    assert report.source == "code" and "invented_incident" in report.violations and report.linked == ()
+    assert report.tier == TIER2 and report.escalation == ESCALATE_NO_ANSWER and report.tier1_finish_reason == "transport_error" and report.model == "us.anthropic.claude-opus-5"
+    assert len(calls["tier1"]) == 1 and len(calls["tier2"]) == 1
+
+
+async def test_compare_mode_shadows_a_standing_local_report_and_not_an_escalated_one(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`TIER_COMPARE` for the third job: Opus on the identical page, the pair in `compare.jsonl` with
+    `job="shift_report"`, the local report still the one stored. When Tier 1 escalated, the rewrite
+    is the pair already, same as `workers.judge_packet`."""
+    settings.tier_compare = True
+    pairs: list[dict[str, object]] = []
+    monkeypatch.setattr("src.agent.agent.log_compare", lambda **kw: pairs.append(kw))
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(_report_payload()))
+    report = await synthesize(_state(STORM))
+    assert report.tier == TIER1 and len(calls["tier2"]) == 1, "the shadow was paid for and not stored"
+    assert len(pairs) == 1 and pairs[0]["job"] == "shift_report" and pairs[0]["escalation"] == "" and pairs[0]["incident_key"] == "tick:1"
+    assert pairs[0]["tier1"]["tier"] == TIER1 and pairs[0]["tier2"]["tier"] == TIER2 and pairs[0]["tier1"]["headline"] == pairs[0]["tier2"]["headline"]  # type: ignore[index]
+
+    pairs.clear()
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(_report_payload(priorities=["No further action this shift"])))
+    await synthesize(_state(STORM))
+    assert len(calls["tier2"]) == 1 and len(pairs) == 1 and pairs[0]["escalation"] == ESCALATE_REJECTED, "one Opus call: the rewrite is the pair"
+
+
+async def test_a_fused_page_too_long_for_the_local_window_goes_to_opus_before_the_call_with_its_reason(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Q3 at the M10 check-in: 18 orders measured at 10,630 gemma tokens against 16,384, so it fits
+    today and not by enough to skip the guard. `fits_tier1` on the mandate plus the page decides per
+    tick; here the window is shrunk so the answer budget alone overflows it."""
+    settings.ollama_num_ctx = 2_048
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(_report_payload()))
+    with capture_logs() as logs:
+        report = await synthesize(_state(STORM))
+    assert calls["tier1"] == [] and len(calls["tier2"]) == 1
+    assert report.tier == TIER2 and report.escalation == ESCALATE_PAGE_TOO_LONG and report.tier1_finish_reason == ""
+    assert next(e for e in logs if e["event"] == "shift_report_fusing")["reason"] == ESCALATE_PAGE_TOO_LONG
+
+
+async def test_with_the_cascade_off_the_supervisor_is_opus_with_no_escalation(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(_report_payload()), enabled=False)
+    report = await synthesize(_state(STORM))
+    assert calls["tier1"] == [] and len(calls["tier2"]) == 1 and report.tier == TIER2 and report.escalation == "" and report.source == "model"
+
+
+async def test_unverified_number_records_a_number_on_no_work_order_and_never_blocks(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mandate's first hard limit, the numeric half, checked in code and recorded (Scott's decision 4
+    at the M10 check-in). Times and small counts are not graded, for the reasons written beside the rail."""
+    assert "unverified_number" not in REPORT_BLOCKING_VIOLATIONS
+    invented = _report_payload(situation="The tank is losing 37 gallons an hour by my estimate, so the 111 head are dry by 5am; check it at 06:30.")
+    calls = _supervisor_tiers(monkeypatch, settings, local=_local_report(invented))
+    with capture_logs() as logs:
+        report = await synthesize(_state(STORM))
+    assert report.source == "model" and report.tier == TIER1 and report.violations == ("unverified_number",), "recorded on a report that still ships, at the tier that wrote it"
+    assert calls["tier2"] == [], "recorded is not escalated"
+    assert next(e for e in logs if e["event"] == "shift_report_unverified_number")["numbers"] == ["37"], "111 is on the page; 5am and 06:30 are times; 37 is the invention"
+
+    violations, _ = check_shift_report(_report_payload(priorities=["1. Haul water now, 111 head", "2. Swap the battery at 11%"]), keys=frozenset(o.incident_key for o in STORM), page=render_shift_page(STORM))
+    assert violations == [], "list numbers under ten and numbers on the page do not trip it"
+    violations, _ = check_shift_report(invented, keys=frozenset(o.incident_key for o in STORM))
+    assert violations == [], "without a page there is nothing to verify against, and the rail stays quiet rather than firing on everything"
+
+
+def test_the_investigator_brief_names_the_list_the_tools_and_the_two_rules_that_do_not_bend() -> None:
+    brief = investigator_brief("water_feed", ("head count at Alkali Flat", "the well feeding it"), ("list_pastures", "read_sensor"))
+    assert "- head count at Alkali Flat" in brief and "- the well feeding it" in brief
+    assert "list_pastures, read_sensor" in brief and "read-only" in brief
+    assert "Severity was decided in code" in brief and "do not write a work order" in brief
+    assert "—" not in brief
+    assert "listed nothing specific" in investigator_brief("water_feed", (), ("read_sensor",)), "an empty list is stated, not left as an empty bullet"

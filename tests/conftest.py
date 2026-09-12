@@ -64,13 +64,17 @@ def settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
     Returned so a test can turn one knob on the copy (`settings.incident_confirm_sweeps = 1`)
     without building a whole `Settings`; the copy is per test, so nothing leaks.
     """
-    disarmed = get_settings().model_copy(update={"chaos_enabled": False, "log_dir": str(tmp_path / "logs")})
+    # M10: the investigator is off for every test unless the test arms it with a fake session and a
+    # fake model (`test_agent.py`, the M10 section). On, a planted `insufficient_information` would
+    # open a real MCP session against whatever `MCP_URL` says, which is the ranch or a timeout.
+    disarmed = get_settings().model_copy(update={"chaos_enabled": False, "investigator_enabled": False, "log_dir": str(tmp_path / "logs")})
     monkeypatch.setattr("src.tools.chaos.get_settings", lambda: disarmed)
     monkeypatch.setattr("src.agent.executor.get_settings", lambda: disarmed)
     monkeypatch.setattr("src.agent.memory.get_settings", lambda: disarmed)
     # M7: the cascade reads `tier1_enabled` and `tier_compare` through these three, so a test can
     # flip either on the copy and have `judge_packet` see it.
     monkeypatch.setattr("src.agent.workers.get_settings", lambda: disarmed)
+    monkeypatch.setattr("src.agent.agent.get_settings", lambda: disarmed)  # M10: `synthesize` reads `tier_compare` too
     monkeypatch.setattr("src.models.routing.get_settings", lambda: disarmed)
     monkeypatch.setattr("src.models.llm_client.get_settings", lambda: disarmed)
     # And the log directory. Found at M6: a CLI rail calls `configure_logging()`, which installs

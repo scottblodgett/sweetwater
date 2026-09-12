@@ -39,8 +39,10 @@ cd web && npm install && cp .env.example .env.local && npm run dev   # the windo
 ```
 
 `--once` is real from M1 and **costs money from M2**: its last two stages assemble an
-evidence packet and hand it to Opus, once per newly-opened incident. Roughly 24k to 58k
-tokens on a first run against a quiet ledger, falling as incidents become `ongoing`.
+evidence packet and hand it to a model, once per newly-opened incident. Roughly 24k to 58k
+tokens on a first run against a quiet ledger, falling as incidents become `ongoing`. With
+`TIER1_ENABLED=1` (M10) the local model is asked first for every order and for the fused report,
+and Opus is paid only for what it escalates; the measured shares are in `docs/model-routing.md`.
 
 The loop exits **0** on a clean drain (Ctrl+C once, SIGTERM, or SIGBREAK), **1** if forced or
 broken, **2** on a config refusal, and **4** when the per-run spend ceiling halts it. The ceiling
@@ -108,7 +110,7 @@ Nine files, each answering one question a reader actually has.
 | [docs/sweetwater-ranch.md](docs/sweetwater-ranch.md) | the scenario canon, the one source the SOPs derive from |
 | [docs/model-routing.md](docs/model-routing.md) | local by default, Opus where it earns it: the design and the ledger of what moved tiers, with proof |
 | [docs/journey.md](docs/journey.md) | what actually happened, and where it diverged, written at every boundary |
-| [docs/cookbook.md](docs/cookbook.md) | the lessons, ordered by the pain that produced each one; 48 stable numbers, 45 entries after three merges |
+| [docs/cookbook.md](docs/cookbook.md) | the lessons, ordered by the pain that produced each one; 52 stable numbers, 49 entries after three merges |
 | [docs/open-issues.md](docs/open-issues.md) | everything still open, in plain language: what is wrong, why it matters, what it would take, who decides |
 | [docs/transcripts/](docs/transcripts/) | the pinned fixtures: the no-brief pair (M3) and the M7 local-versus-Opus pairs |
 | [web/README.md](web/README.md) | the window: the proxy, the panels, the three-command gate |

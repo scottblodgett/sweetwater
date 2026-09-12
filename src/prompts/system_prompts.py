@@ -29,6 +29,7 @@ than trusted. The schema and the words describing it live in one file so they ca
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from src.prompts.agent_prompts import MANDATES
@@ -189,6 +190,24 @@ SHIFT_REPORT_SCHEMA: dict[str, Any] = {
     "required": ["headline", "situation", "priorities", "linked", "escalations"],
     "additionalProperties": False,
 }
+
+def shift_report_schema_for(keys: frozenset[str] | set[str] | tuple[str, ...]) -> dict[str, Any]:
+    """M10. `SHIFT_REPORT_SCHEMA` with `linked` constrained to the incident keys actually on the page.
+
+    The first two local shift reports failed `invented_incident` the same way: `linked` came back as
+    sentences about the incidents rather than their keys, which the description already forbade. A
+    description is a request; an `enum` is a grammar. Ollama's `format=` constrains decoding to the
+    schema and Anthropic's tool schema is enforced server-side, so with the keys as the enum neither
+    tier can emit prose there, and the rail behind it keeps its job as the belt. Code owns what a
+    machine consumes: the keys are known before the call, so the schema says so. The base schema is
+    unchanged for the day there are no keys (nothing to link) and for every test that reads it.
+    """
+    if not keys:
+        return SHIFT_REPORT_SCHEMA
+    schema: dict[str, Any] = json.loads(json.dumps(SHIFT_REPORT_SCHEMA))
+    schema["properties"]["linked"]["items"] = {"type": "string", "enum": sorted(keys)}
+    return schema
+
 
 SHIFT_REPORT_TOOL = "write_shift_report"
 SHIFT_REPORT_TOOL_DESCRIPTION = "Record the one shift report for this tick. The only way to answer; do not reply in prose."

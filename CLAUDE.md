@@ -25,7 +25,7 @@ comes first.
 
 ## How a phase closes
 
-The build ran M0 through M9 (`docs/plan.md`); dockerizing is FUTURE-1 and deferred. At the end of every
+The build ran M0 through M9, then M10 (`docs/plan.md`); dockerizing is FUTURE-1 and deferred. At the end of every
 phase, in this order, no exceptions: **1.** run the gate (`pytest`, `ruff check .`, `mypy src main.py`, the
 three `web/` commands, and the phase's own live verification), all green or the phase is not done; **2.**
 update the docs (`docs/journey.md` gets what happened and every defect the phase caught in itself,
@@ -39,8 +39,11 @@ branches, no PRs; **4.** stop and check in with Scott. Do not roll into the next
 1. **Code owns what a machine consumes; the model owns what a human judges.** Severity is `triage.py`'s,
    always. A model handed a verdict and asked to justify it fabricates the justification.
 2. **The cheap path is a cheaper architecture, not just a cheaper model.** `evidence.py` assembles the
-   packet in code so a model judges one page instead of driving a tool loop. Local models write well and
-   navigate badly.
+   packet in code so a model judges one page instead of driving a tool loop, because local models write
+   well and navigate badly (measured at M7 and again at M10). From M10 the local model is asked first for
+   every job and Opus is the escalation; the one tool loop in the repo (`investigator.py`) runs only after a
+   local judge said its page was thin, is bounded three ways, and ships off because the measurement said
+   so. The rule was written to delete the tool loop; it now says where the one loop may live.
 
 A model never performs a write; from M6 it may propose one and a human answers (`src/agent/CLAUDE.md`, the
 gate). The read API never calls the ranch or a model (`src/api/CLAUDE.md`). The window never holds the API
@@ -85,8 +88,9 @@ mypy src main.py
 python -m src.tools.chaos status   # M5. Also plan / inject / expire / restore, recipe in docs/state.md
 python -m src.agent.gate list      # M6. The writes agents proposed and nobody has answered. Also approve <audit_id> --by NAME, reject <audit_id> --by NAME --reason TEXT
 
-TIER1_ENABLED=1 python main.py --once                 # M7. The cascade: warning-severity work orders on the local model, Opus for critical and for every escalation. Ships OFF
-TIER1_ENABLED=1 TIER_COMPARE=1 python main.py --once  # M7. The measurement: every local order shadowed by Opus on the same page into logs/compare.jsonl. SPENDS
+TIER1_ENABLED=1 python main.py --once                 # M7, inverted at M10: every work order and the fused report on the local model first, Opus only by escalation. What it ships as: docs/model-routing.md, the M10 verdict
+TIER1_ENABLED=1 TIER_COMPARE=1 python main.py --once  # M7. The measurement: every standing local order and report shadowed by Opus on the same page into logs/compare.jsonl. SPENDS, and the shadows are not on the tick line's cost_usd
+TIER1_ENABLED=1 INVESTIGATOR_ENABLED=1 python main.py --once   # M10. The tool loop on a thin page: LangGraph + langchain-mcp-adapters on the local model, bounded, logged, then one re-judge. Ships OFF; measured and it cured nothing
 
 cd web && npm install            # M9. The window, its own npm project (Node 22). Once
 cd web && npm run dev            # M9. http://localhost:3000 against the API named in web/.env.local (OPS_API_URL, OPS_API_TOKEN; copy web/.env.example)

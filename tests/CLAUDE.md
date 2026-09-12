@@ -38,7 +38,10 @@ Same rule, other expensive mistake (and from M7 the same fixture refuses `build_
 free is not the same as allowed, and a test that reaches Ollama is a test that needs Ollama running).
 `conftest.no_model_calls` is **autouse** and replaces
 `llm_client.build_client` with something that raises, so a test that reaches a real model
-fails instead of billing. From M2 the tick's last two stages spend money, so `run_tick`
+fails instead of billing. From M10 the autouse `settings` fixture also ships the investigator **off**,
+because a planted `insufficient_information` would otherwise open a real MCP session; the M10 section of
+`test_agent.py` arms it per test with a fake session that lists all 19 deployed tools and a scripted
+tool-calling model, so the real adapter and the real LangGraph run and only the ranch and Ollama are fakes. From M2 the tick's last two stages spend money, so `run_tick`
 takes `spend=False` and every rail passes it; the fixture is what happens when somebody
 forgets. Rails that need a response build a `ModelResponse` directly, which is the honest
 way to test a parser anyway. A recorded real Opus answer sits in `test_agent.py` as
@@ -124,6 +127,15 @@ pass is the failure mode this file exists to prevent.
 | a `POST /ops/gate` without the token is 401 and changes nothing; `decided_by` is the token's name | an approval anyone who can reach the port can make is not a gate | the dependency was dropped, or `decided_by` was read from the body |
 | a second decision over HTTP is 409, an unknown id 404, a bare reject 422 | the three `GateError` subclasses are three answers, never 200 with a shrug | the subclasses were collapsed and the route matched on message text |
 | one SSE event lands from a row inserted after the connection opened; `Last-Event-ID` resumes after the cursor | the window watches ticks land from another process | the cursor became a timestamp, or latest-on-connect was dropped |
+| the feed page carries the nearest wind, temperature, snow, and fuel from the same sweep, a live value beating a dark one, and a water page carries none of it | #12: a fact the SOP asks for is on the page in code, zero HTTP, and the block cannot leak into another world's page | `CONDITIONS_FOR_SOP` grew a file without the test, or the ranking flipped back to proximity first |
+| the loop is handed the read slice only, even when the server lists every write | M10, decision 41: a bound tool is callable and a model never calls a write | `bound_tools_for` returned a write again, or the investigator stopped filtering |
+| a write by name is refused by the interceptor before the wire | the belt behind the filter, on the one path that hands tools to a model | `Belt` stopped calling `assert_callable` |
+| the step ceiling and the deadline end the loop and **discard** what it fetched | Scott's decision 40: a loop that did not finish is not trusted to have fetched the right things | `render_facts` ran on a `step_ceiling` or `deadline` outcome |
+| a re-judge that echoes the wrong severity is still triage's severity and still a rejection | the loop gathers facts and never re-grades, and neither may the model reading them | the re-judge skipped `check` |
+| `tier_for` asks Tier 1 for a critical page, and `page_too_long` is the one pre-call reason | the M10 inversion, decision 29 | a severity branch came back, or `fits_tier1` stopped being consulted |
+| the supervisor is a Tier-1 call first, a blocking rail escalates to Opus from the identical page, a Tier-2 rejection is still the code page | the report follows the same predicate as an order; the cascade has one rung | `synthesize` grew a retry, or lost the receipt |
+| `linked` is an enum of the page's keys at both tiers, and the base schema is untouched | decision 42: a description is a request and an enum is a grammar | somebody read the enum back out to "let the model be flexible" |
+| `unverified_number` records and never blocks, ignores times and small counts | decision 43, until a row says otherwise | it joined `REPORT_BLOCKING_VIOLATIONS` without a row |
 | the unbriefed and the briefed answer are **both** clean | the honest limit of every rail above: they grade one incident, not scope | nothing. It is a pinned finding, not a rail. See below |
 
 ## Graded, not asserted

@@ -33,9 +33,10 @@ triage                 free   code owns severity, for sensors and for animals
 reconcile into sw_ops  free   pending / opened / ongoing / resolved / dismissed
 route new incidents    free
   -> evidence          SPEND  HTTP, not tokens: ~4 extra calls per newly-opened incident
-  -> fan out           SPEND  only newly-opened incidents reach a model
+  -> fan out           SPEND  only newly-opened incidents reach a model. Tier 1 first at every severity from M10
+     -> investigate    local  M10: only when the Tier-1 judge said insufficient_information; a bounded tool loop, then one re-judge. Ships off, see below
 gate on writes         free   a proposed write pauses for a human; the tick does not. M6, see below
-synthesize             maybe  one call, or zero. Runs on every tick, see below
+synthesize             maybe  one call, or zero. Tier 1 first from M10. Runs on every tick, see below
 ```
 
 Six stages cost zero tokens. That is not an optimization, it is the architecture: 160
@@ -58,8 +59,19 @@ and including a tick where the model failed, because the person coming on shift 
 calm-tick answer and the failure fallback, deliberately: a fallback exercised only after
 something has already gone wrong is a fallback nobody has read.
 
-A rejected report is **replaced** by the code-assembled one, carrying the violations, never
-retried. A retry loop turns a rail into a sampler.
+**From M10 the model it calls is Tier 1 first, by the same predicate as a work order.**
+`routing.tier_for(mandate + page, max_tokens=SHIFT_REPORT_MAX_TOKENS)` says Tier 1 when the cascade
+is on and the page fits `num_ctx` (measured: 18 orders is 10,630 gemma tokens of 16,384); a page too
+long is `page_too_long` and goes to Opus before any call. The rails run on the local answer; a
+blocking rail or no answer is an escalation and Opus rewrites from the identical page, with the
+Tier-1 receipt on the stored report (`ShiftReport.tier`, `.escalation`, `.tier1_*`). `linked` is an
+enum of the page's incident keys at both tiers (`shift_report_schema_for`), because the first four
+local reports put sentences there and `invented_incident` caught every one. `TIER_COMPARE` shadows a
+standing local report with Opus on the same page into `compare.jsonl` with `job="shift_report"`.
+
+A Tier-2 rejection is **replaced** by the code-assembled one, carrying the violations, never
+retried. A retry loop turns a rail into a sampler. The Tier-1 to Tier-2 step is not a retry: it is
+the cascade's one rung, a different model on the same page.
 
 **`evidence` is a separate `failed_stage` from `water_feed`.** They fail for unrelated
 reasons - one is the ranch not answering, the other is the model not answering - and a
@@ -141,16 +153,47 @@ events are in the observed set from M7A, through the herd sweep.
 
 Two different questions share a word here. `escalate` / `escalate_reason` on the `WorkOrder` is the
 **model** saying a human above the crew should know. Escalation between **tiers** is `routing.tier_for`
-(before the call) and `routing.escalation_reason` (after it), inside `workers.judge_packet`. The predicate
-itself (critical before the call; a blocking rail, `insufficient_information`, a proposed write, or no answer
-after it) is `docs/model-routing.md`'s and `docs/state.md` decisions 28 and 29. What this module has to get right:
+(before the call) and `routing.escalation_reason` (after it), inside `workers.judge_packet` and, from M10,
+`agent.synthesize`. The predicate itself (`page_too_long` before the call, code's; a blocking rail,
+`insufficient_information`, a proposed write, or no answer after it; **severity is not an input from M10**)
+is `docs/model-routing.md`'s and `docs/state.md` decisions 28 and 29. What this module has to get right:
 
 - Escalation is a **rewrite from the identical page**, never a review and never a retry at the same tier.
   Opus's order is stored with the Tier-1 attempt on it as `tier1_*`; a Tier-2 rejection is stored as rejected.
 - **A Tier-1 model may never produce an all-clear.** Code already flagged the incident, so `all_clear` rejects it
   and the rejection escalates. Do not relax this to make a test pass.
-- The cascade ships **off** (`TIER1_ENABLED=0`); the predicate is live code either way and every path has a
-  planted test.
+- **`insufficient_information` runs the investigator first** (below), when it is on, and only a page still thin
+  after one re-judge reaches Opus. The enriched page is what Opus and the `TIER_COMPARE` shadow read too.
+- The cascade's switch is `TIER1_ENABLED`; what it ships as is the M10 row in `docs/model-routing.md`. The
+  predicate is live code either way and every path has a planted test.
+
+## The investigator (M10): a bounded tool loop, and what bounds it
+
+`src/agent/investigator.py`. The third model job and the one M2 deleted on purpose. Every incident is still
+judged once on one code-assembled page with no tool loop; the loop fires only when the Tier-1 judge said on
+purpose that the page was too thin, and it fetches what the judge listed, through `langchain-mcp-adapters`
+(`load_mcp_tools` on `mcp_client.ranch_session()`) and LangGraph's `create_react_agent` on the Tier-1 model.
+It never judges: severity is `triage.py`'s before and after, the facts block is rendered by code from the raw
+tool results and never from the model's summary, and the re-judge runs the same rails as the first.
+
+| Bound | Value | At the limit |
+| --- | --- | --- |
+| tool calls | `INVESTIGATOR_MAX_STEPS` = 6, enforced in the interceptor before the call goes out | outcome `step_ceiling`, **everything fetched discarded** (decision 40), escalates on the original page |
+| wall clock | `INVESTIGATOR_DEADLINE_S` = 90 around the whole stream | outcome `deadline`, same |
+| LangGraph | `recursion_limit = 2 * max_steps + 3`, the backstop | `GraphRecursionError`, same |
+| one tool result | 4,000 chars, cut in the interceptor so the model read what the page will carry | truncated with a marker |
+| the facts block | 12,000 chars, so page plus facts plus a 2,048-token answer fits `num_ctx` | later results dropped, `facts_truncated` |
+| the tools | `bound_tools_for(agent)`, never a write (decision 41); `assert_callable` on every call as the belt | a write by name is a `ToolException` the model reads, counted as `write_attempts`, never sent |
+| zero tool calls | the model answered in text | outcome `no_tool_calls`, nothing appended |
+| the re-judge | exactly one more Tier-1 call, only after `answered`, never a second loop | still thin or rejected: Opus rewrites from the enriched page |
+
+Every outcome is a log line (`investigation`, one `agent_call` per model turn with `job="investigate"`, one
+`investigator_tool_call` per call) and a counter on the tick line (`investigations`, `investigation_steps`,
+`investigation_outcomes`), never a bill and never an unbounded fan-out: it runs inside the `AGENT_CONCURRENCY`
+slot the judge already holds. The stored order carries `investigated`, `investigation_outcome`,
+`investigation_steps`, `investigation_tools`. **It ships off** (`INVESTIGATOR_ENABLED=0`): measured at M10 on 15
+live loops on `gemma4:e4b`, it cured none, and the row in `docs/model-routing.md` says why and what the next
+attempt would change.
 
 ## The five rails on a work order, and what each one reads
 
@@ -183,15 +226,17 @@ an incident, so the model has no index to get wrong. `executor._gate_step` re-ch
 code-attached key against the routed set anyway, as `write_key_unknown`, because "cannot happen"
 is what a future path that builds a work order by hand will say too.
 
-Two more on the shift report, in `agent.py::check_shift_report`. Both block, and blocking here
-means the code-assembled page ships instead:
+Three more on the shift report, in `agent.py::check_shift_report`. Two block, and blocking here
+means Opus rewrites a Tier-1 report and the code-assembled page ships instead of a Tier-2 one
+(`REPORT_BLOCKING_VIOLATIONS`); the third records:
 
-| Rail | Reads |
-| --- | --- |
-| `invented_incident` | `linked` against the incident keys the page actually carried. `linked` is the report's causal claim, and code knows exactly what was handed over, so the claim is checkable rather than prose. A report linking an incident that does not exist sends somebody looking for it |
-| `all_clear` | the priorities list and the headline, never the `situation` prose, for the same reason the work-order rail reads actions |
+| Rail | Blocks | Reads |
+| --- | --- | --- |
+| `invented_incident` | yes | `linked` against the incident keys the page actually carried. `linked` is the report's causal claim, and code knows exactly what was handed over, so the claim is checkable rather than prose. A report linking an incident that does not exist sends somebody looking for it. From M10 the keys are also the schema's `enum`, so this rail is the belt behind a grammar |
+| `all_clear` | yes | the priorities list and the headline, never the `situation` prose, for the same reason the work-order rail reads actions |
+| `unverified_number` | no (M10, decision 43) | every number in the headline, the situation, and the priorities against the numbers on the page, clock times and timestamps stripped from both sides, numbers under 10 ungraded. The mandate's first hard limit, the numeric half, checked in code and recorded until a row says which tier trips it |
 
-**Neither of those is `_ALL_CLEAR` from `workers.py`, and the two regexes are deliberately not
+**Neither `all_clear` is `_ALL_CLEAR` from `workers.py`, and the two regexes are deliberately not
 shared.** One is about a sensor ("no problem here"), the other about a whole ranch ("quiet
 night"), and a shared pattern means widening one widens the other by accident.
 

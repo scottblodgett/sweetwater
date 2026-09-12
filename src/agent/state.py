@@ -180,6 +180,15 @@ class WorkOrder(BaseModel):
     tier1_latency_ms: int = 0
     tier1_input_tokens: int = 0
     tier1_output_tokens: int = 0
+    #: M10. Whether the investigator ran for this order, how it ended (`answered`, `step_ceiling`,
+    #: `deadline`, `no_tool_calls`, `error`), how many tool calls it made, and which tools. Code's
+    #: half of the order: a receipt of the loop, never anything the model said about it. An order
+    #: with `investigated=True` and `investigation_outcome="answered"` was judged twice at Tier 1,
+    #: the second time on the page plus the facts the loop fetched.
+    investigated: bool = False
+    investigation_outcome: str = ""
+    investigation_steps: int = 0
+    investigation_tools: tuple[str, ...] = ()
 
     @property
     def shippable(self) -> bool:
@@ -251,6 +260,18 @@ class ShiftReport(BaseModel):
     latency_ms: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    #: M10. Which tier wrote the stored report and why it was not the cheaper one, the same shape
+    #: as `WorkOrder`. `escalation` is one of `routing.ESCALATION_REASONS` or empty; a Tier-2 report
+    #: with `escalation=""` is one the cascade was off for. The `tier1_*` receipt is the local attempt
+    #: when Opus rewrote it, so the pair is readable off the stored report alone. On the model only:
+    #: the `shift_reports` row did not change (no migration); the tick line carries `report_tier`.
+    tier: int = 2
+    escalation: str = ""
+    tier1_finish_reason: str = ""
+    tier1_violations: tuple[str, ...] = ()
+    tier1_latency_ms: int = 0
+    tier1_input_tokens: int = 0
+    tier1_output_tokens: int = 0
 
     def render(self) -> str:
         """The page as the person coming on shift reads it."""

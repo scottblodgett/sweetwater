@@ -146,36 +146,28 @@ open for fifteen minutes. An hour once #5 lands. No database change. Vercel's fr
 
 **Who decides.** Waits on #5. Then a build session.
 
-### 12. The feed page does not carry the weather, so the cheap model keeps saying "I do not know"
+### 28. The local judge says "insufficient information" on most pages, and the loop built to answer it cannot
 
-**What is wrong.** The feed standing orders say weather is what turns a low bin from routine into
-urgent, and ask the model to say which. The evidence page for a feed incident carries the bins and nothing
-about weather. The local model honestly answered "insufficient information" on five of six feed incidents
-and escalated to Opus each time. Opus wrote around the gap. Both were right. The page is what is wrong.
+**What is wrong.** With the tiers inverted (M10), the local model escalated 13 of 22 work orders in run B
+by setting `insufficient_information`, where the schema's own description says the flag is for a page with
+no reading or no rule, not for a missing forecast or head count. The investigator was built to fetch what
+the judge said it lacked, ran 28 times, and cured none: on 19 loops `gemma4:e4b` wrote its tool calls as
+text and Ollama did not parse them (`get_animal{animalId:<|"|>cow-0777<|"|>}`), on the rest it fetched the
+whole sensor catalogue first, and most of what the judge lacked (how long a sensor has been dark, what
+powers a fence, a site's head count) is not on any endpoint the ranch has (cookbook #51).
 
-**Why it matters.** This is the single change that would let the cheap local model earn its job. As
-measured at M7 the cascade saved one call in twelve and was switched off. Until the page is fixed, every
-work order goes to Opus and the measurement in `docs/model-routing.md` stays where it is.
+**Why it matters.** Those 13 escalations are the whole remaining Opus bill on a storm tick. The inversion
+halves the bill; this is the other half. And `TIER1_ENABLED` is still off pending Scott's call, partly
+because of this rate.
 
-**What it would take.** The ranch has wind, temperature, and snow-depth sensors and the sweep already
-reads them. Put the current readings from the nearest of each under a "conditions now" heading on the
-feed page. No extra network calls, no database change. Then re-run the M7 measurement, three ticks with
-the cascade and comparison on, which costs about $1 in Opus shadows. A day.
+**What it would take.** Two things to try, cheapest first. A stricter `insufficient_information`
+description plus a planted test that a missing forecast or head count lands in `unknowns` and not in the
+flag, measured with the same offline replay `logs/m10_measure.py feed` uses, $0. Then, if the loop is worth
+another attempt, a local model whose tool calls Ollama parses (`qwen3.5:9b` is pulled and untried) behind
+a knob for the investigator's model only, measured on the pages where the missing fact is actually on the
+wire (a neighbour's reading, a pasture's roster). Half a day each. No database change.
 
-**Who decides.** A build session. It is `evidence.py`'s change, not the model's.
-
-### The cascade re-measure, after #12
-
-**What has not been done.** `docs/model-routing.md` has one pending row: the per-incident work order was
-measured on the local model and not adopted. The verdict names #12 as the change that would earn the
-next attempt.
-
-**Why it matters.** Without it, the ledger row that says "Opus writes every work order" is the final word,
-and the local model that was built and tested sits switched off.
-
-**What it would take.** #12, then the same three ticks with the same columns. About $1.
-
-**Who decides.** A build session, after #12.
+**Who decides.** A build session for the first; Scott for whether the loop gets a second attempt.
 
 ### 14. The Bedrock price is assumed, not read
 
@@ -508,3 +500,5 @@ One line each. These are done being written about; the detail is in `docs/journe
 - **#15** The first live pause on a real proposal. Closed at M7A, 2026-09-11, with #11.
 - **#24** Too many docs. Consolidated in this review, 2026-09-11. The map above is the record.
 - **#25** Root `CLAUDE.md` over its target. Sorted and trimmed in this review, 2026-09-11.
+- **#12** The feed page carries the weather and the yard fuel from the same sweep. Closed at M10, 2026-09-12: `insufficient_information` 2 of 3 before, 0 of 3 after on the same page, $0 (`docs/model-routing.md`, the #12 row).
+- **The cascade re-measure** after #12. Done at M10, 2026-09-12, with the tiers inverted rather than re-run as built: two live runs, 53 incidents, the row and the verdict in `docs/model-routing.md`. What remains of it is #28.

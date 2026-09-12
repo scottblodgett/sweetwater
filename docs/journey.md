@@ -1427,3 +1427,136 @@ four steps, and this file was written at every boundary, so this final pass is a
 and not a reconstruction. What a session picks up next is in `docs/state.md`'s Next row: #12 and the
 cascade re-measure, the M7A four (#16 to #19), and the decisions waiting on Scott (#5 to #8, #21).
 FUTURE-1, dockerizing, stays deferred until #5 lands on a host that wants a container.
+
+## M10 - The tool loop, and the tiers inverted
+
+**What was planned.** Scott's brief, 2026-09-12: the post-M9 review had found the build inverted from
+its intent. `langchain-mcp-adapters` was pinned and unimported, `bound_tools_for` handed a tool slice to
+nobody, and `agent.synthesize`, the aggregation job, was hardcoded to Opus while the local model got the
+warning-severity orders and escalated 5 of 6 at M7. Three pieces in order: the feed page's missing fact
+(#12), a real LangChain tool loop on the local model that fires when a page is thin (`langchain-mcp-adapters`
+and LangGraph, not hand-rolled, bounded three ways, no write tool ever), then the tiers inverted and
+measured with the rig that exists. Four questions to answer before code, and a check-in on them.
+
+**The check-in, before code.** Where the loop sits: after the first judging call, on `insufficient_information`
+only, because the judge's `unknowns` list is the loop's brief and does not exist before the call, and a
+loop before judging is the navigation job M7 measured failing on every packet rather than the thin ones.
+The bounds: 6 tool calls, 90 s, 4,000 chars a result, 12,000 chars a block, the read slice with
+`assert_callable` as the belt. Whether the fused page fits: **measured, not estimated**, by running the real
+18-order page from an M9-era transcript through gemma's tokenizer, 10,630 tokens with the mandate against
+16,384 (Opus counts the same text at 15,131), so it fits with about 3,700 to spare and a code-side
+`fits_tier1` guards the day it does not. The smallest run: 4 ticks with the shadows on and 2 without, about
+$1.00 to $1.25. And a correction to the brief: issue #12 said the local judge set `insufficient_information`
+on five of six feed incidents; the M7 compare log says one of the five was feed, the other four were a dark
+gate's duration, a degraded probe, a tank's well source, and which pastures flank an open gate. Scott
+decided four things: the yard fuel line joins #12's block; critical goes to Tier 1 first; a loop that hits
+its ceiling or deadline **discards** what it fetched (against the recommendation to keep it); and the new
+`unverified_number` rail records rather than blocks.
+
+**What actually happened, in order.**
+
+**Piece 1, #12, first.** `evidence.py` grew `CONDITIONS_FOR_SOP` (keyed by SOP file, because the rules that
+ask are in the file), `conditions_for` (nearest by map coordinates, a live value beating a dark sensor,
+the incident's own location winning, absence as a sentence), and a "Conditions now" block on feed pages
+with the nearest wind, temperature, snow, and yard fuel from the same sweep, zero HTTP. The first ranking
+put "same location" ahead of "has a value" and a dark propane tank in the room beat the diesel gauge that
+read; a fact beats proximity, and the test that said so is the one that caught it. Measured offline on
+gemma at $0, the real `feed-bin-03` page: `insufficient_information` 2 of 3 before the block, 0 of 3
+after.
+
+**Piece 2, the investigator.** `src/agent/investigator.py`: `ranch_session()`, `load_mcp_tools` with a
+`ToolCallInterceptor` (`Belt`: `assert_callable` on every call, the step ceiling before the call goes out,
+per-result truncation, a record per call), the list filtered to `bound_tools_for(agent)`,
+`create_react_agent` on the Tier-1 actor built through `llm_client` with no `format=`, streamed with
+`astream(stream_mode="updates")` under `asyncio.timeout` so every model turn and every tool result is a
+receipt whatever ends the loop. `judge_packet` runs it after a Tier-1 `insufficient_information`, re-judges
+once on the enriched page when the loop ended on its own, and both Opus's rewrite and the `TIER_COMPARE`
+shadow read the same enriched page. The tests run the real adapter against a fake MCP session that lists
+all 19 tools and the real LangGraph on a scripted tool-calling model; only the ranch and Ollama are fakes.
+
+**The rail that caught the brief.** The brief said `bound_tools_for` already subtracts `WRITE_TOOLS`. It did
+until M6: after `GATE_LANDED` flipped it returned the writes, on the M6 reading that a model "may be handed"
+a write it can propose. Nothing noticed, because nothing bound a tool. The investigator's own rail, a
+`RuntimeError` if a write survives the filter, fired on the first fake session. `bound_tools_for` now
+subtracts writes on both sides of the flip: a bound tool is callable, and a model never calls a write
+(decision 41).
+
+**Piece 3, the inversion.** `routing.tier_for(text, max_tokens=)` is Tier 1 for any job whose prompt fits;
+`fits_tier1` at 3.0 chars per token (measured 3.4 and 3.6) against `num_ctx` less the answer and a margin;
+`pre_call_reason` is `page_too_long` or nothing; `ESCALATE_CRITICAL` left the vocabulary. `synthesize`
+calls Tier 1 first through the same `SUPERVISOR_MANDATE`, schema, and budget, runs the rails, escalates on
+`rejected` or `no_answer`, shadows under `TIER_COMPARE` with `job="shift_report"`, and carries `tier`,
+`escalation`, and the `tier1_*` receipt on the `ShiftReport`. The tick line prices the report at its own
+tier (it used to assume Opus), and gains `report_tier`, `report_escalation`, and the investigator's three
+counters. `check_shift_report` gained `unverified_number`, recorded.
+
+**The live runs, test ledger, seed 1, chaos on, 2026-09-12.** Run A, `TIER_COMPARE=1`: tick 1 opened
+nothing (the debounce), tick 2 opened 13 and shipped 13, 7 written locally, 5 escalated on
+`insufficient_information`, 1 on `proposed_write`, the local report rewritten on `invented_incident`. Five
+loops ran: three ended in `no_tool_calls` because the model wrote its tool calls as text
+(`get_animal{animalId:<|"|>cow-0777<|"|>}`) and Ollama did not parse them, two `answered` and cured nothing,
+having fetched the whole sensor catalogue first. The pattern held for nine ticks: 31 opened, 31 shipped,
+17 local, 14 escalated, 4 of 4 reports rewritten by Opus for prose in `linked`, 15 loops and 0 cured,
+$1.11 on the tick lines and $1.01 more in shadows the line does not carry.
+
+**The kill that did not kill.** Run A was meant to stop after five ticks. The `taskkill` loop reported
+"killed" and killed nothing: Git Bash had rewritten `/PID` into `C:/Program Files/Git/PID`, and a venv loop
+is two processes (the launcher and `C:\Python311\python.exe`). The first attempt at run B started on a
+ledger I had just emptied, and run A's ticks 7 and 8 landed beside it; run B's tick 1 opened 12 on a
+"fresh" ledger, which is how it was found. Four processes killed by PID with `MSYS_NO_PATHCONV=1`, proven
+gone with `wmic`, the ledger emptied again, the contaminated tick's logs discarded, and run B restarted.
+Cost of the lesson: four runaway ticks and one contaminated one, about $1.10 of Opus.
+
+**The `linked` fix, between the runs.** Four of four local reports had put sentences into `linked` and the
+rail caught every one. A description is a request; an enum is a grammar. `shift_report_schema_for(keys)`
+makes `linked` an enum of the page's incident keys at both tiers, and `check_shift_report` deduplicates
+what comes back. Run B, compare off, 5 ticks: 22 opened, 22 shipped, 9 local, 13 escalated on
+`insufficient_information`, **2 of 2 fused reports written locally and rail-clean**, 13 loops and 0 cured,
+$0.80. The first rail-clean local report had a paragraph for a headline, bold labels on its priorities, one
+mislabelled fact, and the right two keys linked.
+
+**What diverged from the plan.**
+
+- **The investigator ships off, not on.** Planned on by default because it is only reachable through a
+  Tier-1 order. 28 live loops cured none; on, it costs 20 to 40 s a thin page and changes nothing.
+- **Run B was run twice** and the plan's cost estimate was missed by about 3x: $3.50 against $1.00 to
+  $1.25. The ranch drew 53 incidents where the estimate assumed 12, the runaway loop added four paid
+  ticks, and the shadows cost as much as the stored orders.
+- **The `linked` enum was not in the plan.** The plan said "add rails if they do not hold"; the rail held
+  four times out of four, so the fix went one level down, into the grammar, on the precedent of decision 31.
+- **`ESCALATE_CRITICAL` was removed rather than left as a legacy code**, so a `jq` counting reasons cannot
+  find a value nothing writes.
+- **The fused-report cost line was wrong before M10** and is fixed here: `executor.py` billed the report at
+  Opus's rate whatever wrote it, which was invisible while only Opus wrote it.
+
+**Defects the phase caught in itself.**
+
+1. `conditions_for` ranked same-location above has-a-value; the test's dark propane tank won over the
+   diesel gauge that read. Fixed before it shipped.
+2. The scripted test model returned the same `AIMessage` object every turn; LangGraph's `add_messages`
+   merged it by id into the earlier message and the loop ended after one round, which read exactly like a
+   model that stopped on its own. Fresh ids per turn, on the message and every tool call.
+3. The fake MCP session's `list_tools()` did not take the adapter's `cursor` argument; the adapter pages.
+4. Three M10 tests handed `water_feed` a `list_pastures` call it does not own (its slice cannot read a
+   pasture; the roster is code's on the page). Repointed at its own reads, and the finding is in the row.
+5. `bound_tools_for` returned writes after the flip (above).
+6. The M7 field name `sensor_id` in `compare.jsonl`'s `page` became `subject_id` at M7A and the grader
+   still read the old one; the aggregate grader here reads either.
+7. `logs/m10_measure.py shares` read `row["event"]` where this repo's JSON renderer writes `msg`, and
+   reported zero calls for every directory until it read the right key.
+8. The kill that did not kill (above), now cookbook #49 and a trap in `docs/state.md`.
+9. `cost_usd` on the tick line excludes `TIER_COMPARE` shadows, so run A read $1.11 and cost $2.12. Not a
+   bug in the line, which bills stored orders, but a trap in reading it; written down in both places.
+
+**Work not asked for, and why each one is here.**
+
+| Added | Why it was not optional |
+| --- | --- |
+| `bound_tools_for` never returns a write | the brief's non-negotiable said no write tool ever reaches the loop, and the function the brief named did not deliver that |
+| the `linked` enum at both tiers | four rail rejections in four reports is a shape problem, and the shape is code's to constrain |
+| `linked` deduplicated in `check_shift_report` | the first clean local report listed two keys twice; a machine-consumed field is code's to tidy |
+| the report billed at its own tier | a Tier-1 report billed at Opus's rate would have inflated every after-number in the row |
+| `report:<reason>` in `escalation_reasons` | the tick line had no way to say why Opus was paid for a report |
+| `logs/m10_reset_test_ledger.py` | emptying the test ledger between two live runs without `pytest`, which cannot run during a demo |
+| `logs/m10_measure.py` | the #12 replay at $0 and the share arithmetic, so the ledger rows come from one script |
+| the trap about `taskkill` under Git Bash and the two-process loop | it cost about $1.10 today and it will cost the next session the same |

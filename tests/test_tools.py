@@ -89,6 +89,7 @@ from src.tools.chaos import (
 )
 from src.tools.chaos import reset_warn_once as _reset_chaos
 from src.tools.evidence import (
+    CONDITIONS_FOR_SOP,
     KNOWLEDGE_BASE,
     SOP_FOR_CATEGORY,
     EvidencePacket,
@@ -96,6 +97,7 @@ from src.tools.evidence import (
     PastureContext,
     PastureRoster,
     assemble,
+    conditions_for,
     load_sop,
     parse_history,
     siblings_for,
@@ -113,7 +115,7 @@ from src.tools.herd import (
     parse_timestamp,
     sweep_herd,
 )
-from src.tools.mcp_client import SensorRef, call_tool
+from src.tools.mcp_client import RanchMap, SensorRef, call_tool
 from src.tools.sensors import SensorReading, SweepError, parse_sensor_payload, read_sensor, sweep
 from src.tools.triage import (
     ALL_CATEGORIES,
@@ -688,6 +690,66 @@ async def test_assembling_nothing_costs_nothing() -> None:
         assert not mock.calls
 
 
+# --- M10 (#12): the conditions block, the feed page's missing fact ----------------------------- #
+# What these protect: FEED-02 asks whether weather turns a low bin urgent and FEED-01 asks about the
+# yard fuel, and neither fact was on the page, so the local judge said `insufficient_information` on
+# purpose and Opus rewrote it. The block puts the nearest reading of each on the page from the same
+# sweep at zero HTTP. A water page never carries it, and nothing on it can name a sensor the sweep
+# did not read.
+def _feed_incident(**over: object) -> Incident:
+    return _incident(key="feed-bin-12:feed_low", subject_id="feed-bin-12", subject_type="feed-bin-weight", location="Feed Room", category="feed_low", severity="warning", summary="feed-bin weight at Feed Room is 389.3 lbs, below the warning line of 500 lbs", last_value="389.3 lbs", unit=" lbs", threshold=500.0, **over)
+
+
+def _grid(**points: tuple[float, float]) -> RanchMap:
+    return RanchMap(sensors=tuple(SensorRef(sensor_id=sid, sensor_type="x", location="x", coordinates={"x": x, "y": y}) for sid, (x, y) in points.items()))
+
+
+CONDITION_SWEEP = [
+    reading("feed-bin-weight", 389.3, sensor_id="feed-bin-12", location="Feed Room"),
+    reading("wind-speed", 12.9, sensor_id="met-tower-wind", location="Wind Met Tower"),
+    reading("wind-speed", 7.5, sensor_id="home-place-wind", location="Home Place"),
+    reading("temperature", 4.0, sensor_id="home-place-temp", location="Home Place"),
+    reading("temperature", 48.2, sensor_id="feed-room-temp", location="Feed Room"),
+    reading("fuel-level", 4.9, sensor_id="home-place-diesel", location="Home Place"),
+    reading("fuel-level", None, sensor_id="shop-propane", status="offline", location="Feed Room"),
+]
+
+
+def test_the_feed_page_carries_the_nearest_wind_temperature_snow_and_fuel_from_the_same_sweep() -> None:
+    """Nearest by map distance, same location winning outright, a live value beating a dark sensor
+    of the same type, and an absent type written as a sentence. `snow-depth` has no reading in this
+    sweep, which is exactly the shape of a September ranch."""
+    grid = _grid(**{"feed-bin-12": (10.0, 10.0), "met-tower-wind": (90.0, 90.0), "home-place-wind": (12.0, 10.0), "home-place-temp": (12.0, 10.0), "feed-room-temp": (10.0, 11.0), "home-place-diesel": (12.0, 10.0)})
+    found, missing = conditions_for(_feed_incident(), CONDITION_SWEEP, grid, sensor_types=CONDITIONS_FOR_SOP["feed.md"])
+    assert [c.sensor_id for c in found] == ["home-place-wind", "feed-room-temp", "home-place-diesel"], "the near wind sensor, the temperature in the room itself, and the diesel that has a value over the propane that is dark"
+    assert missing == ("snow-depth",)
+    page = EvidencePacket(incident=_feed_incident(), sop_name="feed.md", sop_text="## FEED-02 - schedule against the forecast", conditions=found, conditions_missing=missing).render()
+    assert "## Conditions now, read in this same sweep" in page
+    assert "wind speed (home-place-wind, at Home Place): 7.5 mph" in page
+    assert "air temperature (feed-room-temp, here): 48.2 F" in page
+    assert "bulk fuel level (home-place-diesel, at Home Place): 4.9%" in page
+    assert "snow depth: no snow-depth sensor answered this sweep" in page
+    assert "met-tower-wind" not in page and "shop-propane" not in page, "the far wind sensor and the dark propane tank were candidates, not the answer"
+    assert "None of them is a forecast" in page
+
+
+def test_the_conditions_block_falls_back_to_location_then_id_without_a_map_and_never_names_the_incident_sensor() -> None:
+    found, missing = conditions_for(_feed_incident(), CONDITION_SWEEP, None, sensor_types=("temperature", "wind-speed", "feed-bin-weight"))
+    assert [c.sensor_id for c in found] == ["feed-room-temp", "home-place-wind"], "same location first; then, unmapped, the lowest id among the wind sensors"
+    assert missing == ("feed-bin-weight",), "the incident's own sensor is never its own condition; with no other bin in the sweep the type is absent"
+    assert found[0].same_location and not found[1].same_location
+
+
+def test_a_water_page_carries_no_conditions_block_and_an_empty_ask_renders_nothing() -> None:
+    """The block is the feed SOP's, keyed by file in `CONDITIONS_FOR_SOP`. A water incident's page is
+    byte-for-byte what it was before M10, and a test that read the feed page's phrasing into a water
+    order would be the first sign the key had drifted to categories."""
+    assert conditions_for(_incident(), CONDITION_SWEEP, None, sensor_types=CONDITIONS_FOR_SOP.get("water.md", ())) == ((), ())
+    page = EvidencePacket(incident=_incident(), sop_name="water.md", sop_text="## WATER-01 - haul today").render()
+    assert "Conditions now" not in page and "forecast" not in page
+    assert set(CONDITIONS_FOR_SOP) == {"feed.md"}, "a second file joining the ask is a deliberate edit to this set and to this test"
+
+
 # =========================================================================== #
 # 3b. the herd sweep (M7A): three rules inherited from sensors.py, then the animal truth table,
 #     then the cow's packet. All against fake Farm and Care hosts; the wire facts these encode
@@ -1099,12 +1161,13 @@ def test_the_four_placement_tools_belong_to_nobody() -> None:
 
 
 def test_after_the_flip_a_write_is_proposable_but_never_performable_without_an_approval() -> None:
-    """The seam, after M6. The flip changed what a model may be handed and may propose; it did
-    not change who may perform. A write still raises without an `Approval`, and the only thing
-    that mints one is `src/agent/gate.py` after a human resumed the pause with `approve`."""
+    """The seam, after M6. The flip changed what a model may propose; it did not change what a model
+    may be handed (M10: a bound tool is callable, and the investigator's loop binds this list for
+    real) and it did not change who may perform. A write still raises without an `Approval`, and
+    the only thing that mints one is `src/agent/gate.py` after a human resumed the pause with `approve`."""
     assert GATE_LANDED, "M6 flipped it, after the pause and the audit stream were proven"
     for agent in SLICES:
-        assert bound_tools_for(agent) == tools_for(agent)
+        assert bound_tools_for(agent) == tools_for(agent) - WRITE_TOOLS, "never a write in a bound list, on either side of the flip"
         assert proposable_tools_for(agent) == tools_for(agent) & WRITE_TOOLS
     assert proposable_tools_for("water_feed") == {"consume_feed", "restock_feed"}
     assert proposable_tools_for("herd_health") == {"create_observation", "update_care_task"}

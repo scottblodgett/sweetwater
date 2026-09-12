@@ -23,9 +23,11 @@ from collections.abc import Iterable, Sequence
 from typing import Any, Literal
 
 from src.agent.state import SEVERITY_ORDER, Finding, Incident, RanchState, ShiftReport, WorkOrder
+from src.models.routing import ESCALATE_NO_ANSWER, ESCALATE_REJECTED, TIER1, TIER2, pre_call_reason, tier_for
 from src.tools.triage import ALL_CATEGORIES
-from src.utils.helpers import as_strings, has_no_real_instruction
-from src.utils.logger import current_tick, get_logger, write_transcript
+from src.utils.config import get_settings
+from src.utils.helpers import as_strings, has_no_real_instruction, number_tokens
+from src.utils.logger import current_tick, get_logger, log_compare, write_transcript
 
 log = get_logger(__name__)
 
@@ -242,11 +244,21 @@ def assemble_shift_report(orders: Sequence[WorkOrder], *, worlds: Sequence[str],
     )
 
 
-def check_shift_report(payload: dict[str, Any], *, keys: frozenset[str]) -> tuple[list[str], dict[str, Any]]:
+#: The shift-report violations that replace the page with the code-assembled one. `unverified_number`
+#: (M10) is recorded and ships, until a ledger row says which tier trips it and how often.
+REPORT_BLOCKING_VIOLATIONS: frozenset[str] = frozenset({"schema_invalid", "invented_incident", "all_clear"})
+
+#: M10. A number under this is not graded by `unverified_number`: "1." on a priority, "two problems",
+#: "4 agents" are counts of items on the page rather than facts about the ranch, and the rail is
+#: recorded rather than blocking, so the honest gap is written here rather than argued about at 5am.
+_UNGRADED_BELOW = 10.0
+
+
+def check_shift_report(payload: dict[str, Any], *, keys: frozenset[str], page: str | None = None) -> tuple[list[str], dict[str, Any]]:
     """`(violations, cleaned)`. The rails on the supervisor's answer.
 
-    Two of them, and they are the `invented_rule` and `all_clear` rails pointed at a different
-    output, for the same reasons:
+    Two of them block, and they are the `invented_rule` and `all_clear` rails pointed at a
+    different output, for the same reasons:
 
       * **`invented_incident`** blocks. `linked` is the report's causal claim, and code knows
         exactly which keys were handed over, so a key that was not is checkable and cheap. A
@@ -256,12 +268,23 @@ def check_shift_report(payload: dict[str, Any], *, keys: frozenset[str]) -> tupl
         the headline, never the `situation` prose, for the reason `workers.py` gives: "the tank
         at Alkali Flat is the only real problem tonight" is accurate, useful writing and a
         prose matcher rejects it.
+
+    One records, from M10, when `page` is given:
+
+      * **`unverified_number`**. The mandate's first hard limit says every fact comes from a work
+        order on the page, and code can check the numeric half of that: a number in the headline,
+        the situation, or the priorities that appears nowhere on the page. Clock times and
+        timestamps are stripped on both sides (the M3 grader's lesson), and numbers under
+        `_UNGRADED_BELOW` are not graded because "1." and "4 agents" are counts of the page, not
+        claims about the ranch. Recorded, never blocking, until the measurement says.
     """
     cleaned: dict[str, Any] = {
         "headline": str(payload.get("headline") or "").strip(),
         "situation": str(payload.get("situation") or "").strip(),
         "priorities": as_strings(payload.get("priorities")),
-        "linked": as_strings(payload.get("linked")),
+        # Deduplicated in order: the first rail-clean local report (M10, run B tick 2) listed two keys
+        # twice. The claim is a set, and a machine-consumed field is code's to tidy.
+        "linked": tuple(dict.fromkeys(as_strings(payload.get("linked")))),
         "escalations": as_strings(payload.get("escalations")),
     }
 
@@ -278,7 +301,33 @@ def check_shift_report(payload: dict[str, Any], *, keys: frozenset[str]) -> tupl
     if has_no_real_instruction(priorities) or _ALL_CLEAR.search(cleaned["headline"]):
         violations.append("all_clear")
 
+    if page is not None:
+        written = number_tokens(" ".join([cleaned["headline"], cleaned["situation"], *priorities]), strip_times=True)
+        unverified = sorted(n for n in written - number_tokens(page, strip_times=True) if abs(n) >= _UNGRADED_BELOW)
+        if unverified:
+            violations.append("unverified_number")
+            log.warning("shift_report_unverified_number", numbers=[f"{n:g}" for n in unverified], hint="a number in the report that is on no work order; recorded, not blocking (M10)")
+
     return violations, cleaned
+
+
+def _report_receipt(response: Any) -> dict[str, Any]:
+    return {"provider": response.provider, "model": response.model, "finish_reason": response.finish_reason, "latency_ms": response.latency_ms, "input_tokens": response.input_tokens, "output_tokens": response.output_tokens}
+
+
+def _report_verdict(response: Any, *, keys: frozenset[str], page: str) -> tuple[str, list[str], dict[str, Any]]:
+    """`(escalation_reason, violations, cleaned)` for one supervisor answer at either tier. The reason
+    is `no_answer` when nothing parseable came back, `rejected` when a blocking rail fired, `""` when
+    the page stands. Same vocabulary as `routing.escalation_reason`, applied to a report."""
+    if response.payload is None or response.truncated:  # see `workers.to_work_order`: a truncated tool call still carries a half-filled dict
+        detail = response.error or ("truncated before it answered" if response.truncated else "no tool call in the response")
+        return ESCALATE_NO_ANSWER, ["no_payload", response.finish_reason, detail], {}
+    violations, cleaned = check_shift_report(response.payload, keys=keys, page=page)
+    return (ESCALATE_REJECTED if set(violations) & REPORT_BLOCKING_VIOLATIONS else ""), violations, cleaned
+
+
+def _report_compare_fields(response: Any, *, reason: str, violations: list[str], cleaned: dict[str, Any], tier: int) -> dict[str, Any]:
+    return {"tier": tier, "model": response.model, "status": "no_answer" if reason == ESCALATE_NO_ANSWER else "rejected" if reason else "ok", "violations": list(violations), **{k: cleaned.get(k) for k in ("headline", "situation", "priorities", "linked", "escalations")}, "finish_reason": response.finish_reason, "latency_ms": response.latency_ms, "input_tokens": response.input_tokens, "output_tokens": response.output_tokens}
 
 
 async def synthesize(state: RanchState, *, spend: bool = True) -> ShiftReport:
@@ -303,12 +352,43 @@ async def synthesize(state: RanchState, *, spend: bool = True) -> ShiftReport:
         log.info("shift_report_assembled_in_code", worlds=list(worlds), work_orders=len(orders), reason="nothing to fuse" if spend else "spend=False")
         return assemble_shift_report(orders, worlds=worlds)
 
-    from src.models.llm_client import call_tier2  # local: llm_client is only reachable on a path that spends
+    from src.models.llm_client import call_tier1, call_tier2  # local: llm_client is only reachable on a path that spends
     from src.prompts.agent_prompts import SUPERVISOR_MANDATE
-    from src.prompts.system_prompts import SHIFT_REPORT_SCHEMA, SHIFT_REPORT_TOOL, SHIFT_REPORT_TOOL_DESCRIPTION
+    from src.prompts.system_prompts import SHIFT_REPORT_TOOL, SHIFT_REPORT_TOOL_DESCRIPTION, shift_report_schema_for
 
-    page = render_shift_page(orders)
-    log.info("shift_report_fusing", worlds=list(worlds), work_orders=len(orders), page_chars=len(page))
+    page, keys = render_shift_page(orders), frozenset(o.incident_key for o in orders)
+    # M10: `linked` is an enum of the keys on this page, at both tiers, so the fusion claim cannot be prose.
+    schema = shift_report_schema_for(keys)
+    tick_key = f"tick:{state.tick}"
+    # M10. The supervisor is a Tier-1 call first, like every other job, when the cascade is on and
+    # the fused page fits `num_ctx` (measured 10,630 gemma tokens at 18 orders against 16,384, so it
+    # fits today and `fits_tier1` is what says so per tick). Opus is reached by the same reasons a
+    # work order reaches it: a page too long to read whole, a blocking rail, or no answer.
+    first = tier_for(f"{SUPERVISOR_MANDATE}\n\n{page}", max_tokens=SHIFT_REPORT_MAX_TOKENS)
+    reason = pre_call_reason(f"{SUPERVISOR_MANDATE}\n\n{page}", max_tokens=SHIFT_REPORT_MAX_TOKENS)
+    log.info("shift_report_fusing", worlds=list(worlds), work_orders=len(orders), page_chars=len(page), tier=first, reason=reason or None)
+    tier1_receipt: dict[str, Any] = {}
+    shadow_local: dict[str, Any] | None = None
+
+    if first == TIER1:
+        local = await call_tier1(agent="supervisor", system=SUPERVISOR_MANDATE, user=page, schema=schema, reasoning_effort="none", max_tokens=SHIFT_REPORT_MAX_TOKENS, incident_key=tick_key)
+        reason, local_violations, local_cleaned = _report_verdict(local, keys=keys, page=page)
+        tier1_receipt = {"tier1_finish_reason": local.finish_reason, "tier1_violations": tuple(local_violations), "tier1_latency_ms": local.latency_ms, "tier1_input_tokens": local.input_tokens, "tier1_output_tokens": local.output_tokens}
+        shadow_local = _report_compare_fields(local, reason=reason, violations=local_violations, cleaned=local_cleaned, tier=TIER1)
+        if not reason:
+            if get_settings().tier_compare:
+                # The measurement, same shape as `workers.judge_packet`: Opus on the identical page,
+                # written beside the local report in `compare.jsonl` and NOT stored.
+                shadow = await call_tier2(agent="supervisor", system=SUPERVISOR_MANDATE, user=page, schema=schema, schema_name=SHIFT_REPORT_TOOL, schema_description=SHIFT_REPORT_TOOL_DESCRIPTION, reasoning_effort="none", max_tokens=SHIFT_REPORT_MAX_TOKENS, incident_key=tick_key)
+                s_reason, s_violations, s_cleaned = _report_verdict(shadow, keys=keys, page=page)
+                log_compare(incident_key=tick_key, agent="supervisor", job="shift_report", severity=None, escalation="", page={"keys": sorted(keys), "worlds": list(worlds), "work_orders": len(orders), "page_chars": len(page)}, tier1=shadow_local, tier2=_report_compare_fields(shadow, reason=s_reason, violations=s_violations, cleaned=s_cleaned, tier=TIER2))
+            if local_violations:
+                log.warning("shift_report_violations", tick=state.tick, tier=TIER1, violations=local_violations, blocking=False)
+            report = ShiftReport(**local_cleaned, source="model", worlds=tuple(worlds), work_orders=len(orders), violations=tuple(local_violations), tier=TIER1, **_report_receipt(local))
+            write_transcript(tick=current_tick(), agent="supervisor", name=f"tick-{state.tick}", payload={"page": page, "report": report.model_dump()})
+            return report
+        log.warning("tier1_report_escalated", tick=state.tick, reason=reason, tier1_violations=local_violations, tier1_finish_reason=local.finish_reason)
+
     response = await call_tier2(
         agent="supervisor",
         # The supervisor does NOT inherit `INHERITED_RULES`. Those rules describe judging one
@@ -316,35 +396,31 @@ async def synthesize(state: RanchState, *, spend: bool = True) -> ShiftReport:
         # first paragraph describes somebody else's task is worse than no brief at all.
         system=SUPERVISOR_MANDATE,
         user=page,
-        schema=SHIFT_REPORT_SCHEMA,
+        schema=schema,
         schema_name=SHIFT_REPORT_TOOL,
         schema_description=SHIFT_REPORT_TOOL_DESCRIPTION,
         reasoning_effort="none",
         max_tokens=SHIFT_REPORT_MAX_TOKENS,
-        incident_key=f"tick:{state.tick}",
+        incident_key=tick_key,
     )
-    receipt = {
-        "provider": response.provider,
-        "model": response.model,
-        "finish_reason": response.finish_reason,
-        "latency_ms": response.latency_ms,
-        "input_tokens": response.input_tokens,
-        "output_tokens": response.output_tokens,
-    }
+    receipt = {**_report_receipt(response), "tier": TIER2, "escalation": reason, **tier1_receipt}
+    opus_reason, violations, cleaned = _report_verdict(response, keys=keys, page=page)
+    if shadow_local is not None and get_settings().tier_compare:
+        log_compare(incident_key=tick_key, agent="supervisor", job="shift_report", severity=None, escalation=reason, page={"keys": sorted(keys), "worlds": list(worlds), "work_orders": len(orders), "page_chars": len(page)}, tier1=shadow_local, tier2=_report_compare_fields(response, reason=opus_reason, violations=violations, cleaned=cleaned, tier=TIER2))
 
-    if response.payload is None or response.truncated:  # see `workers.to_work_order`: a truncated tool call still carries a half-filled dict
-        detail = response.error or ("truncated before it answered" if response.truncated else "no tool call in the response")
-        log.error("shift_report_no_answer", tick=state.tick, finish_reason=response.finish_reason, detail=detail)
+    if opus_reason == ESCALATE_NO_ANSWER:
+        log.error("shift_report_no_answer", tick=state.tick, finish_reason=response.finish_reason, detail=violations[-1])
         fallback = assemble_shift_report(orders, worlds=worlds, violations=("no_payload", response.finish_reason))
         return fallback.model_copy(update=receipt)
-
-    violations, cleaned = check_shift_report(response.payload, keys=frozenset(o.incident_key for o in orders))
-    if violations:
-        log.warning("shift_report_violations", tick=state.tick, violations=violations)
+    if opus_reason:
+        # A Tier-2 rejection is the code-assembled page, never a retry: a retry loop turns the rail into a sampler.
+        log.warning("shift_report_violations", tick=state.tick, tier=TIER2, violations=violations, blocking=True)
         fallback = assemble_shift_report(orders, worlds=worlds, violations=tuple(violations))
         return fallback.model_copy(update=receipt)
+    if violations:
+        log.warning("shift_report_violations", tick=state.tick, tier=TIER2, violations=violations, blocking=False)
 
-    report = ShiftReport(**cleaned, source="model", worlds=tuple(worlds), work_orders=len(orders), **receipt)
+    report = ShiftReport(**cleaned, source="model", worlds=tuple(worlds), work_orders=len(orders), violations=tuple(violations), **receipt)
     # `LOG_TRANSCRIPTS=1` only: the page the supervisor read and the report it wrote, beside the work
     # orders' own transcripts. The `linked` claim is otherwise unreadable after the tick.
     write_transcript(tick=current_tick(), agent="supervisor", name=f"tick-{state.tick}", payload={"page": page, "report": report.model_dump()})

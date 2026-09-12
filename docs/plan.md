@@ -58,6 +58,7 @@ sweetwater/                                lands at
 │   │   ├── agent.py                M1    the routing table; the LangGraph supervisor + the five worker factories (M3)
 │   │   ├── workers.py              M2    what a worker's ANSWER must satisfy: the rails, to_work_order, the fan-out
 │   │   ├── executor.py             M1    THE CONTINUOUS LOOP: the tick body; cadence, backoff, shutdown (M4); the gate stage (M6)
+│   │   ├── investigator.py         M10   the third model job: a bounded LangGraph tool loop on the Tier-1 model through langchain-mcp-adapters, fired by `insufficient_information`; measured, ships off
 │   │   ├── gate.py                 M6    the human gate: one interrupt() graph per proposed write, propose / pending / decide, and the CLI (`python -m src.agent.gate`)
 │   │   ├── state.py                M1    RanchState (LangGraph), Finding, Incident, WorkOrder
 │   │   └── memory.py               M1    sw_ops persistence: incidents; chaos events (M5); checkpointer (M6)
@@ -73,7 +74,7 @@ sweetwater/                                lands at
 │   ├── models/
 │   │   ├── CLAUDE.md               M0    the Ollama gotchas; when thinking may be turned off
 │   │   ├── llm_client.py          (M2)   provider registry + per-call reasoning_effort + usage receipts
-│   │   ├── routing.py              M7    job -> tier -> model, the price table, the escalation predicate (measured; the cascade ships off)
+│   │   ├── routing.py              M7    job -> tier -> model, the price table, the escalation predicate; inverted at M10 (Tier 1 first for every job, `page_too_long` the one pre-call reason)
 │   │   └── embeddings.py           --    SOP retrieval seam; stays a seam in V1, see the note below
 │   ├── prompts/
 │   │   ├── system_prompts.py      (M2)   shared rules: severity is not yours, cite your SOP, no invented premises
@@ -89,7 +90,7 @@ sweetwater/                                lands at
 ├── tests/
 │   ├── CLAUDE.md                   M0    never Supabase; sw_ops_test schema; what each rail proves
 │   ├── conftest.py                 M1    the sw_ops_test fixtures, and the skip when no local Postgres answers
-│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), the no-brief pair (M3, and it did not flail: see docs/transcripts/no-brief-transcript.md), gate resume (M6), the cascade and the planted local all-clear that must escalate (M7)
+│   ├── test_agent.py               M1    tick contract, routing, the store, schema guards, config + logging; allowlists counted (M3), the no-brief pair (M3, and it did not flail: see docs/transcripts/no-brief-transcript.md), gate resume (M6), the cascade and the planted local all-clear that must escalate (M7), the investigator on the real adapter and the inverted tiers (M10)
 │   ├── test_tools.py               M1    triage truth table, sweep concurrency; chaos determinism (M5)
 │   └── test_api.py                (M8)   envelope shape, gate endpoints
 ├── data/
@@ -328,9 +329,21 @@ Decided at M5: chaos is a peer node in the graph and its decision core is determ
 `docs/model-routing.md` is both the design and the ledger, and it is the authority: the rule about when
 thinking may be off, the two tiers, the escalation predicate, the all-clear rail, the build order (Opus
 first, then move one job down at a time with a row that proves it), and the Ollama traps. What the build
-found: there are exactly two model jobs (the per-incident work order and the fused shift report), the
-cascade was built at M7, measured, and ships **off**, and the one change that would earn the next attempt is
-`docs/open-issues.md` #12. Code-level rules for the model layer: `src/models/CLAUDE.md`.
+found: there are exactly three model jobs (the per-incident work order, the fused shift report, and from
+M10 the investigator), the cascade was built at M7 and measured, and at M10 the tiers were inverted: Tier 1
+is asked first for every work order and for the fused report whatever the severity, and Opus is reached only
+by a reason read off the local answer, plus one pre-call reason code can know (`page_too_long`). What the
+inversion measured, and what `TIER1_ENABLED` ships as, is the M10 section of that ledger. Code-level rules
+for the model layer: `src/models/CLAUDE.md`.
+
+**The loop, M10.** Between M2 and M9 no model drove a tool: `evidence.py` assembles the page in code and the
+judge reads one page. That is still every first judgment. The one tool loop is `src/agent/investigator.py`,
+and it fires only after a Tier-1 judge has said the page was too thin: the read tools in that agent's slice
+reach the local model through `langchain-mcp-adapters` (`load_mcp_tools` on the same MCP session the catalog
+uses, an interceptor as the allowlist belt), LangGraph's `create_react_agent` runs the loop under a step
+ceiling and a wall-clock deadline, code renders the raw tool results into a facts block, and the enriched
+page is judged once more at Tier 1. A loop that did not finish on its own leaves nothing on the page. It is
+measured in the ledger and ships off; the bounds and the reasons are `src/agent/CLAUDE.md`.
 
 ---
 
@@ -383,15 +396,25 @@ The M7 shape (the M7 fields and the token and cost values are from tick A of the
 2026-09-11). A field is added to this line when the stage that produces it exists, not
 before, so a `null` here always means the stage ran and had nothing to say.
 
-**The cascade's four fields, M7.** `tier` is the highest tier that wrote anything this tick (a fused
-shift report counts as Tier 2), or `null` when no model was called, so a calm tick reads as no tier
-rather than as the cheap one. `tier1_orders` is how many stored work orders the local model wrote.
-`escalations` is how many stored orders were written by Tier 2 for a reason, and `escalation_reasons`
-is one code per such order, in order: `critical`, `rejected`, `insufficient_information`,
-`proposed_write`, `no_answer` (`routing.ESCALATION_REASONS`). `escalated`, older, is the model's own
-`escalate` flag on the order and means "a human above the crew should know"; it is a different fact.
-`input_tokens` and `output_tokens` include the Tier-1 attempt behind an escalation; `cost_usd` bills
-only the Tier-2 half, per order at that order's model.
+**The cascade's four fields, M7, inverted at M10.** `tier` is the highest tier that wrote anything this
+tick (the fused report at its own tier from M10), or `null` when no model was called, so a calm tick
+reads as no tier rather than as the cheap one. `tier1_orders` is how many stored work orders the local
+model wrote. `escalations` is how many stored orders were written by Tier 2 for a reason, and
+`escalation_reasons` is one code per such order, in order: `page_too_long`, `rejected`,
+`insufficient_information`, `proposed_write`, `no_answer` (`routing.ESCALATION_REASONS`; `critical`
+left the vocabulary at M10), plus `report:<reason>` when Opus rewrote the fused report. `escalated`,
+older, is the model's own `escalate` flag on the order and means "a human above the crew should know";
+it is a different fact. `input_tokens` and `output_tokens` include the Tier-1 attempt behind an
+escalation; `cost_usd` bills only the Tier-2 half, per order at that order's model, and the report at
+`ShiftReport.tier`. **It excludes `TIER_COMPARE` shadows**, which are not stored orders; the real bill
+of a compare run is this plus `compare.jsonl`'s `escalation=""` rows at Opus's rate.
+
+**The report's two and the investigator's three, M10.** `report_tier` is which tier wrote the report a
+model wrote (`null` when code assembled it without a call) and `report_escalation` is why Opus was paid
+for it when it was. `investigations` is how many loops ran this tick, `investigation_steps` their tool
+calls in total, and `investigation_outcomes` a map of outcome to count (`answered`, `step_ceiling`,
+`deadline`, `no_tool_calls`, `error`). A high `no_tool_calls` or `step_ceiling` beside a low `answered`
+is the local model thrashing, which is the row the ledger wants to write from one line.
 
 **The gate's four fields, M6.** `writes_proposed` is how many proposals paused for a human this
 tick; `writes_duplicate` is how many were suppressed because the same write for the same incident
@@ -478,7 +501,11 @@ That is a real M2 line. A real Tier-1 line, M7:
 
 Tier 1 adds `num_ctx` and Tier 2 does not have one; `content_types` is `["json"]` when the
 schema-constrained answer parsed and `["text"]` when it did not; `tool_calls` is 1 for a parsed
-answer on either tier. The required fields are the ones in `log_agent_call`'s signature and
+answer on either tier. From M10 an investigator turn is a line too, with `job="investigate"`, `turn`,
+and `tool_calls` as the number of tools the model asked for on that turn (0 on its closing turn);
+`latency_ms` is 0 on those lines because the graph, not `llm_client`, timed the call, and the whole
+loop's wall clock is on the console `investigation` line. A line with no `job` is a work order or,
+when `agent` is `supervisor`, the fused report. The required fields are the ones in `log_agent_call`'s signature and
 everything else is per-call context. An escalation is two lines with the same `incident_key`, one
 per tier, and the console stream has `tier1_escalated` between them naming the reason. `content_types` is the block types the response actually contained, which is how
 "answered with no tool call" reads differently from "never answered."
@@ -504,7 +531,10 @@ One line per packet judged by both tiers on the identical page: `incident_key`, 
 `proposed_write`, status, violations, receipt). **It carries model prose on purpose**: two work
 orders per line, already stored in `sw_ops`, because grading them is the whole point of the file. It
 is not one of the three operational streams, it is empty unless the knob is on, and the knob SPENDS.
-The M7 grading of six pairs is pinned as `docs/transcripts/m7-compare-transcript.md`.
+The M7 grading of six pairs is pinned as `docs/transcripts/m7-compare-transcript.md`. From M10 a line
+may carry `job="shift_report"` (`incident_key` is `tick:N`, `page` is the keys, worlds, order count,
+and page length, `tier1` / `tier2` are the two reports) and a work-order line carries `investigation`
+(the four receipt fields) when the loop ran before the pair was written.
 
 ### `logs/audit.jsonl` - the receipt, one line per side effect
 

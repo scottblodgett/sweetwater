@@ -65,9 +65,14 @@ names, and none of them is redundant:
 - `tools_for(agent)` is the **declaration**. It includes the writes, so the counts the tests
   assert are the real counts.
 - `bound_tools_for(agent)` is what a model may be handed and `proposable_tools_for(agent)` is
-  what it may name in `WorkOrder.proposed_write`: the slice restricted to `WRITE_TOOLS`. Both are
-  empty of writes while `GATE_LANDED` is False, and `bound_tools_for` logs
-  `write_tools_withheld` when it subtracts something.
+  what it may name in `WorkOrder.proposed_write`: the slice restricted to `WRITE_TOOLS`. **The
+  bound list is never a write, on either side of the flip** (M10, `docs/state.md` decision 41): a
+  bound tool is one the model can call, and from M10 there is a real caller, the investigator's
+  loop, which loads all 19 through `langchain_mcp_adapters.load_mcp_tools` and keeps only this
+  set. Between M6 and M10 the function returned the writes after the flip and nothing noticed,
+  because nothing bound a tool; the investigator's own rail caught it on its first fake session.
+  It logs `write_tools_withheld` whenever it subtracts something. The proposable list is empty
+  while `GATE_LANDED` is False and the slice's writes after it.
 - `WRITE_TOOL_ARGS` is the argument contract per write tool, **read off the wire** from
   `tools/list` on 2026-09-11 the way `DEPLOYED_TOOLS` was. Each argument has a kind: `id` and
   `number` are graded against the evidence page (grounding), `enum` and `timestamp` against
@@ -75,10 +80,22 @@ names, and none of them is redundant:
   `workers.check_write_proposal` validates against the same table, so what the model is told and
   what code checks cannot drift.
 - `assert_callable(tool, approval=...)` is the belt, raising `WriteGateError` from inside
-  `mcp_client.call_tool`. **This one covers us, not the model**, before and after the flip: a write
-  needs an `Approval`, which only `src/agent/gate.py` mints after a human resumed the pause with
-  `approve`. The next person to write a helper that calls `consume_feed` directly is not a model,
-  and after M6 they are also not a human who said yes.
+  `mcp_client.call_tool` and, from M10, from inside the investigator's tool-call interceptor
+  (`investigator.Belt`) on every call the loop makes. **This one covers us, not the model**, before
+  and after the flip: a write needs an `Approval`, which only `src/agent/gate.py` mints after a human
+  resumed the pause with `approve`. The next person to write a helper that calls `consume_feed`
+  directly is not a model, and after M6 they are also not a human who said yes.
+
+**How tools reach a model, from M10.** They did not, between M2 and M9: `evidence.py` assembles the
+page in code and the judge drives no tool loop, and that is still every first judgment. The one
+path is `src/agent/investigator.py`: `mcp_client.ranch_session()` opens the same session the catalog
+read uses, `load_mcp_tools(session, tool_interceptors=[belt])` turns the 19 deployed tools into
+LangChain tools, the list is filtered to `bound_tools_for(agent)`, and LangGraph's
+`create_react_agent` runs the loop on the Tier-1 model under a step ceiling and a deadline
+(`src/agent/CLAUDE.md`, the investigator). `ranch://sensors/map` is a resource and the adapter
+surfaces tools only, which is fine here: the page already carries the topology. A tool result is
+truncated in the interceptor at 4,000 characters, because `list_sensors` is 36k and `list_animals`
+would be more.
 
 `WRITE_TOOLS` names all **eight** deployed writes, not the four that appear in a slice. The
 four placement tools are in no slice and belong in none: moving an animal between places is a

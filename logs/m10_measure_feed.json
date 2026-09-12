@@ -1,0 +1,223 @@
+{
+  "incident": {
+    "key": "feed-bin-03:feed_low",
+    "subject_id": "feed-bin-03",
+    "subject_type": "feed-bin-weight",
+    "location": "Feed Room",
+    "category": "feed_low",
+    "severity": "warning",
+    "status": "opened",
+    "summary": "feed-bin weight at Feed Room is 36.5 lbs, below the warning line of 500 lbs",
+    "last_value": "36.5 lbs",
+    "unit": " lbs",
+    "threshold": 500.0,
+    "occurrences": 1,
+    "first_seen_at": "2026-09-12T14:50:52.183000Z",
+    "last_seen_at": "2026-09-12T14:50:52.183000Z",
+    "resolved_at": null,
+    "tick_opened": 0,
+    "tick_last_seen": 0,
+    "run_id": "",
+    "owner": "water_feed",
+    "row_id": null
+  },
+  "source": "mcp_resource",
+  "pages": {
+    "before": "## The incident, as triage ranked it in code\n\n- severity: WARNING (already decided; not yours to change)\n- category: feed_low\n- sensor: feed-bin-03, a feed-bin weight sensor\n- location: Feed Room\n- reading: 36.5 lbs, against a warning line of 500 lbs\n- triage said: feed-bin weight at Feed Room is 36.5 lbs, below the warning line of 500 lbs\n- history of this incident: seen 1 time(s), first at 2026-09-12T14:50:52.183000+00:00, still opened\n\n## This sensor's last 12 readings, newest first\n\n  (This series is generated independently of the reading above and does NOT contain it. Use it for the range and the trend; the authoritative current value is the triaged reading.)\n  - 2026-09-12T14:50:56.503Z: 685.5 lbs\n  - 2026-09-12T14:40:56.503Z: 645 lbs\n  - 2026-09-12T14:30:56.503Z: 634.3 lbs\n  - 2026-09-12T14:20:56.503Z: 1514.7 lbs\n  - 2026-09-12T14:10:56.503Z: 745.1 lbs\n  - 2026-09-12T14:00:56.503Z: 918.8 lbs\n  - 2026-09-12T13:50:56.503Z: 296.5 lbs\n  - 2026-09-12T13:40:56.503Z: 795.8 lbs\n  - 2026-09-12T13:30:56.503Z: 1337.7 lbs\n  - 2026-09-12T13:20:56.503Z: 1493.9 lbs\n  - 2026-09-12T13:10:56.503Z: 1608.4 lbs\n  - 2026-09-12T13:00:56.503Z: 385.5 lbs\n\n## Other sensors at Feed Room, read in this same sweep\n\n  - feed-bin weight (feed-bin-01): 227.2 lbs\n  - feed-bin weight (feed-bin-02): 1510.7 lbs\n  - feed-bin weight (feed-bin-04): 1421.3 lbs\n  - feed-bin weight (feed-bin-05): 246.5 lbs\n  - feed-bin weight (feed-bin-06): 1715 lbs\n  - feed-bin weight (feed-bin-07): 935.7 lbs\n  - feed-bin weight (feed-bin-08): 78.8 lbs\n  - feed-bin weight (feed-bin-09): 1583.1 lbs\n  - feed-bin weight (feed-bin-10): 541.8 lbs\n  - feed-bin weight (feed-bin-11): 1072 lbs\n  - feed-bin weight (feed-bin-12): 1892.3 lbs\n\n## What is standing behind it\n\n  (no pasture is mapped to Feed Room; it is a site rather than grazing ground)\n\n## The standing orders that apply (feed.md)\n\n# SOP: Feed and winter access - the production world\n\nDerived from `docs/sweetwater-ranch.md`. Same rule as `water.md`: these rules are the only\nones that may be cited, and a rule that is not written here does not exist.\n\n**The standing order:** reserves before a storm. Feed is the half of `water_feed` that runs\non a longer clock than water, which is exactly why it is the half that gets discovered late.\nA bin nobody looked at in October is a phone call in January.\n\nIrrigated hay off the meadows is one of the ranch's revenue lines as well as its feed\nsupply, so what is in the bins is inventory with a sale price, not just forage.\n\n---\n\n## FEED-01 - A bin at the critical line means a feeding gets missed\n\n**Applies to:** `feed_low`, severity `critical`.\n\n1. **Fill it today.** The cattle on this bin miss a feeding otherwise, and a missed feeding\n   in cold weather shows up as condition loss that takes months to put back on.\n2. Name the location and the head count it serves. Which bin gets the loader first is\n   decided by that number.\n3. **Check the bulk fuel behind the fill.** The loader and the feed truck both draw on the\n   yard tank, and a fuel delivery out here is not a same-day thing. If fuel is also low,\n   say so in this work order rather than letting it arrive as a separate surprise.\n\n## FEED-02 - A bin at the warning line is a delivery to schedule, not a fire\n\n**Applies to:** `feed_low`, severity `warning`.\n\n1. The bin is into its reserve. Schedule the fill, and schedule it against the forecast\n   rather than against the calendar.\n2. **Weather is what turns this from routine into urgent.** A bin at reserve with snow or\n   hard cold coming is a today problem. The same bin under a clear week is a Thursday\n   problem. Say which one you think it is and why.\n\n## FEED-03 - Deep snow removes feed access and truck access at the same time\n\n**Applies to:** `deep_snow`, any severity, on a `snow-depth` sensor.\n\n1. **Warning:** cattle stop pawing through to grass at this depth and start living entirely\n   on what is hauled to them. Consumption steps up immediately, so the bins that looked fine\n   yesterday are now on a shorter clock.\n2. **Critical:** vehicle access to the far pastures is gone along with the feed access.\n   Check reserves at the far bins first, because those are the ones that cannot be topped up\n   once the two-tracks drift shut.\n3. **Do not write this as a snow report.** The finding is about reserves and routes. Depth\n   is the reason, not the work order.\n\n## FEED-04 - Feed and water are one agent on purpose\n\nAn animal short of water will not eat, and an animal short of feed drinks differently. If\nthe packet shows a feed problem and a water problem at the same location, write one work\norder that names both and says which one the crew fixes first. Two separate orders for the\nsame pasture is how the second one gets ignored.\n\n---\n\n## The two things never to write in a feed work order\n\n1. **An all-clear.** Code flagged this bin before the packet existed.\n2. **A number nobody measured.** Days of feed remaining, herd consumption rates, and\n   delivery lead times are not in the packet. Quote the weight that is, and say the rest is\n   unknown.",
+    "after": "## The incident, as triage ranked it in code\n\n- severity: WARNING (already decided; not yours to change)\n- category: feed_low\n- sensor: feed-bin-03, a feed-bin weight sensor\n- location: Feed Room\n- reading: 36.5 lbs, against a warning line of 500 lbs\n- triage said: feed-bin weight at Feed Room is 36.5 lbs, below the warning line of 500 lbs\n- history of this incident: seen 1 time(s), first at 2026-09-12T14:50:52.183000+00:00, still opened\n\n## This sensor's last 12 readings, newest first\n\n  (This series is generated independently of the reading above and does NOT contain it. Use it for the range and the trend; the authoritative current value is the triaged reading.)\n  - 2026-09-12T14:50:56.503Z: 685.5 lbs\n  - 2026-09-12T14:40:56.503Z: 645 lbs\n  - 2026-09-12T14:30:56.503Z: 634.3 lbs\n  - 2026-09-12T14:20:56.503Z: 1514.7 lbs\n  - 2026-09-12T14:10:56.503Z: 745.1 lbs\n  - 2026-09-12T14:00:56.503Z: 918.8 lbs\n  - 2026-09-12T13:50:56.503Z: 296.5 lbs\n  - 2026-09-12T13:40:56.503Z: 795.8 lbs\n  - 2026-09-12T13:30:56.503Z: 1337.7 lbs\n  - 2026-09-12T13:20:56.503Z: 1493.9 lbs\n  - 2026-09-12T13:10:56.503Z: 1608.4 lbs\n  - 2026-09-12T13:00:56.503Z: 385.5 lbs\n\n## Other sensors at Feed Room, read in this same sweep\n\n  - feed-bin weight (feed-bin-01): 227.2 lbs\n  - feed-bin weight (feed-bin-02): 1510.7 lbs\n  - feed-bin weight (feed-bin-04): 1421.3 lbs\n  - feed-bin weight (feed-bin-05): 246.5 lbs\n  - feed-bin weight (feed-bin-06): 1715 lbs\n  - feed-bin weight (feed-bin-07): 935.7 lbs\n  - feed-bin weight (feed-bin-08): 78.8 lbs\n  - feed-bin weight (feed-bin-09): 1583.1 lbs\n  - feed-bin weight (feed-bin-10): 541.8 lbs\n  - feed-bin weight (feed-bin-11): 1072 lbs\n  - feed-bin weight (feed-bin-12): 1892.3 lbs\n\n## Conditions now, read in this same sweep\n\n  (The standing orders below ask about the weather and the yard fuel. These are the nearest such sensors to this one on the ranch map, read in the same sweep as the incident. None of them is a forecast: each is one current reading, so say what it shows now and treat what is coming as unknown.)\n  - wind speed (met-tower-wind, at Wind Met Tower): 38.6 mph\n  - air temperature (alkali-flat-temp, at Alkali Flat): 59.6 F\n  - snow depth (weather-station-snow, at Weather Station): 3.5 in\n  - bulk fuel level (home-place-diesel, at Home Place): 4.2%\n\n## What is standing behind it\n\n  (no pasture is mapped to Feed Room; it is a site rather than grazing ground)\n\n## The standing orders that apply (feed.md)\n\n# SOP: Feed and winter access - the production world\n\nDerived from `docs/sweetwater-ranch.md`. Same rule as `water.md`: these rules are the only\nones that may be cited, and a rule that is not written here does not exist.\n\n**The standing order:** reserves before a storm. Feed is the half of `water_feed` that runs\non a longer clock than water, which is exactly why it is the half that gets discovered late.\nA bin nobody looked at in October is a phone call in January.\n\nIrrigated hay off the meadows is one of the ranch's revenue lines as well as its feed\nsupply, so what is in the bins is inventory with a sale price, not just forage.\n\n---\n\n## FEED-01 - A bin at the critical line means a feeding gets missed\n\n**Applies to:** `feed_low`, severity `critical`.\n\n1. **Fill it today.** The cattle on this bin miss a feeding otherwise, and a missed feeding\n   in cold weather shows up as condition loss that takes months to put back on.\n2. Name the location and the head count it serves. Which bin gets the loader first is\n   decided by that number.\n3. **Check the bulk fuel behind the fill.** The loader and the feed truck both draw on the\n   yard tank, and a fuel delivery out here is not a same-day thing. If fuel is also low,\n   say so in this work order rather than letting it arrive as a separate surprise.\n\n## FEED-02 - A bin at the warning line is a delivery to schedule, not a fire\n\n**Applies to:** `feed_low`, severity `warning`.\n\n1. The bin is into its reserve. Schedule the fill, and schedule it against the forecast\n   rather than against the calendar.\n2. **Weather is what turns this from routine into urgent.** A bin at reserve with snow or\n   hard cold coming is a today problem. The same bin under a clear week is a Thursday\n   problem. Say which one you think it is and why.\n\n## FEED-03 - Deep snow removes feed access and truck access at the same time\n\n**Applies to:** `deep_snow`, any severity, on a `snow-depth` sensor.\n\n1. **Warning:** cattle stop pawing through to grass at this depth and start living entirely\n   on what is hauled to them. Consumption steps up immediately, so the bins that looked fine\n   yesterday are now on a shorter clock.\n2. **Critical:** vehicle access to the far pastures is gone along with the feed access.\n   Check reserves at the far bins first, because those are the ones that cannot be topped up\n   once the two-tracks drift shut.\n3. **Do not write this as a snow report.** The finding is about reserves and routes. Depth\n   is the reason, not the work order.\n\n## FEED-04 - Feed and water are one agent on purpose\n\nAn animal short of water will not eat, and an animal short of feed drinks differently. If\nthe packet shows a feed problem and a water problem at the same location, write one work\norder that names both and says which one the crew fixes first. Two separate orders for the\nsame pasture is how the second one gets ignored.\n\n---\n\n## The two things never to write in a feed work order\n\n1. **An all-clear.** Code flagged this bin before the packet existed.\n2. **A number nobody measured.** Days of feed remaining, herd consumption rates, and\n   delivery lead times are not in the packet. Quote the weight that is, and say the rest is\n   unknown."
+  },
+  "system": "You are a working sub-agent on Sweetwater Land & Cattle Co., a fourth-generation Wyoming cattle ranch of roughly 34,000 acres and roughly 1,000 mother cows, run by a small year-round crew with long driving distances between places. Your output is read by a person who is about to get in a truck.\n\nYou are handed one evidence packet, already assembled. There is nothing to go look up and no tools to call. Everything you may rely on is on the page in front of you. Judge it and write the work order.\n\nFour rules, all of which outrank anything else in your brief.\n\n1. SEVERITY IS NOT YOURS. The packet's severity was decided in code by threshold rules before you were called. Echo it back exactly as given. Do not re-rank it, do not soften it, do not argue with it, and do not decide the sensor is probably fine. If the evidence genuinely contradicts the ranking, say so in one sentence inside your assessment and still echo the severity you were given.\n\n2. NEVER WRITE AN ALL-CLEAR. Code already found something wrong here. \"Nothing appears to be wrong\" is not a finding, it is a contradiction, and on this ranch it is the specific output that gets animals killed. If the packet is thin, write what is known, name what is unknown, and send someone to look.\n\n3. QUOTE ONLY WHAT IS ON THE PAGE. Every number in your output must appear in the packet, and you must name the sensor it came from. Do not estimate gallons, fill rates, days of feed remaining, drive times, or head counts that are not printed. If you need a number the packet does not have, put the need in `unknowns` instead of filling it in. An invented number reads as authority and carries none, and the crew cannot tell yours from a measured one.\n\n   Two specific traps on this page:\n   - The reading under \"the incident\" is the authoritative current value. The recent-readings series is generated separately and does NOT include it, so use that list only for the operating range and the trend. Never quote the top of the series as \"current.\"\n   - The packet states its absences in words (\"no pasture is mapped to...\", \"none available: ...\"). A stated absence is a gap, not a fact. Do not reason from it as though it were zero.\n\n4. CITE THE RULE YOU ACTED ON. Every action traces to a rule id from the standing orders at the bottom of the packet, quoted exactly as written there (for example `WATER-01`). If no rule covers what you are recommending, say that plainly instead of citing a rule id that does not exist. An invented rule id is worse than no citation, because the next person goes looking for it.\n\nHow to actually read the packet, in this order:\n- The incident, and the reading against its line. That is the fact.\n- The other sensors at the same location, read in the same sweep. This is where the diagnosis usually is: a second tank on the same ground reading full points at that tank rather than at the supply, and a hot air temperature next to a falling one changes what the falling one means.\n- What is standing behind it. The head count is why one job goes before another, so put it in the work order when it is there.\n- The standing orders. They decide what the crew does. The packet decides what is true.\n\nWrite the way the crew talks: short, concrete, no hedging, no restating the packet back. Name the place, name the sensor, say what to do first. No em dashes.\n\nYOUR PATCH: water and feed. Stock tanks, wells and windmills, feed bins, and the two weather readings that change what a tank or a bin means (temperature for freeze and heat, snow depth for access).\n\nWater is not like the other sensing worlds here. A dry tank is not a degradation, it is a countdown: cattle drink 15 to 20 gallons a head a day and closer to double that over 90 degrees, there is no reserve behind a stock tank, and the nearest fix is a human in a truck who may be an hour out. The crew would rather be sent to a full tank by mistake than not sent to an empty one. Write accordingly.\n\nFeed runs on a longer clock and is therefore the half that gets found late. A bin at reserve with weather coming is a today problem and the same bin under a clear week is not, so say which one you think it is and why.\n\nTwo things that are not yours, and saying so is part of the job:\n- A sensor you cannot believe (offline, degraded, or reading outside physical possibility) is `infrastructure`'s repair. But the pasture behind it is now unmonitored, and that IS your fact. Say it and get eyes on the tank.\n- Creek and stream flow is `compliance`'s, scored for habitat and conservation payments. It is not stock water and does not substitute for it in either direction.\n\nTHE `proposed_write` FIELD. Almost always leave `tool` as an empty string with empty `args`. Use it only when a change to the ranch's own records is the correct next step and the standing orders support it, and know that it is a proposal: a person reads it and approves or rejects it before anything runs, and the crew's actions in your list do not depend on it. If you do name one, every id and every quantity must be on this page exactly, and an argument that is not on the page is rejected in code. The tools you may name, and nothing else:\n- consume_feed(sku: an id printed on this page, quantity: a number printed on this page, reason: free text, optional)\n- restock_feed(sku: an id printed on this page, quantity: a number printed on this page, reason: free text, optional)",
+  "summary": {
+    "before": {
+      "calls": 3,
+      "insufficient_information": 2,
+      "shipped": 3,
+      "rejected": 0,
+      "no_answer": 0,
+      "input_tokens": [
+        2993
+      ],
+      "latency_s": [
+        15.9,
+        4.1,
+        3.6
+      ],
+      "unknowns_named": [
+        "Head count serving Feed Room",
+        "Need weather data to determine if feed-bin-03 fill is a today problem or a Thursday problem.",
+        "availability of fuel for loader and feed truck",
+        "head count served by feed-bin-03"
+      ],
+      "weather_or_fuel_in_prose": 2
+    },
+    "after": {
+      "calls": 3,
+      "insufficient_information": 0,
+      "shipped": 3,
+      "rejected": 0,
+      "no_answer": 0,
+      "input_tokens": [
+        3158
+      ],
+      "latency_s": [
+        5.0,
+        6.9,
+        4.3
+      ],
+      "unknowns_named": [
+        "Head count for the Feed Room area is unknown.",
+        "head count for Feed Room"
+      ],
+      "weather_or_fuel_in_prose": 3
+    }
+  },
+  "runs": {
+    "before": [
+      {
+        "finish_reason": "stop",
+        "latency_ms": 15881,
+        "input_tokens": 2993,
+        "output_tokens": 336,
+        "status": "ok",
+        "violations": [
+          "rule_citation_trimmed"
+        ],
+        "insufficient_information": true,
+        "unknowns": [
+          "Head count serving Feed Room"
+        ],
+        "rules_cited": [
+          "FEED-02"
+        ],
+        "actions": [
+          "Schedule fill for feed-bin-03 at Feed Room. Check the bulk fuel behind this bin.",
+          "Check the feed-bin weight for feed-bin-01 (227.2 lbs), feed-bin-08 (78.8 lbs), and feed-bin-05 (246.5 lbs) for similar scheduling needs."
+        ],
+        "assessment": "Feed-bin-03 weight is 36.5 lbs, which contradicts the general expectation of routine operation as it is below the warning line of 500 lbs. There is no weather data provided for the Feed Room, so the urgency cannot be determined from the forecast. The current head count is unknown.",
+        "error": ""
+      },
+      {
+        "finish_reason": "stop",
+        "latency_ms": 4084,
+        "input_tokens": 2993,
+        "output_tokens": 399,
+        "status": "ok",
+        "violations": [
+          "rule_citation_trimmed"
+        ],
+        "insufficient_information": true,
+        "unknowns": [
+          "head count served by feed-bin-03",
+          "availability of fuel for loader and feed truck"
+        ],
+        "rules_cited": [
+          "FEED-02"
+        ],
+        "actions": [
+          "Contact supervisor. Schedule feed-bin-03 at Feed Room for fill.",
+          "Check bulk fuel behind feed-bin-03. Use FEED-01 guidelines for fuel check."
+        ],
+        "assessment": "Feed-bin weight at Feed Room is 36.5 lbs, below the warning line of 500 lbs. The recent history shows consumption from 685.5 lbs to 36.5 lbs. This evidence contradicts the severity ranking. The next reading was 645 lbs, suggesting the drop is not linear, but the current low reading requires action. The weight on feed-bin-03 is 36.5 lbs. The operating range for feed-bin weight is 227.2 lbs (feed-bin-01) to 1892.3 lbs (feed-bin-12).",
+        "error": ""
+      },
+      {
+        "finish_reason": "stop",
+        "latency_ms": 3564,
+        "input_tokens": 2993,
+        "output_tokens": 320,
+        "status": "ok",
+        "violations": [
+          "rule_citation_trimmed"
+        ],
+        "insufficient_information": false,
+        "unknowns": [
+          "Need weather data to determine if feed-bin-03 fill is a today problem or a Thursday problem."
+        ],
+        "rules_cited": [
+          "FEED-02"
+        ],
+        "actions": [
+          "Feed Room: Schedule feed-bin-03 fill. Use rule FEED-02."
+        ],
+        "assessment": "feed-bin weight at Feed Room is 36.5 lbs, below the warning line of 500 lbs. The evidence contradicts the ranking because there is no current weather information to determine if this is a today problem or a Thursday problem. Proceed with scheduling a fill per FEED-02.",
+        "error": ""
+      }
+    ],
+    "after": [
+      {
+        "finish_reason": "stop",
+        "latency_ms": 4968,
+        "input_tokens": 3158,
+        "output_tokens": 422,
+        "status": "ok",
+        "violations": [
+          "rule_citation_trimmed"
+        ],
+        "insufficient_information": false,
+        "unknowns": [
+          "head count for Feed Room"
+        ],
+        "rules_cited": [
+          "FEED-02"
+        ],
+        "actions": [
+          "Schedule the fill for feed-bin-03 in Feed Room. This is a reserve fill, not a fire.",
+          "The current weather readings (air temperature at Alkali Flat: 59.6 F; snow depth at Weather Station: 3.5 in) suggest a condition that requires immediate attention. I recommend treating this as a today problem because of the low feed weight reading.",
+          "Check the bulk fuel level at Home Place: 4.2%."
+        ],
+        "assessment": "The weight sensor feed-bin weight (feed-bin-03) at Feed Room reads 36.5 lbs, which is below the warning line of 500 lbs. The current air temperature at Alkali Flat is 59.6 F and the snow depth at Weather Station is 3.5 in. The packet does not contain head count information for Feed Room. I contradict the severity ranking because the weight is critically low compared to the warning line, but I must echo the given severity of WARNING.",
+        "error": ""
+      },
+      {
+        "finish_reason": "stop",
+        "latency_ms": 6887,
+        "input_tokens": 3158,
+        "output_tokens": 700,
+        "status": "ok",
+        "violations": [
+          "rule_citation_trimmed"
+        ],
+        "insufficient_information": false,
+        "unknowns": [
+          "Head count for the Feed Room area is unknown."
+        ],
+        "rules_cited": [
+          "FEED-02",
+          "FEED-03"
+        ],
+        "actions": [
+          "Feed Room: Schedule fill for feed-bin-03 immediately. Advise crew that because snow depth (weather-station-snow, at Weather Station) is 3.5 in, this is a today problem per FEED-02.",
+          "Check bulk fuel behind fill: Confirm fuel availability. Due to the immediate need for feed, check home-place-diesel level (4.2%).",
+          "Check other bins: Check feed-bin-08 (78.8 lbs) and feed-bin-05 (246.5 lbs) as they are near the lower end of the reserve. Do not prioritize over feed-bin-03."
+        ],
+        "assessment": "feed-bin-03 weight is 36.5 lbs. Other bins at Feed Room are reading: feed-bin-01 at 227.2 lbs, feed-bin-02 at 1510.7 lbs, feed-bin-04 at 1421.3 lbs, feed-bin-05 at 246.5 lbs, feed-bin-06 at 1715 lbs, feed-bin-07 at 935.7 lbs, feed-bin-08 at 78.8 lbs, feed-bin-09 at 1583.1 lbs, feed-bin-10 at 541.8 lbs, feed-bin-11 at 1072 lbs, feed-bin-12 at 1892.3 lbs. The bulk fuel level (home-place-diesel, at Home Place) is 4.2%. Because snow depth (weather-station-snow, at Weather Station) is 3.5 in, this is an immediate concern under FEED-02 and FEED-03. The evidence does not contradict the warning ranking.",
+        "error": ""
+      },
+      {
+        "finish_reason": "stop",
+        "latency_ms": 4332,
+        "input_tokens": 3158,
+        "output_tokens": 405,
+        "status": "ok",
+        "violations": [
+          "rule_citation_trimmed",
+          "write_shape_invalid"
+        ],
+        "insufficient_information": false,
+        "unknowns": [
+          "head count for Feed Room"
+        ],
+        "rules_cited": [
+          "FEED-02",
+          "FEED-01"
+        ],
+        "actions": [
+          "Schedule the fill for feed-bin-03. The bin is into its reserve. Weather is not indicating a freeze or immediate hard cold, so this is a Thursday problem. Service area head count is unknown.",
+          "Check the bulk fuel behind the fill. The bulk fuel level (home-place-diesel) is 4.2%."
+        ],
+        "assessment": "The reading of 36.5 lbs from feed-bin-03 is contradicted by the historical reading of 685.5 lbs from the same sensor at 2026-09-12T14:50:56.503Z, which is the authoritative current value. The immediate action must still follow the warning level protocol.",
+        "error": ""
+      }
+    ]
+  }
+}

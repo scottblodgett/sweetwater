@@ -44,36 +44,40 @@ Three wins from one decision, which is usually the sign a decision is right.
 
 | Tier | Model | Jobs | Why it is safe |
 | --- | --- | --- | --- |
-| **1, default** | local, `gemma4:e4b` via Ollama | **the per-incident work order**: judge one assembled evidence packet and write what to do, in one call, for every incident the predicate below does not claim | Nothing here classifies. Code already ranked severity, code assembled the page, code checks the answer, and a human reads it. |
-| **2, escalation** | Opus | **the fused shift report** when two or more sensing worlds opened incidents in one tick; the work order for a **critical** incident; the rewrite of any work order Tier 1 got **rejected** on, said **`insufficient_information`** on, or **proposed a write** in | These decide what is *true* across worlds, or they are the write-up on the worst incident, or they would mutate a real ranch. |
+| **1, first** | local, `gemma4:e4b` via Ollama | **the per-incident work order** at every severity (M10), **the fused shift report** when two or more worlds opened incidents (M10), and **the investigator**, a bounded tool loop that fires only when the local judge said `insufficient_information` (M10, ships off) | Nothing here classifies. Code already ranked severity, code assembled the page, code checks the answer (the rails, and from M10 the `linked` enum), and a human reads it. |
+| **2, escalation** | Opus | the rewrite, from the identical page, of any work order or report Tier 1 got **rejected** on, said **`insufficient_information`** on (after the investigator, when on), **proposed a write** in, or gave **no answer** to; and any page too long for the local window (**`page_too_long`**, the one pre-call reason) | These are the answers the cheap judge could not give, or would mutate a real ranch, or could not be read whole locally. |
 
 **Corrected at M7, before anything moved.** The table used to list four Tier-1 jobs. Two of them
 do not exist: *chaos observation prose* (M5 made chaos pure code, no model anywhere in it) and
 *shift-report assembly* (`assemble_shift_report` is the code path a calm tick already runs for
 free). Packet judging and the work-order write were listed as two jobs and are one call, and have
-been since M2. There are exactly **two model jobs in this repo**: the per-incident work order and
-the fused shift report. The ledger's pending rows below were rewritten to name them.
+been since M2. **Inverted at M10.** Until then the table sent critical incidents and the fused
+report to Opus before asking; M10 asks Tier 1 first for both, on Scott's call that severity is
+code's and the rails hold at every severity, and added the third job. There are exactly **three
+model jobs in this repo**: the per-incident work order, the fused shift report, and the
+investigator.
 
 ## The escalation predicate
 
 Per incident. Fires when **any** holds, and the reason is logged on the work order and summed
 into `tick.jsonl` as `escalation_reasons`.
 
-1. `triage.py` marked the incident **critical** (known before the call; Tier 1 is never asked)
-2. the Tier-1 answer failed a **blocking rail** (`all_clear`, `severity_mismatch`, `invented_rule`, `no_payload`, `schema_invalid`)
-3. the Tier-1 judge returned **`insufficient_information`** (a field it may set on purpose; a model allowed to say "I do not know" says it instead of inventing)
+1. the prompt does not fit the local window: **`page_too_long`** (known before the call and code's: `routing.fits_tier1` at a conservative 3.0 chars per token against `num_ctx` less the answer budget and a margin; Ollama truncates a long prompt from the front and the model cites what it never read). Until M10 this slot was **critical**, and it is not any more
+2. the Tier-1 answer failed a **blocking rail** (`all_clear`, `severity_mismatch`, `invented_rule`, `no_payload`, `schema_invalid`; for the report, `invented_incident`, `all_clear`, `schema_invalid`)
+3. the Tier-1 judge returned **`insufficient_information`** (a field it may set on purpose; a model allowed to say "I do not know" says it instead of inventing). From M10, when the investigator is on, this reason runs the loop first and only a page still thin after one re-judge reaches Opus
 4. the Tier-1 answer **proposed a write** (only a Tier-2 proposal may reach the gate)
+5. the Tier-1 call **never answered** (transport, truncation)
 
-Conditions 2 to 4 are known only after the cheap call, so escalation is a **rewrite**: Opus gets
-the identical page and writes its own work order; the Tier-1 answer is kept in `agent.jsonl` as
-the receipt and the Tier-2 order is the one stored. Nothing is retried at the same tier.
+Conditions 2 to 5 are known only after the cheap call, so escalation is a **rewrite**: Opus gets
+the identical page and writes its own work order or report; the Tier-1 answer is kept in `agent.jsonl`
+as the receipt and the Tier-2 order is the one stored. Nothing is retried at the same tier.
 
 **"Two or more sensing worlds opened incidents" is not a per-incident trigger.** The plan had it as
 one, and it was dropped at M7 on Scott's reasoning: the world count says nothing about what one
 packet contains, and applying it per incident would send every work order on every storm tick to
 Opus, which is precisely the bill M7 exists to cut. What the world count actually decides is whether
-the tick needs someone reading *across* the ranch, and that is the fused shift report, already gated
-at `FUSION_THRESHOLD = 2` and already Tier 2. One constant, one meaning.
+the tick needs someone reading *across* the ranch, and that is the fused shift report, gated at
+`FUSION_THRESHOLD = 2` and, from M10, a Tier-1 call first like everything else. One constant, one meaning.
 
 **Cost shape that falls out:** a calm ranch costs approximately nothing and a storm costs
 real money. That is "cost scales with change, not wall-clock" arriving as a side effect
@@ -241,12 +245,63 @@ One row per job that moved tiers. No row, no move.
 | 2026-09-11 | **the per-incident work order** (packet judging plus the write, one call), `gemma4:e4b` on Ollama for every incident the predicate does not claim | Tier 2 | Tier 1, **measured and not adopted** | 3 ticks on `SW_OPS_TARGET=test` after a warm-up, cascade on, every local order shadowed by Opus on the identical page (`docs/transcripts/m7-compare-transcript.md`). 12 opened, 12/12 shipped, 0 rejected, **0 all-clears, 0 invented rules**, sensor named and reading quoted 12/12. 6 were critical and went straight to Opus. Of the 6 Tier-1 candidates, **5 escalated on `insufficient_information`** and 1 stayed local, so the cascade saved 1 call in 12. On the 6 pairs, local named the flagged neighbour on 1 of 3 pages that had one (Opus 3 of 3), the head count on 1 of 4 (Opus 4 of 4), cited the more specific rule less often (SENSOR-01 alone where Opus added SENSOR-05; SENSOR-05 where Opus led with SENSOR-02), and padded actions with echoes of its own brief on 3 of 6 ("In the work order, name Calving Pasture and 111 head"). 3,024 to 4,207 tokens in against `num_ctx` 16,384; 5.6 to 13.3s a call warm, 22s cold; $0.74 for the three ticks at Opus's real rate, shadows excluded | **no move. `TIER1_ENABLED` ships off.** Not because the local model was unsafe (the rails never fired on it) but because it was thin about exactly the two things on the page that matter, and because it escalated 5 of 6 on its own, which leaves nothing to save. The row is the bar for the next attempt |
 | 2026-09-11 | **the fused shift report** | Tier 2 | Tier 2 | not measured at Tier 1 on purpose: it is the one call that decides what is true across worlds, and the design table's Tier-1 note was about `assemble_shift_report`, which is code. Fused twice in the three ticks, 0 violations | **stays.** By decision rather than by measurement |
 | 2026-09-11 | **the herd order** (M7A: `deceased`, `care_overdue`, the same per-incident job on a cow's page), `herd_health` | - | Tier 2 | 10 herd orders across four paid ticks on the test ledger, 9 shipped, 1 rejected (`severity_mismatch` plus `write_shape_invalid`, tick C). 6,800 to 7,000 tokens in per packet, the SOP the majority as everywhere. Every shipped order named the animal by id and tag, quoted the observation verbatim, cited `HERD-01` or `HERD-04` plus `HERD-05`; the deceased orders escalated to the GM on the predator note. `proposed_write` null on 7 of 7 until `HERD-07` gave the model a legitimate note to record, then 1 of 1 proposed and paused. About $0.06 per herd order | **Tier 2, by the predicate.** `deceased` is critical and goes to Opus before the call; `care_overdue` is a warning and would be a Tier-1 candidate when the cascade is next tried. Not measured at Tier 1: the cascade ships off and the herd page is new |
+| 2026-09-12 | **the feed page's missing fact** (#12): the weather and the yard fuel on the feed page, from the same sweep, zero HTTP | - | none (a page change) | Offline replay on `gemma4:e4b`, $0: the real `feed-bin-03` packet built live, judged 3 times with the block stripped and 3 times with it. **`insufficient_information` 2 of 3 before, 0 of 3 after**; weather or fuel reasoned about in the prose 2 of 3 before, 3 of 3 after; +165 tokens a page. The remaining unknown was the Feed Room's head count, which is honest: it is a site, not a pasture. Live, the two feed orders that stood locally in run B named the snow and the cold (`-24.7 F and 7.6 in snow`) | **#12 closed.** The page was what was wrong, as the M7 row said; a fact the SOP asks for now sits on the page and the local judge stops saying it cannot answer |
+| 2026-09-12 | **the investigator**, a bounded LangGraph tool loop on `gemma4:e4b` through `langchain-mcp-adapters`, fired by `insufficient_information` at Tier 1 | - | Tier 1, **measured and shipped off** | 28 live loops across the two M10 runs (15 in run A, 13 in run B), every one logged turn by turn. **Cured 0 of 28**: no enriched page came back without `insufficient_information`. Outcomes: `no_tool_calls` 19, `answered` 7, `error` 1 (an MCP `ConnectTimeout` at session open). `no_tool_calls` is the model writing its tool calls as text (`get_animal{animalId:<|"|>cow-0777<|"|>}`), which Ollama did not parse into `tool_calls`; `answered` loops reached for `list_sensors` whole (36k characters, cut to 4k by the interceptor) on 6 of 7 before touching anything else, then read the incident's own sensor, which the brief forbade. 0 write attempts, 0 step ceilings, 0 deadlines; 20 to 40 s a loop, 3,000 to 30,000 tokens in. And the unknowns the judge listed were mostly not on any endpoint: how long a sensor has been dark (`get_sensor_readings` on an offline sensor returns an empty series), the power source behind a fence, a site's head count | **Ships off** (`INVESTIGATOR_ENABLED=0`). Not because it was unsafe (the belt was never tested by a write attempt, the ceilings never hit) but because it did nothing for 20 to 40 s a page. Two things would change the next attempt: a local model whose tool calls Ollama parses (`qwen3.5:9b` is pulled and untried), and the honest finding that `insufficient_information` on this ranch is mostly about facts the ranch does not record, which no loop fetches |
+| 2026-09-12 | **the tiers inverted**: the work order at every severity and the fused report, Tier 1 first, Opus by escalation | Tier 2 for critical and the report | Tier 1 first, **recommendation below** | Run A, 9 ticks with `TIER_COMPARE=1`: 31 opened, 31 shipped, **17 written locally (55%)**, 14 escalated (13 `insufficient_information`, 1 `proposed_write`), 4 fused reports all rewritten by Opus on `invented_incident` (prose in `linked`). Run B, 5 ticks, compare off, after the `linked` enum: 22 opened, 22 shipped, **9 local (41%)**, 13 escalated, all `insufficient_information`; **2 of 2 fused reports written locally and rail-clean**. Across both runs 26 stored local orders: 0 all-clears, 0 invented rules, 0 severity mismatches, 0 unnamed sensors, 26 shipped; 17 of 26 had a write proposal stripped (`write_tool_not_allowed` / shape: the local model names tools its slice does not have) against 0 of 27 Opus orders. Run A's 27 pairs on identical pages: subject named 27/27 both, reading quoted 21/21 both, the flagged neighbour named **11 of 17 vs 17 of 17**, the head count **12 of 21 vs 21 of 21**, rules cited 38 vs 55. Calls: 71% local in A, 78% in B. Dollars: run B **$0.80 for 22 orders and 2 reports** against about $1.48 all-Opus at the measured per-call rates, so **about half**; run A's lines read $1.11 and its shadows cost another $1.01. The first rail-clean local report (run B tick 2, 16 orders) had a paragraph for a headline, bold labels on the priorities, one mislabelled fact (a temperature incident called a tank level), and linked the right two keys. `unverified_number` fired once in 6 model reports, on **Opus**, for `-20 F` where the page said `-20.3 F` | **Inverted and measured; `TIER1_ENABLED` still ships off pending Scott's call at the M10 check-in, recommendation on.** The bar M7 set had two parts. "It escalates so much there is nothing to save" is cleared: 41% to 55% of orders and the fused report stand locally and the bill halves. "Thin about the neighbour and the herd" is not: a third of the pages with a flagged neighbour and half with a head count lose them, and no rail can see that (the M3 finding). The flip is one line; the row is what it costs |
 
 The first three rows are what the M7 rows are measured against, which is why they exist at all
 in a table that says "one row per job that moved tiers." Nothing moved; a floor was
 established, and at M7 the floor held.
 
-## What M7 measured, and why the cascade ships off
+## What M10 measured, and the verdict
+
+The build was inverted from its intent until M10: the aggregation job was hardcoded to Opus, the local
+model got the warning-severity orders and escalated most of them, and the adapter that hands a model its
+tools was pinned and unimported. M10 did three things in order and measured each: put the weather and the
+yard fuel on the feed page (#12), built the investigator, and inverted the tiers. Two live runs on the
+test ledger, seed 1, chaos on, the same ranch both times.
+
+| | run A (`TIER_COMPARE=1`) | run B (compare off, after the `linked` enum) |
+| --- | --- | --- |
+| ticks / opened / shipped | 9 / 31 / 31 | 5 / 22 / 22 |
+| written locally | 17 (55%) | 9 (41%) |
+| escalated, and why | 14: `insufficient_information` 13, `proposed_write` 1 | 13: `insufficient_information` 13 |
+| fused reports: local and clean / rewritten by Opus | 0 / 4 (`invented_incident`, prose in `linked`) | **2 / 0** |
+| investigations: answered / no tool calls / error, cured | 5 / 9 / 1, **0** | 2 / 11 / 0, **0** |
+| model calls, local share | 119, 71% | 58, 78% |
+| dollars on the tick lines / shadows / total | $1.11 / $1.01 / $2.12 | $0.80 / none / $0.80 |
+| wall clock, storm tick | 185 s | 157 s |
+
+**What held.** Every rail. 26 local orders stored across both runs and none was an all-clear, none
+invented a rule, none disagreed with triage, every one named its sensor or its animal and quoted the
+reading. The `linked` enum turned a 0-for-4 local supervisor into 2-for-2 on the next run, and the rail
+behind it is still there. The step ceiling, the deadline, and the write belt were never reached by a
+model that never got that far, and each has a planted test.
+
+**What did not.** The investigator cured nothing in 28 tries. The local model wrote its tool calls as
+prose on 19 of them and Ollama did not parse them; where it did call tools it fetched the whole sensor
+catalogue first; and most of what the judge said it lacked (how long a sensor has been dark, what powers
+a fence, how many head stand at a feed room) is not on any endpoint the ranch has. **A loop cannot fetch
+what nobody records.** `INVESTIGATOR_ENABLED` ships off and the row says what the next attempt changes.
+
+**What is true about the cascade now.** With the tiers inverted the local model writes 41% to 55% of
+the stored orders and, with the enum, the fused report, and the bill is about half of all-Opus at the
+same incident count. The loss is the one M7 named and no rail can see: on the pages that carried a flagged
+neighbour or a head count, the local order left them out a third to half of the time and Opus never did;
+17 of 26 local orders also named a write tool their slice does not have, stripped in code, against 0 of 27
+for Opus. `insufficient_information` at 13 of 22 is the other half of the story: the local judge says it
+where the schema's own description says not to, and the investigator was meant to be the answer to that
+and was not. **`TIER1_ENABLED` still ships off, pending Scott's call at the M10 check-in.** The
+recommendation is on: half the bill, every safety rail holding, and a known, written-down quality loss on
+the fields a rancher reads the order for. The flip is one line in `config.py` and this paragraph is what it
+buys and what it costs.
+
+**The bill for the phase.** About $3.50 on Opus against an estimate of $1.00 to $1.25: run A ran nine
+ticks instead of four because its loop survived a kill that reported success (`docs/cookbook.md` #49),
+and the first attempt at run B shared the ledger with it for one tick before that was found. The runaway
+ticks are in the ledger as data; the contaminated tick's logs were discarded.
+
+## What M7 measured, and why the cascade shipped off at M7
 
 Everything in the design above is built: `routing.tier_for`, the predicate as a post-call rewrite,
 the price table, `call_tier1` on `ChatOllama`, `TIER_COMPARE` for the side-by-side, and the tick
