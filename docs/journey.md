@@ -194,7 +194,7 @@ but `east-allotment-water` cited only `WATER-02`. Worth watching, not a defect.
 ### Divergence: the credential is Bedrock, not first-party Anthropic
 
 `ANTHROPIC_API_KEY` was empty and `docs/state.md` called it a hard M2 blocker. It was not
-one: this session authenticates to Bedrock (`us-east-1`, `us.anthropic.claude-opus-5`), so
+one: Bedrock is a second way to the same model (`us.anthropic.claude-opus-5`), so
 `resolve_provider()` picks first-party when a key exists and Bedrock otherwise, scoping the
 model id on the Bedrock path only so `TIER2_MODEL` stays one setting for both.
 `AsyncAnthropic` and `AsyncAnthropicBedrock` expose an identical `messages.create`, so this

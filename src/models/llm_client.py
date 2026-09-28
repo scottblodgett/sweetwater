@@ -21,9 +21,9 @@ gets, and what escalates, is `src/models/routing.py`'s; this module only knows h
 
 ## Two credentials, one call path
 
-`ANTHROPIC_API_KEY` is one way to reach Opus and it is not the only one. This machine runs
-under `CLAUDE_CODE_USE_BEDROCK=1` with session-scoped AWS credentials, so the working
-credential today is AWS, not an Anthropic key. Both are served by the same SDK
+`ANTHROPIC_API_KEY` is one way to reach Opus and it is not the only one. AWS Bedrock serves
+the same models to callers who already have AWS credentials, which in an enterprise is more
+often true than an Anthropic key being provisioned. Both are served by the same SDK
 (`AsyncAnthropic` and `AsyncAnthropicBedrock` expose an identical `messages.create`), so
 provider selection is a constructor choice and nothing downstream changes shape.
 
@@ -32,7 +32,7 @@ leaves you guessing which credential answered:
 
   1. an explicit `api_key` argument,
   2. `ANTHROPIC_API_KEY` from the environment,
-  3. this session's AWS credentials, via Bedrock.
+  3. ambient AWS credentials, via Bedrock.
 
 Bedrock prefixes the model id by region scope (`us.anthropic.claude-opus-5`); the
 first-party API does not (`claude-opus-5`). `TIER2_MODEL` stays the first-party spelling

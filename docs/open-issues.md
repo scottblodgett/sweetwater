@@ -36,7 +36,7 @@ the box. A day to set up, plus a real API key (#6). No database change.
 ### 6. A real Anthropic API key
 
 **What has not been done.** `ANTHROPIC_API_KEY` in `.env` is empty. The loop bills Opus through AWS
-Bedrock using this machine's temporary session credentials, which expire after hours.
+Bedrock on short-lived credentials, which expire in hours.
 
 **Why it matters.** A run meant to last days will lose its credential mid-run. The loop survives that
 (the affected incidents are held and retried), but it stops writing work orders until someone logs in
