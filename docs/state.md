@@ -106,7 +106,7 @@ Refreshed at every milestone boundary, same step as `journey.md`. If it disagree
 
 ## The boundary rule, sharpened
 
-`scott-jasper/mcp-farm` is the frozen upstream. A local clone exists at `C:\temp\MCP-Farm`. **Do not read it.** The 19 tools, the `ranch://sensors/map` resource, and the four REST APIs are the contract; that repo's source is not. Constants copied out of its internals are values nothing here can verify and that fail silently when they drift. Everything needed is reachable over the wire or already written down in this repo. Learned the hard way on 2026-09-10 by doing exactly that and retracting it: `docs/cookbook.md` #5. When a fact about the upstream is genuinely unknown, learn it from a 422 against a nonexistent id (cookbook #17), never from the other repo.
+The separate `mcp-farm` repository is the frozen upstream. A local clone exists at `C:\temp\MCP-Farm`. **Do not read it.** The 19 tools, the `ranch://sensors/map` resource, and the four REST APIs are the contract; that repo's source is not. Constants copied out of its internals are values nothing here can verify and that fail silently when they drift. Everything needed is reachable over the wire or already written down in this repo. Learned the hard way on 2026-09-10 by doing exactly that and retracting it: `docs/cookbook.md` #5. When a fact about the upstream is genuinely unknown, learn it from a 422 against a nonexistent id (cookbook #17), never from the other repo.
 
 ---
 

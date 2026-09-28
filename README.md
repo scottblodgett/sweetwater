@@ -15,8 +15,8 @@ One orchestrator runs continuously, driving **five sub-agents**:
 | `chaos` | breaks the ranch on purpose, so the other four have real work |
 
 The ranch itself is **already deployed** (four REST APIs plus an MCP server on Lambda,
-`scott-jasper/mcp-farm`) and is frozen and read-only from here. This repo is the part that
-thinks.
+built in a separate project) and is frozen and read-only from here. This repo is the part
+that thinks.
 
 ## Quick start
 

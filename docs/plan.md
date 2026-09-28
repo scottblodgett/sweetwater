@@ -14,7 +14,7 @@ What gets built is the part that does not exist yet: **one orchestrator running 
 
 |                |                                                                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Repo           | `scott-jasper/sweetwater`, local `C:\temp\sweetwater`. New repo; MCP-Farm untouched.                                                                         |
+| Repo           | `scottblodgett/sweetwater`, local `C:\temp\sweetwater`. New repo; MCP-Farm untouched.                                                                        |
 | Structure      | The canonical layout from your diagram, mapped 1:1. `requirements.txt`, `pyproject.toml`, `src/{agent,tools,models,prompts,utils,api}`, `tests/`, `data/`, `logs/`, `main.py`. `web/` (M9) is the window, its own npm project, not a workspace. |
 | Language       | Python **3.11.9**. 3.12 is not installed on this machine and 3.14 breaks native wheels. Next.js for the window only.                                          |
 | Agents         | Orchestrator + **five**: `water_feed`, `herd_health`, `infrastructure`, `compliance`, `chaos`.                                                               |
@@ -155,7 +155,7 @@ directory file, with a `paths:` glob; nothing has needed one yet.
 ranch.
 
 **Is not:** the ranch. The four REST APIs and the MCP server are already deployed on
-Lambda, live in `scott-jasper/mcp-farm`, and are **frozen and read-only** from here. 19
+Lambda, live in the separate `mcp-farm` repository, and are **frozen and read-only** from here. 19
 flat-named tools plus the `ranch://sensors/map` resource are the entire surface. This
 repo adds nothing to them.
 
