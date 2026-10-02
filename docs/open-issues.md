@@ -127,6 +127,43 @@ injury note stays on her record forever because the Care API is append-only; the
 
 **Who decides.** Scott, on whether the demo needs the cohort to survive a kill intact. Not urgent.
 
+### 29. The ranch records readings and places, never what connects to what
+
+**What is wrong.** Found 2026-10-02, planning M11. Every sensor has a location and a point on the map, and
+nothing anywhere says which well feeds which tank, which energizer powers which fence, which two pastures a
+gate joins, or what powers a remote site. No endpoint on the ranch exposes it, the upstream is frozen, and
+`docs/sweetwater-ranch.md` does not describe it either. The system knows the parts of the ranch and not the
+plumbing between them.
+
+**Why it matters.** Three ways, the first already measured:
+
+- **The judges ask for it.** At M10 the facts the local judge said it lacked included a tank's well source
+  and which pastures flank an open gate (`docs/journey.md`, the M10 check-in). Part of the
+  `insufficient_information` rate in #28, and so part of the remaining Opus bill, is this gap. Opus works
+  around it by inference from what is nearby ("the second tank on the same ground reads fine, so it is the
+  float"), which is a good guess and still a guess.
+- **The supervisor cannot find a root cause.** The fused shift report links incidents by time and place,
+  which is how the storm front fuses. It cannot say "well 2 is losing pressure and the three tanks it feeds
+  are dropping: one problem, not four," which is what a person on shift most needs to read.
+- **Nothing honest can be drawn between two things.** M11's control-room board shows stations at their
+  catalog coordinates and no connecting lines, by Scott's decision, because a line the data does not support
+  shows a newcomer something false. The board gains real lines only when this closes.
+
+It is a product gap more than a code gap. On a real ranch the manager knows what feeds what, so the
+relationships are onboarding data, part of "stand up the next ranch in a morning" (Multi-tenancy below),
+and nobody has decided where that data lives. The same shape elsewhere: knowing a patient's care team, not
+only the latest labs.
+
+**What it would take.** The ranch is fictional, so the relationships have to be written, not discovered:
+an extension to `docs/sweetwater-ranch.md`, the canon everything derives from, and that is the decision.
+Then, in the project's usual order: a small relationships file this repo owns and derives from the canon
+(well to tanks, energizer to fences, gate to pastures, site to power); code puts the relevant lines on each
+page, the way #12 put the weather on the feed page; and the same offline replay `logs/m10_measure.py feed`
+uses, $0, measures whether `insufficient_information` falls before anything else is built. A day for the
+first measurement once the canon says what connects to what. No database change.
+
+**Who decides.** Scott, for whether the canon gains relationships and what they are. Then a build session.
+
 ---
 
 ## Owed verifications
@@ -166,6 +203,9 @@ flag, measured with the same offline replay `logs/m10_measure.py feed` uses, $0.
 another attempt, a local model whose tool calls Ollama parses (`qwen3.5:9b` is pulled and untried) behind
 a knob for the investigator's model only, measured on the pages where the missing fact is actually on the
 wire (a neighbour's reading, a pasture's roster). Half a day each. No database change.
+
+Part of the rate is a gap no description can fix: the ranch does not record which well feeds a tank or
+which pastures a gate joins, and the judge asks for both (#29).
 
 **Who decides.** A build session for the first; Scott for whether the loop gets a second attempt.
 
