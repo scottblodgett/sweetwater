@@ -1,0 +1,6 @@
+# Every text file is stored and checked out with LF, on every machine, whatever core.autocrlf says.
+# Without this, an editor or a git on Windows wrote CRLF into 57 files and every one showed as modified with no real change (2026-10-02).
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
